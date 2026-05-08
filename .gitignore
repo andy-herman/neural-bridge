@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Neural Bridge — personal data, gitignored by default
+# Directories are kept via .gitkeep so the structure persists
+daily-logs/*
+!daily-logs/.gitkeep
+raw/*
+!raw/.gitkeep
+knowledge/agents/*/*
+!knowledge/agents/*/.gitkeep
+
+# Coding-agent local state
+.claude/local/
+*.session.json
