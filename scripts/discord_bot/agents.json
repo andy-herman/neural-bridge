@@ -1,0 +1,72 @@
+{
+  "_comment": "Neural Bridge Discord bot config. Client IDs are public; bot tokens live in macOS keychain under the named service. authorized_user_ids must contain ONLY Andy's Discord user ID for V1.",
+  "authorized_user_ids": [
+    "TODO_REPLACE_WITH_ANDYS_DISCORD_USER_ID"
+  ],
+  "guild_id": "TODO_REPLACE_WITH_NEURAL_BRIDGE_GUILD_ID",
+  "agents": [
+    {
+      "id": "senior-pm",
+      "client_id": "1502038606905344162",
+      "token_keychain_service": "neural-bridge-discord-bot-senior-pm",
+      "is_orchestrator": true,
+      "display_name": "Senior PM"
+    },
+    {
+      "id": "research",
+      "client_id": "1502047591393919169",
+      "token_keychain_service": "neural-bridge-discord-bot-research",
+      "is_orchestrator": false,
+      "display_name": "Research"
+    },
+    {
+      "id": "recruiter",
+      "client_id": "1502085161096052866",
+      "token_keychain_service": "neural-bridge-discord-bot-recruiter",
+      "is_orchestrator": false,
+      "display_name": "Recruiter"
+    },
+    {
+      "id": "automation-engineer",
+      "client_id": "1502039725530419410",
+      "token_keychain_service": "neural-bridge-discord-bot-automation-engineer",
+      "is_orchestrator": false,
+      "display_name": "Automation Engineer"
+    },
+    {
+      "id": "security-reviewer",
+      "client_id": "1502040587069821030",
+      "token_keychain_service": "neural-bridge-discord-bot-security-reviewer",
+      "is_orchestrator": false,
+      "display_name": "Security Reviewer"
+    },
+    {
+      "id": "docs-editor",
+      "client_id": "1502047454743232552",
+      "token_keychain_service": "neural-bridge-discord-bot-docs-editor",
+      "is_orchestrator": false,
+      "display_name": "Docs Editor"
+    },
+    {
+      "id": "teaching-prep",
+      "client_id": "1502599303376404632",
+      "token_keychain_service": "neural-bridge-discord-bot-teaching-prep",
+      "is_orchestrator": false,
+      "display_name": "Teaching Prep"
+    },
+    {
+      "id": "content",
+      "client_id": "1502600179872694352",
+      "token_keychain_service": "neural-bridge-discord-bot-content",
+      "is_orchestrator": false,
+      "display_name": "Content"
+    },
+    {
+      "id": "social",
+      "client_id": "1502600399436124270",
+      "token_keychain_service": "neural-bridge-discord-bot-social",
+      "is_orchestrator": false,
+      "display_name": "Social"
+    }
+  ]
+}
