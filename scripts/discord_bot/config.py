@@ -22,6 +22,7 @@ class AgentConfig:
 class BotConfig:
     authorized_user_ids: list[str]
     guild_id: str
+    default_repo: str
     agents: list[AgentConfig]
 
     def orchestrator(self) -> AgentConfig:
@@ -51,6 +52,10 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
     if not guild_id or guild_id.startswith("TODO"):
         raise ValueError("guild_id is unset (set this before running the daemon)")
 
+    default_repo = raw.get("default_repo", "")
+    if not isinstance(default_repo, str) or "/" not in default_repo:
+        raise ValueError("default_repo must be set as 'owner/name' (e.g., andy-herman/neural-bridge)")
+
     agents_raw = raw.get("agents", [])
     if not isinstance(agents_raw, list) or not agents_raw:
         raise ValueError("agents must be a non-empty list")
@@ -72,4 +77,9 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
     if orchestrator_count != 1:
         raise ValueError(f"exactly one agent must have is_orchestrator: true (found {orchestrator_count})")
 
-    return BotConfig(authorized_user_ids=authorized, guild_id=guild_id, agents=agents)
+    return BotConfig(
+        authorized_user_ids=authorized,
+        guild_id=guild_id,
+        default_repo=default_repo,
+        agents=agents,
+    )

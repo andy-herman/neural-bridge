@@ -6,15 +6,18 @@ Neural Bridge Discord bot daemon (Phase C of #28). Multi-bot: one `discord.Clien
 
 | File | Purpose |
 |---|---|
-| `agents.json` | Bot config: 9 agents, client IDs, keychain service names, authorized user IDs, guild ID |
+| `agents.json` | Bot config: 9 agents + auth user IDs + guild ID + default_repo |
 | `config.py` | Loads + validates `agents.json` |
 | `keychain.py` | Reads bot tokens from macOS keychain via `security find-generic-password` |
 | `auth.py` | Andy-only authorization gate. Every slash command checks before acting. |
-| `claude_invoke.py` | `claude -p` subprocess wrapper + prompt-injection sanitizer (`sanitize_untrusted_text`, `wrap_untrusted`) |
-| `handlers.py` | Slash command handlers. PR-H stubs; PR-I implements PM intake. |
-| `main.py` | Entry point. Spawns one `discord.Client` per agent, registers slash commands on the orchestrator (senior-pm), runs everything in one asyncio loop. |
+| `claude_invoke.py` | `claude -p` subprocess wrapper + prompt-injection sanitizer |
+| `pm_intake.py` | PM intake state machine. In-memory, keyed by Discord thread ID. |
+| `thread_map.py` | Persistent issue↔thread mapping (`~/Library/Application Support/neural-bridge/issue_threads.json`, atomic writes) |
+| `github_client.py` | gh CLI wrapper for `create_issue` (PR-K adds comment / labels / close) |
+| `handlers.py` | Slash command handlers + on_message thread listener for PM intake |
+| `main.py` | Multi-bot entry: one `Client` per agent, slash commands on senior-pm only, message_content intent enabled on senior-pm only, all in one asyncio loop |
 | `requirements.txt` | `discord.py>=2.3.0,<3.0` |
-| `test_discord_bot.py` | Unit tests for config / keychain / auth / sanitizer / subprocess wrapper |
+| `test_*.py` | Unit tests for config, keychain, auth, sanitizer, pm_intake, thread_map, github_client |
 
 ## Pre-flight checklist (before first run)
 
@@ -28,15 +31,23 @@ Neural Bridge Discord bot daemon (Phase C of #28). Multi-bot: one `discord.Clien
    done
    ```
 
-2. **`agents.json` has `authorized_user_ids` and `guild_id` filled in.** Both default to `TODO_*`; replace before running.
+2. **`agents.json` has `authorized_user_ids`, `guild_id`, and `default_repo` filled in.** Defaults are real values for Andy; if you fork this, replace.
 
-   - Andy's Discord user ID: enable Discord → Settings → Advanced → Developer Mode, then right-click your name in the user list → Copy User ID.
-   - Neural Bridge guild ID: same Developer Mode, right-click the server icon → Copy Server ID.
+   - Discord user ID: Discord → Settings → Advanced → Developer Mode, right-click your name → Copy User ID.
+   - Guild ID: Developer Mode, right-click server icon → Copy Server ID.
+   - default_repo: GitHub `owner/name` for PM-task issue creation.
 
-3. **`discord.py` installed.**
+3. **`discord.py` installed in a venv** (Homebrew Python blocks system-wide pip):
    ```bash
+   cd ~/Development/neural-bridge
+   python3 -m venv .venv
+   source .venv/bin/activate
    pip3 install -r scripts/discord_bot/requirements.txt
    ```
+
+4. **Senior-pm has Message Content Intent enabled.** Required so PM intake can read user replies in clarification threads. The other 8 bots do NOT need this.
+
+   Developer Portal → Applications → **Senior PM** (clientId 1502038606905344162) → Bot tab → Privileged Gateway Intents → toggle **Message Content Intent** on → Save.
 
 ## Running
 

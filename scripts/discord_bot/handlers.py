@@ -1,8 +1,8 @@
-"""Slash command handlers for senior-pm.
+"""Slash command handlers + thread message handler for senior-pm.
 
-PR-H scope: handlers are stubs that confirm receipt and announce that the
-real PM intake / triage / close logic ships in PR-I. The handlers DO enforce
-the auth gate and DO log every invocation to stderr for observability.
+PR-I-A wires real PM intake → GitHub issue creation. The other slash
+commands (/pm-summary, /squad-discuss, /triage, /close) remain stubs;
+they get real logic in PR-K.
 """
 
 from __future__ import annotations
@@ -13,14 +13,21 @@ import discord
 
 from .auth import REFUSAL_MESSAGE, is_authorized
 from .config import BotConfig
+from .github_client import create_issue
+from .pm_intake import PMIntake, SessionState
+from .thread_map import ThreadMap
 
 
 def log(msg: str) -> None:
     print(f"[discord_bot] {msg}", file=sys.stderr, flush=True)
 
 
+# Singleton state for the daemon process.
+INTAKE = PMIntake()
+THREAD_MAP = ThreadMap()
+
+
 async def _gate(interaction: discord.Interaction, config: BotConfig, command: str) -> bool:
-    """Auth gate. Returns True if the caller is authorized; replies with refusal otherwise."""
     user_id = str(interaction.user.id)
     if not is_authorized(user_id, config):
         log(f"REFUSED: /{command} from user_id={user_id} (not in authorized list)")
@@ -30,23 +37,134 @@ async def _gate(interaction: discord.Interaction, config: BotConfig, command: st
     return True
 
 
+def _truncate_thread_name(text: str, max_len: int = 90) -> str:
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return f"pm: {text}" if not text.lower().startswith("pm:") else text
+    return f"pm: {text[: max_len - 4]}…"
+
+
+# ---------- /pm-task: real handler ----------
+
 async def handle_pm_task(interaction: discord.Interaction, config: BotConfig, request: str) -> None:
     if not await _gate(interaction, config, "pm-task"):
         return
-    await interaction.response.send_message(
-        f"Received pm-task draft: `{request[:200]}`\n\n"
-        f"_PM intake state machine ships in PR-I. For now this is just a receipt — "
-        f"no GitHub issue created, no clarification thread opened._",
-        ephemeral=True,
+
+    request = request.strip()
+    if not request:
+        await interaction.response.send_message(
+            "Empty request — give me a sentence to work with.", ephemeral=True
+        )
+        return
+
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "create_thread"):
+        await interaction.response.send_message(
+            "Run /pm-task from a text channel that supports threads (e.g., #neural-bridge).",
+            ephemeral=True,
+        )
+        return
+
+    # Acknowledge first so we don't time out the interaction (3s budget).
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        thread = await channel.create_thread(  # type: ignore[union-attr]
+            name=_truncate_thread_name(request),
+            type=discord.ChannelType.public_thread,
+            auto_archive_duration=10080,  # 7 days
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I don't have permission to create threads in this channel. "
+            "Check the bot's role permissions.",
+            ephemeral=True,
+        )
+        return
+
+    session, question = INTAKE.start_session(
+        thread_id=str(thread.id),
+        user_id=str(interaction.user.id),
+        request=request,
+    )
+    log(f"INTAKE start: thread={thread.id} user={interaction.user.id} request={request[:60]!r}")
+
+    await thread.send(
+        f"**PM intake** for: _{request[:200]}_\n\n{question}\n\n"
+        f"_Reply in this thread. Say `cancel` to drop this task._"
+    )
+    await interaction.followup.send(
+        f"Started clarification thread: <#{thread.id}>", ephemeral=True
     )
 
+
+# ---------- on_message: thread replies that continue an intake session ----------
+
+async def on_thread_message(message: discord.Message, config: BotConfig) -> None:
+    """Called from senior-pm's on_message. Returns silently for non-intake messages."""
+    if message.author.bot:
+        return
+    if not isinstance(message.channel, discord.Thread):
+        return
+
+    thread_id = str(message.channel.id)
+    if not INTAKE.has(thread_id):
+        return  # not a PM intake thread
+
+    user_id = str(message.author.id)
+    if not is_authorized(user_id, config):
+        log(f"REFUSED thread reply: user_id={user_id} thread={thread_id}")
+        await message.channel.send(REFUSAL_MESSAGE)
+        return
+
+    session, response = INTAKE.continue_session(thread_id=thread_id, user_message=message.content)
+    log(f"INTAKE turn: thread={thread_id} state={session.state}")
+    await message.channel.send(response)
+
+    if session.state == SessionState.READY_TO_FILE and (response.startswith("Filing") or "Filing the issue" in response):
+        await _file_issue(message.channel, config, thread_id)
+
+
+async def _file_issue(thread: discord.Thread, config: BotConfig, thread_id: str) -> None:
+    thread_url = f"https://discord.com/channels/{config.guild_id}/{thread.parent_id}/{thread.id}"
+    title, body = INTAKE.render_issue_body(thread_id, thread_url=thread_url)
+
+    log(f"INTAKE filing issue: thread={thread_id} title={title!r}")
+    result = await create_issue(
+        repo=config.default_repo,
+        title=title,
+        body=body,
+        labels=["pm-managed", "needs-input"],
+    )
+
+    if not result.ok:
+        log(f"INTAKE file FAILED: thread={thread_id} error={result.error}")
+        await thread.send(
+            f"**Failed to file issue.** `{result.error}`\n\n"
+            f"Reply `go` to retry, or `cancel` to drop this task."
+        )
+        # Re-arm the session so 'go' triggers another file attempt
+        session = INTAKE.get(thread_id)
+        if session is not None:
+            session.state = SessionState.READY_TO_FILE
+        return
+
+    INTAKE.mark_filed(thread_id=thread_id, issue_number=result.issue_number)
+    THREAD_MAP.bind(result.issue_number, thread_id)
+    log(f"INTAKE filed: thread={thread_id} issue=#{result.issue_number}")
+    await thread.send(
+        f"**Filed as #{result.issue_number}.** {result.issue_url}\n\n"
+        f"This thread stays open for follow-ups. Senior-pm or a specialist will pick it up next."
+    )
+
+
+# ---------- other slash commands: still stubs (PR-K) ----------
 
 async def handle_pm_summary(interaction: discord.Interaction, config: BotConfig) -> None:
     if not await _gate(interaction, config, "pm-summary"):
         return
     await interaction.response.send_message(
-        "_Executive summary ships in PR-I once `gh` integration lands. "
-        "PR-H is foundation only._",
+        "_Executive summary ships in PR-K (hand-offs + state machine pass)._",
         ephemeral=True,
     )
 
@@ -55,8 +173,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
     if not await _gate(interaction, config, "squad-discuss"):
         return
     await interaction.response.send_message(
-        f"Received squad-discuss topic: `{topic[:200]}`\n\n"
-        f"_Multi-agent huddle ships in a later PR. PR-H foundation only._",
+        f"Received squad-discuss topic: `{topic[:200]}`\n\n_Multi-agent huddle ships in a later PR._",
         ephemeral=True,
     )
 
@@ -65,8 +182,7 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     if not await _gate(interaction, config, "triage"):
         return
     await interaction.response.send_message(
-        f"Received triage request for issue #{issue_number}.\n\n"
-        f"_senior-pm triage routing ships in PR-I once GitHub integration + per-issue threading land._",
+        f"Received triage request for issue #{issue_number}. _senior-pm triage ships in PR-K._",
         ephemeral=True,
     )
 
@@ -75,7 +191,6 @@ async def handle_close(interaction: discord.Interaction, config: BotConfig, issu
     if not await _gate(interaction, config, "close"):
         return
     await interaction.response.send_message(
-        f"Received close request for issue #{issue_number}.\n\n"
-        f"_Per-thread authorization-to-close ships in PR-I. PR-H foundation only — no GitHub action taken._",
+        f"Received close request for issue #{issue_number}. _Per-thread authorization-to-close ships in PR-K._",
         ephemeral=True,
     )
