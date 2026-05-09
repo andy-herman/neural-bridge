@@ -27,7 +27,10 @@ DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
 QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 FLUSH_SCRIPT = REPO_ROOT / "hooks" / "flush.py"
 
-KNOWN_AGENTS = {"research", "teaching-prep", "content", "senior-pm", "social"}
+KNOWN_AGENTS = {
+    "research", "teaching-prep", "content", "senior-pm", "social",
+    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
+}
 UNATTRIBUTED = "_unattributed"
 
 

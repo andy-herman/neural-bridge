@@ -10,7 +10,11 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 
-KNOWN_AGENTS = {"research", "teaching-prep", "content", "senior-pm", "social", "_unattributed"}
+KNOWN_AGENTS = {
+    "research", "teaching-prep", "content", "senior-pm", "social",
+    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
+    "_unattributed",
+}
 HOOK_EVENTS = {"SessionEnd", "PreCompact"}
 
 REQUIRED_FLUSH_KEYS = {"decisions", "findings", "open_questions", "proposed_concepts"}
