@@ -44,7 +44,18 @@ The issue body follows below, wrapped in `<github-issue>` tags.
 
 4. **Labels to add and remove.** Beyond the state label transition, what other labels should change? Common adds: `squad:<specialist>`, `epic:<area>`. Common removes: stale `needs-input` if you've answered the input.
 
-5. **Quality flags.** Anything missing from the issue (acceptance criteria, closure criteria, dependency links, source citations)? List concrete fixes.
+5. **Quality flags.** Anything missing from the issue that blocks a specialist from starting? List **act-on-able fixes**, not descriptions of the gap. Each entry is what Andy should DO, phrased as an imperative or a fillable item.
+
+   Bad: `"missing closure criteria"`
+   Good: `"Add closure criteria. Specify: scenario count, required citations, word-count range"`
+
+   Bad: `"no dependency links"`
+   Good: `"Link the publish-decision dependency with a 'blocks #N' or 'see #N' reference"`
+
+   Bad: `"missing vault path"`
+   Good: `"Add the vault path to the v0.1 source so the agent knows where to read from"`
+
+   Each entry should be terse (one line). Multiple gaps → multiple entries. If quality_flags is non-empty, **the recommended_state will be auto-downgraded to `needs-human`** so a specialist does not pick it up before the gaps are addressed.
 
 ## Output
 
