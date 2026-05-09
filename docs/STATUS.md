@@ -35,6 +35,6 @@
 - Three concrete weekly use cases the system must serve at v1 (currently inferred from agent roster)
 - Wiki ownership scope (shared / per-agent / hybrid — leaning hybrid)
 - Whether wiki contents are public-by-default or per-agent personal
-- Auto-memory interaction with `~/.claude/memory/`
+- ~~Auto-memory interaction with `~/.claude/memory/`~~ — resolved: [ADR-001](../decisions/ADR-001-auto-memory-interaction.md) (keep both; `compile.py` ingests the primitive)
 
 See the (private) Obsidian vault `Neural Bridge/Decisions/Decisions To Be Made.md` for the full list.
