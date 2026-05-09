@@ -1,7 +1,7 @@
 {
   "name": "neural-bridge-core",
-  "description": "V1 specialist agents for the Neural Bridge personal AI substrate. Five agents (research, teaching-prep, content, senior-pm, social) read across a shared markdown wiki and write narrowly into per-agent memory subdirectories.",
-  "version": "0.4.0",
+  "description": "V1 specialist agents for the Neural Bridge personal AI substrate. Nine agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor) read across a shared markdown wiki and write narrowly into per-agent memory subdirectories.",
+  "version": "0.5.0",
   "author": {
     "name": "Andy Herman",
     "url": "https://github.com/andy-herman"
