@@ -34,7 +34,9 @@ knowledge/agents/*/*
 .claude/local/
 *.session.json
 
-# compile.py outputs — run-time, not tracked
+# compile.py / lint.py outputs — run-time, not tracked
 docs/compile/*
 !docs/compile/.gitkeep
+docs/lint/*
+!docs/lint/.gitkeep
 scripts/.compile_state.json
