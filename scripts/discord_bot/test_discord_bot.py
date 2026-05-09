@@ -216,6 +216,36 @@ class TestCallClaude(unittest.TestCase):
         self.assertEqual(stdout, "answer")
         self.assertEqual(err, "")
 
+    def test_allowed_tools_passed_through(self):
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync(
+                "prompt", "model", 30, allowed_tools="WebSearch,WebFetch,Read",
+            )
+
+        args = captured["args"]
+        self.assertIn("--allowedTools", args)
+        idx = args.index("--allowedTools")
+        self.assertEqual(args[idx + 1], "WebSearch,WebFetch,Read")
+
+    def test_no_allowed_tools_means_no_flag(self):
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync("prompt", "model", 30)
+
+        args = captured["args"]
+        self.assertNotIn("--allowedTools", args)
+
     def test_subprocess_env_includes_nb_no_discord(self):
         # The bot's claude -p subprocesses must set NB_NO_DISCORD=1 so the
         # SessionEnd hook's flush.py doesn't double-post to Discord.

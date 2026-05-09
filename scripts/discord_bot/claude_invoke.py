@@ -71,11 +71,19 @@ def call_claude_sync(
     prompt: str,
     model: str = DEFAULT_MODEL,
     timeout: int = DEFAULT_TIMEOUT,
+    allowed_tools: str | None = None,
 ) -> tuple[bool, str, str]:
-    """Synchronous claude -p invocation. Returns (ok, stdout, error_reason)."""
+    """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
+
+    If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
+    enable headless tool use. Default is no tools (text-only generation).
+    """
+    args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+    if allowed_tools:
+        args.extend(["--allowedTools", allowed_tools])
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            args,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -96,7 +104,11 @@ async def call_claude(
     prompt: str,
     model: str = DEFAULT_MODEL,
     timeout: int = DEFAULT_TIMEOUT,
+    allowed_tools: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, call_claude_sync, prompt, model, timeout)
+    return await loop.run_in_executor(
+        None,
+        lambda: call_claude_sync(prompt, model, timeout, allowed_tools),
+    )
