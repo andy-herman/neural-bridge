@@ -1,13 +1,14 @@
 """Neural Bridge Discord bot daemon — multi-bot entry point.
 
 Loads config + tokens, spawns one discord.Client per agent, registers slash
-commands on the orchestrator (senior-pm) only, and runs everything in one
-asyncio event loop.
+commands on the orchestrator (senior-pm) only, wires the on_message thread
+listener for the intake state machine, and runs everything in one asyncio
+event loop.
 
 Usage:
 
     cd ~/Development/neural-bridge
-    python3 -m scripts.discord_bot.main
+    .venv/bin/python -m scripts.discord_bot.main
 
 Or via launchd (PR-J).
 
@@ -16,6 +17,10 @@ Pre-req:
   agent in `agents.json`
 - `agents.json` has authorized_user_ids and guild_id filled in (no TODO_*)
 - `discord.py>=2.3.0` installed (see requirements.txt)
+- **Senior-pm** has Message Content Intent enabled in the Developer Portal
+  (Application 1502038606905344162 → Bot tab → Privileged Gateway Intents).
+  The other 8 bots do NOT need this — only the orchestrator reads
+  thread messages for the PM intake flow.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from .handlers import (
     handle_squad_discuss,
     handle_triage,
     log,
+    on_thread_message,
 )
 from .keychain import get_token
 
@@ -41,17 +47,18 @@ from .keychain import get_token
 class AgentClient(discord.Client):
     """One discord.Client per Neural Bridge agent.
 
-    The orchestrator client (senior-pm) registers slash commands; speaker
-    clients have no command tree (their job is just to post when senior-pm
-    hands off to them — wired in PR-I).
+    The orchestrator client (senior-pm) registers slash commands AND listens
+    to thread messages for PM intake. Speaker clients have no command tree
+    and ignore messages — their job is to post when senior-pm hands off.
     """
 
     def __init__(self, agent: AgentConfig, config: BotConfig):
-        # PR-H foundation only needs default intents (slash commands work via
-        # interaction.data, not message content). PR-I's PM intake will set
-        # intents.message_content = True AND require Andy to enable
-        # "Message Content Intent" on each bot's Developer Portal page.
         intents = discord.Intents.default()
+        if agent.is_orchestrator:
+            # Senior-pm needs message_content to read user replies in PM intake
+            # threads. Andy must enable Message Content Intent on this bot's
+            # Developer Portal page (Application 1502038606905344162 → Bot tab).
+            intents.message_content = True
         super().__init__(intents=intents)
         self.agent = agent
         self.bot_config = config
@@ -98,6 +105,15 @@ class AgentClient(discord.Client):
     async def on_ready(self) -> None:
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
 
+    async def on_message(self, message: discord.Message) -> None:
+        # Only the orchestrator processes thread messages for PM intake.
+        if not self.agent.is_orchestrator:
+            return
+        try:
+            await on_thread_message(message, self.bot_config)
+        except Exception as exc:
+            log(f"on_message error: {type(exc).__name__}: {exc}")
+
 
 def _resolve_token(agent: AgentConfig) -> str:
     token = get_token(agent.token_keychain_service)
@@ -112,7 +128,7 @@ def _resolve_token(agent: AgentConfig) -> str:
 async def run() -> None:
     config = load_config()
     log(f"loaded config: {len(config.agents)} agents, guild={config.guild_id}, "
-        f"authorized_users={len(config.authorized_user_ids)}")
+        f"authorized_users={len(config.authorized_user_ids)}, default_repo={config.default_repo}")
 
     clients_and_tokens: list[tuple[AgentClient, str]] = []
     for agent in config.agents:

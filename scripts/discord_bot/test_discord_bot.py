@@ -26,6 +26,7 @@ from scripts.discord_bot import auth, claude_invoke, config as config_mod, keych
 VALID_CONFIG = {
     "authorized_user_ids": ["1234567890"],
     "guild_id": "9876543210",
+    "default_repo": "andy-herman/neural-bridge",
     "agents": [
         {
             "id": "senior-pm",
@@ -140,6 +141,7 @@ class TestAuth(unittest.TestCase):
         return config_mod.BotConfig(
             authorized_user_ids=ids,
             guild_id="g",
+            default_repo="andy-herman/neural-bridge",
             agents=[
                 config_mod.AgentConfig(
                     id="senior-pm", client_id="x", token_keychain_service="y",
