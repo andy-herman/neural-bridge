@@ -33,3 +33,8 @@ knowledge/agents/*/*
 # Coding-agent local state
 .claude/local/
 *.session.json
+
+# compile.py outputs — run-time, not tracked
+docs/compile/*
+!docs/compile/.gitkeep
+scripts/.compile_state.json
