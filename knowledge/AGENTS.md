@@ -7,11 +7,11 @@ This wiki is the cross-agent memory layer of Neural Bridge. It is **maintained b
 | File / dir | Role |
 |---|---|
 | `index.md` | Content-oriented catalog. Always loaded into agent sessions on start. |
-| `log.md` | Chronological append-only record. New entries prefixed with `## YYYY-MM-DD`. |
+| `log.md` | Chronological append-only record (e.g., compile-pass entries). Read on demand, not always loaded. |
 | `concepts/` | Cross-agent concept articles. One file per concept. Linked extensively. |
 | `connections/` | Explicit cross-references between concepts (high-degree backlink hubs). |
 | `agents/<name>/` | Per-agent memory subdirectory. Raw notes, session findings. |
-| `quarantine/` | Articles that failed lint and weren't recovered. (Created on demand.) |
+| `quarantine/` | Articles that failed the filing gate. Human-reviewed, not auto-promoted. |
 
 ## Article conventions
 
@@ -33,8 +33,21 @@ This wiki is the cross-agent memory layer of Neural Bridge. It is **maintained b
 ## For agents writing to the wiki
 
 1. **Per-agent notes** go in `agents/<your-role>/`. Free-form. You own your subdirectory.
-2. **Concept articles** live in `concepts/`. Don't write them directly — propose them in your daily log and let the compile pass promote them.
-3. **Index updates** happen automatically during compile. Don't edit `index.md` by hand unless you're patching a hand error.
+2. **Per-agent subdirectory convention.**
+   - `research/`, `teaching-prep/`, `senior-pm/` — flat. Files at `agents/<role>/YYYY-MM-DD-<slug>.md`.
+   - `content/` — uses a `drafts/` subdirectory: `agents/content/drafts/YYYY-MM-DD-<slug>.md`. Drafts are categorically different from research notes; the subfolder makes this explicit.
+   - If a future agent's outputs split into categories (e.g., teaching-prep adding `insights/` later), document the convention here first.
+3. **Concept articles** live in `concepts/`. Don't write them directly. Surface concept proposals in session content; `hooks/flush.py` extracts them into `daily-logs/<role>/`, and `scripts/compile.py` runs the filing gate before any concept article is created.
+4. **Index updates** happen during compile. Don't edit `index.md` by hand unless you're patching a hand error.
+
+## Routing-description style guide (for agent frontmatter)
+
+The `description` field in each agent's frontmatter is the routing signal. Write it to make the parent's choice obvious.
+
+- **Name what the agent does, not what it isn't.** "Researcher for technical deep-dives" beats "any question that isn't teaching or content."
+- **Include one disambiguating phrase against sibling agents.** Especially when the domain overlaps. "Not for teaching materials (use teaching-prep)" is clearer than implying it.
+- **Be specific about scope.** "INFO 310 only" beats "teaching prep" when the user might teach other courses later.
+- **Avoid descriptions that route by exclusion.** Forces the parent to evaluate two negatives. Define positively.
 
 ## Sources
 
