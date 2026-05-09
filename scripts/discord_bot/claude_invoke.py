@@ -13,11 +13,26 @@ close the tag and inject after it.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_TIMEOUT = 300
+
+
+def _subprocess_env() -> dict[str, str]:
+    """Environment for bot-spawned `claude -p` subprocesses.
+
+    Sets NB_NO_DISCORD=1 so that the SessionEnd hook's flush.py for these
+    subprocesses doesn't double-post to Discord. The original action (the
+    /triage comment, /pm-summary reply, etc.) already went to Discord; the
+    flush summary of that same subprocess would just echo it.
+
+    The flush.py daily-log write to disk still happens — only the outbound
+    Discord push is suppressed. Audit trail preserved.
+    """
+    return {**os.environ, "NB_NO_DISCORD": "1"}
 
 
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -65,6 +80,7 @@ def call_claude_sync(
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            env=_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"

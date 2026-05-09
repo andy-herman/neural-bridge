@@ -216,6 +216,25 @@ class TestCallClaude(unittest.TestCase):
         self.assertEqual(stdout, "answer")
         self.assertEqual(err, "")
 
+    def test_subprocess_env_includes_nb_no_discord(self):
+        # The bot's claude -p subprocesses must set NB_NO_DISCORD=1 so the
+        # SessionEnd hook's flush.py doesn't double-post to Discord.
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync("prompt", "model", 30)
+
+        env = captured["env"]
+        self.assertIsNotNone(env, "subprocess must receive an explicit env dict")
+        self.assertEqual(env.get("NB_NO_DISCORD"), "1")
+        # Sanity: the env should also pass through general environment (e.g., PATH)
+        # so the bot's claude binary still resolves.
+        self.assertIn("PATH", env)
+
     def test_nonzero_exit(self):
         with patch("scripts.discord_bot.claude_invoke.subprocess.run",
                    return_value=_FakeResult(1, "", "nope")):
