@@ -7,7 +7,8 @@
 
 ### What ships in V1
 
-- 3 agent definitions in `.claude/agents/` (research, teaching-prep, content)
+- 3 agent definitions in `plugins/neural-bridge-core/agents/` (research, teaching-prep, content)
+- This repo is a Claude Code plugin marketplace (`.claude-plugin/marketplace.json`); the core plugin is installable via `/plugin install neural-bridge-core@neural-bridge`
 - Empty wiki skeleton in `knowledge/`
 - Empty `hooks/` and `scripts/` directories (placeholders for V2)
 - Project schema in [AGENTS.md](../AGENTS.md)

@@ -1,0 +1,13 @@
+{
+  "name": "neural-bridge-core",
+  "description": "V1 specialist agents for the Neural Bridge personal AI substrate. Three agents (research, teaching-prep, content) read across a shared markdown wiki and write narrowly into per-agent memory subdirectories.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Andy Herman",
+    "url": "https://github.com/andy-herman"
+  },
+  "homepage": "https://neural-bridge.dev",
+  "repository": "https://github.com/andy-herman/neural-bridge",
+  "license": "MIT",
+  "keywords": ["neural-bridge", "personal-ai", "build-in-public", "knowledge-management"]
+}
