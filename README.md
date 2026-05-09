@@ -62,22 +62,26 @@ V1 ships layers 1, 2, and the wiki side of 4. The rest lands in V2/V3.
 ## Repo map
 
 ```
-.claude/agents/        subagent definitions
-.claude/settings.json  hooks + permissions
-knowledge/             markdown wiki (LLM-maintained)
-  AGENTS.md            wiki schema doc
-  index.md             always-loaded starting point
-  log.md               chronological append-only record
-  concepts/            cross-agent concept articles
-  connections/         explicit cross-references
-  agents/              per-agent memory subdirectories
-daily-logs/            per-agent session summaries (gitignored)
-raw/                   external ingest landing (gitignored)
-hooks/                 hook scripts (V2)
-scripts/               compile / flush / lint / query (V2)
-docs/                  build journal, design docs
-AGENTS.md              project schema for any AI agent in the repo
-ATTRIBUTION.md         credits and prior art
+.claude-plugin/marketplace.json    declares this repo as a plugin marketplace
+plugins/neural-bridge-core/        the V1 core plugin (3 specialist agents)
+  .claude-plugin/plugin.json       plugin manifest
+  agents/                          subagent definitions (research, teaching-prep, content)
+.claude/settings.json              project-local hooks + permissions
+knowledge/                         markdown wiki (LLM-maintained)
+  AGENTS.md                        wiki schema doc
+  index.md                         always-loaded starting point
+  log.md                           chronological append-only record
+  concepts/                        cross-agent concept articles
+  connections/                     explicit cross-references
+  agents/                          per-agent memory subdirectories
+daily-logs/                        per-agent session summaries (gitignored)
+raw/                               external ingest landing (gitignored)
+hooks/                             hook scripts (V2)
+scripts/                           compile / flush / lint / query (V2)
+decisions/                         architecture decision records (ADRs)
+docs/                              build status, build plans, audits
+AGENTS.md                          project schema for any AI agent in the repo
+ATTRIBUTION.md                     credits and prior art
 ```
 
 ## View it in Obsidian
@@ -93,14 +97,21 @@ Open it as a *separate vault* from any personal vault you already keep — Neura
 
 ## Setup
 
-> Full setup docs land after V1 review. V1 is a scaffold — agents don't yet do useful work; V2 wires up the hooks and compile pipeline. Watch [docs/STATUS.md](docs/STATUS.md) for build progress.
+> V1 is a scaffold — agents don't yet do useful work; V2 wires up the hooks and compile pipeline. Watch [docs/STATUS.md](docs/STATUS.md) for build progress.
 
-The short version once V2 ships:
+This repo ships as a Claude Code plugin marketplace. To use it:
 
-1. Clone this repo
-2. Install [Claude Code](https://docs.claude.com/en/docs/claude-code)
-3. (Optional) Open the repo folder in Obsidian as a vault
-4. Run `claude` from the repo root — the three agents auto-load via `.claude/agents/`
+1. Clone this repo (or skip cloning and just install the marketplace from GitHub).
+2. Install [Claude Code](https://docs.claude.com/en/docs/claude-code).
+3. Add the marketplace and install the core plugin:
+   ```
+   /plugin marketplace add andy-herman/neural-bridge
+   /plugin install neural-bridge-core@neural-bridge
+   ```
+4. (Optional) Open the cloned repo folder in Obsidian as a vault for graph view + backlinks.
+5. Run `claude` from anywhere — the three agents are now available wherever you invoke Claude Code.
+
+Why a plugin marketplace? It keeps Neural Bridge composable: future domain-specific plugins (per-course teaching, per-platform content) can ship alongside `neural-bridge-core` without a big refactor. See [docs/STATUS.md](docs/STATUS.md) for the V2 roadmap.
 
 ## License
 

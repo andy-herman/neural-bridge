@@ -14,8 +14,8 @@ Six layers, built bottom-up:
 
 | Layer | V1 status | Lives in |
 |---|---|---|
-| 1. Agents | ✅ 3 active | `.claude/agents/*.md` |
-| 2. Skills | inherits from user-level skills | (user-level) |
+| 1. Agents | ✅ 3 active | `plugins/neural-bridge-core/agents/*.md` |
+| 2. Skills | inherits from user-level skills | (user-level; plugin-level skills land in V2) |
 | 3. Transport | configured externally | (out of repo) |
 | 4. Shared state | ✅ wiki skeleton, ⏳ daily logs, ⏳ hive.db | `knowledge/`, `daily-logs/` |
 | 5. Orchestration | native subagent dispatch | (the agent CLI) |
@@ -24,21 +24,28 @@ Six layers, built bottom-up:
 ## Directory layout
 
 ```
-.claude/             Project-level coding-agent config
-  agents/            Subagent definitions
-  settings.json      Hooks, permissions
-knowledge/           The wiki — LLM-maintained, never hand-edited
-  AGENTS.md          Wiki-specific schema
-  index.md           Starting point for any query
-  log.md             Append-only chronological record
-  concepts/          Cross-agent concept articles
-  connections/       Cross-references between concepts
-  agents/            Per-agent memory subdirectories
-raw/                 External ingest (Web Clipper, papers) — gitignored
-daily-logs/          Per-agent session summaries — gitignored
-hooks/               Hook scripts (V2)
-scripts/             Utility scripts: compile, flush, lint, query (V2)
-docs/                Build-in-public blog drafts, design docs
+.claude-plugin/        Marketplace manifest (this repo declares itself a Claude Code plugin marketplace)
+  marketplace.json     Lists the plugins this repo ships
+plugins/               One subdirectory per plugin
+  neural-bridge-core/  V1 core plugin (3 specialist agents)
+    .claude-plugin/
+      plugin.json      Plugin manifest
+    agents/            Subagent definitions
+.claude/               Project-local coding-agent config (NOT plugin-shipped)
+  settings.json        Hooks, permissions for sessions running in this repo
+knowledge/             The wiki - LLM-maintained, never hand-edited
+  AGENTS.md            Wiki-specific schema
+  index.md             Starting point for any query
+  log.md               Append-only chronological record
+  concepts/            Cross-agent concept articles
+  connections/         Cross-references between concepts
+  agents/              Per-agent memory subdirectories
+raw/                   External ingest (Web Clipper, papers) - gitignored
+daily-logs/            Per-agent session summaries - gitignored
+hooks/                 Hook scripts (V2)
+scripts/               Utility scripts: compile, flush, lint, query (V2)
+decisions/             Architecture decision records (ADRs)
+docs/                  Build status, build plans, audits
 ```
 
 ## Conventions
