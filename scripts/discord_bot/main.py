@@ -31,6 +31,7 @@ import sys
 import discord
 from discord import app_commands
 
+from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .config import AgentConfig, BotConfig, load_config
 from .handlers import (
     handle_close,
@@ -137,11 +138,14 @@ async def run() -> None:
         except RuntimeError as exc:
             log(f"SKIP {agent.id}: {exc}")
             continue
-        clients_and_tokens.append((AgentClient(agent, config), token))
+        client = AgentClient(agent, config)
+        CLIENT_REGISTRY.register(agent.id, client)
+        clients_and_tokens.append((client, token))
 
     if not clients_and_tokens:
         log("ERROR: no agents have keychain tokens. Cannot start daemon.")
         return
+    log(f"client registry: {len(CLIENT_REGISTRY)} agents registered")
 
     log(f"starting {len(clients_and_tokens)} agents...")
     await asyncio.gather(
