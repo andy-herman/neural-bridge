@@ -35,7 +35,7 @@ This wiki is the cross-agent memory layer of Neural Bridge. It is **maintained b
 1. **Per-agent notes** go in `agents/<your-role>/`. Free-form. You own your subdirectory.
 2. **Per-agent subdirectory convention.**
    - `research/`, `teaching-prep/`, `senior-pm/` — flat. Files at `agents/<role>/YYYY-MM-DD-<slug>.md`.
-   - `content/` — uses a `drafts/` subdirectory: `agents/content/drafts/YYYY-MM-DD-<slug>.md`. Drafts are categorically different from research notes; the subfolder makes this explicit.
+   - `content/`, `social/` — use a `drafts/` subdirectory: `agents/<role>/drafts/YYYY-MM-DD-<slug>.md`. Drafts are categorically different from research notes; the subfolder makes this explicit.
    - If a future agent's outputs split into categories (e.g., teaching-prep adding `insights/` later), document the convention here first.
 3. **Concept articles** live in `concepts/`. Don't write them directly. Surface concept proposals in session content; `hooks/flush.py` extracts them into `daily-logs/<role>/`, and `scripts/compile.py` runs the filing gate before any concept article is created.
 4. **Index updates** happen during compile. Don't edit `index.md` by hand unless you're patching a hand error.
