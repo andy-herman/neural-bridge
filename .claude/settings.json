@@ -4,7 +4,29 @@
   },
   "hooks": {
     "SessionStart": [],
-    "SessionEnd": [],
-    "PreCompact": []
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/session_end.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/session_end.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
   }
 }
