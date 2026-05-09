@@ -58,7 +58,45 @@ def validate_triage_output(data: dict) -> tuple[bool, str | None]:
         return False, "reason must be a non-empty string"
     if not isinstance(data["quality_flags"], list):
         return False, "quality_flags must be a list"
+
+    # auto_fixes is optional (defaulting to []) for backward compatibility,
+    # but if present must be a list of well-formed objects.
+    auto_fixes = data.get("auto_fixes", [])
+    if not isinstance(auto_fixes, list):
+        return False, "auto_fixes must be a list when present"
+    for i, fix in enumerate(auto_fixes):
+        if not isinstance(fix, dict):
+            return False, f"auto_fixes[{i}] must be an object"
+        for key in ("description", "section_header", "content"):
+            if key not in fix:
+                return False, f"auto_fixes[{i}] missing key: {key}"
+            if not isinstance(fix[key], str) or not fix[key].strip():
+                return False, f"auto_fixes[{i}].{key} must be a non-empty string"
+
     return True, None
+
+
+def apply_auto_fixes(body: str, auto_fixes: list[dict]) -> tuple[str, list[str]]:
+    """Apply each auto_fix to the issue body. Idempotent: a fix whose
+    section header already appears in the body is skipped. Returns
+    (new_body, list_of_applied_descriptions)."""
+    new_body = body or ""
+    applied: list[str] = []
+    for fix in auto_fixes:
+        header = fix["section_header"].strip()
+        # Idempotency: don't re-add a section that already exists. Look for
+        # `## <header>` at the start of a line (any case) anywhere in body.
+        header_pattern = f"\n## {header}\n"
+        if header_pattern.lower() in ("\n" + new_body + "\n").lower():
+            continue
+        # Also skip if the body literally starts with the header line (no
+        # preceding newline).
+        if new_body.lower().startswith(f"## {header}\n".lower()):
+            continue
+        section = f"\n\n## {header}\n\n{fix['content'].strip()}\n"
+        new_body = new_body.rstrip() + section
+        applied.append(fix["description"])
+    return new_body, applied
 
 
 def fetch_issue_sync(repo: str, issue_number: int, timeout: int = 30) -> tuple[bool, dict | None, str | None]:

@@ -154,3 +154,51 @@ async def close_issue(
         None,
         lambda: close_issue_sync(repo=repo, issue_number=issue_number, comment=comment, timeout=timeout),
     )
+
+
+@dataclass
+class EditIssueBodyResult:
+    ok: bool
+    error: str | None
+
+
+def edit_issue_body_sync(
+    *,
+    repo: str,
+    issue_number: int,
+    new_body: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> EditIssueBodyResult:
+    """Replace the issue body via gh issue edit --body-file (uses stdin to
+    avoid argv length issues for long bodies)."""
+    args = ["gh", "issue", "edit", str(issue_number), "--repo", repo, "--body-file", "-"]
+    try:
+        proc = subprocess.run(
+            args,
+            input=new_body,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return EditIssueBodyResult(ok=False, error="timeout")
+    except FileNotFoundError:
+        return EditIssueBodyResult(ok=False, error="gh_cli_not_found")
+    if proc.returncode != 0:
+        snippet = (proc.stderr or "")[:300].replace("\n", " ").strip()
+        return EditIssueBodyResult(ok=False, error=f"gh_exit_{proc.returncode}: {snippet}")
+    return EditIssueBodyResult(ok=True, error=None)
+
+
+async def edit_issue_body(
+    *,
+    repo: str,
+    issue_number: int,
+    new_body: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> EditIssueBodyResult:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: edit_issue_body_sync(repo=repo, issue_number=issue_number, new_body=new_body, timeout=timeout),
+    )

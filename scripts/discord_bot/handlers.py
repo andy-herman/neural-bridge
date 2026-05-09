@@ -17,7 +17,7 @@ from .auth import REFUSAL_MESSAGE, is_authorized
 from .claude_invoke import call_claude
 from .client_registry import post_as_agent
 from .config import BotConfig
-from .github_client import close_issue, create_issue
+from .github_client import close_issue, create_issue, edit_issue_body
 from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
@@ -39,6 +39,7 @@ from .summary import (
 )
 from .triage import (
     TRIAGE_PROMPT_PATH,
+    apply_auto_fixes,
     build_triage_prompt,
     fetch_issue,
     strip_code_fences,
@@ -407,6 +408,29 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         log(f"TRIAGE schema FAILED: issue=#{issue_number} error={schema_err}")
         return
 
+    # Auto-fixes: apply any high-confidence patches to the issue body BEFORE
+    # the quality-flag gate, so the gate only fires for things actually
+    # needing Andy's input.
+    auto_fixes = data.get("auto_fixes", [])
+    auto_fix_applied: list[str] = []
+    if auto_fixes:
+        original_body = issue.get("body") or ""
+        new_body, auto_fix_applied = apply_auto_fixes(original_body, auto_fixes)
+        if auto_fix_applied:
+            edit_result = await edit_issue_body(
+                repo=config.default_repo,
+                issue_number=issue_number,
+                new_body=new_body,
+            )
+            if edit_result.ok:
+                log(f"TRIAGE auto-fixes applied: issue=#{issue_number} count={len(auto_fix_applied)}")
+            else:
+                log(f"TRIAGE auto-fix edit FAILED (non-fatal): issue=#{issue_number} error={edit_result.error}")
+                # Treat as not-applied so we don't claim success in the comment.
+                auto_fix_applied = []
+        else:
+            log(f"TRIAGE auto-fixes idempotent: issue=#{issue_number} (sections already present)")
+
     # Quality-flag gate: if the triage surfaced any quality flags, the issue
     # has gaps that block a specialist from starting. Override the state to
     # needs-human regardless of what the model recommended. Andy unblocks by
@@ -439,6 +463,14 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
 
     # Post a triage report comment on the issue. Quality flags render as a
     # task list so Andy can check items off as he edits the issue body.
+    auto_fixes_md = ""
+    if auto_fix_applied:
+        auto_fixes_md = (
+            "\n\n**Auto-fixes applied to issue body:**\n"
+            + "\n".join(f"- ✅ {desc}" for desc in auto_fix_applied)
+            + "\n\n_If any of these are wrong, edit the issue body to correct them._"
+        )
+
     quality_flags_md = ""
     if data["quality_flags"]:
         quality_flags_md = (
@@ -460,6 +492,7 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
            if effective_state != data['recommended_state'] else "")
         + f"\n- Labels applied: `{', '.join(applied) if applied else 'none'}`\n\n"
         f"**Reason.** {data['reason']}"
+        f"{auto_fixes_md}"
         f"{quality_flags_md}"
         f"{failures_md}"
     )
@@ -521,11 +554,14 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     )
     if failures:
         summary += f"\n\n_(Some label changes failed; see issue comment for details.)_"
+    if auto_fix_applied:
+        fixes_list = "\n".join(f"  - ✅ {desc}" for desc in auto_fix_applied)
+        summary += f"\n\n**Auto-fixes applied to the issue body:**\n{fixes_list}"
     if data["quality_flags"]:
         flag_list = "\n".join(f"  - [ ] {f}" for f in data["quality_flags"])
         summary += f"\n\n**Address these to unblock:**\n{flag_list}\n\nRe-run `/triage {issue_number}` after editing the issue body."
     await interaction.followup.send(summary, ephemeral=True)
-    log(f"TRIAGE done: issue=#{issue_number} specialist={data['recommended_specialist']} state={effective_state}")
+    log(f"TRIAGE done: issue=#{issue_number} specialist={data['recommended_specialist']} state={effective_state} auto_fixes={len(auto_fix_applied)}")
 
 
 async def handle_close(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
