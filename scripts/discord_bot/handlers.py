@@ -22,6 +22,12 @@ from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
+from .summary import (
+    PROMPT_PATH as SUMMARY_PROMPT_PATH,
+    build_summary_prompt,
+    list_open_issues,
+    truncate_for_discord,
+)
 from .triage import (
     TRIAGE_PROMPT_PATH,
     build_triage_prompt,
@@ -196,10 +202,43 @@ async def _file_issue(thread: discord.Thread, config: BotConfig, thread_id: str)
 async def handle_pm_summary(interaction: discord.Interaction, config: BotConfig) -> None:
     if not await _gate(interaction, config, "pm-summary"):
         return
-    await interaction.response.send_message(
-        "_Executive summary ships in PR-K (hand-offs + state machine pass)._",
-        ephemeral=True,
-    )
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not SUMMARY_PROMPT_PATH.exists():
+        await interaction.followup.send(
+            f"Internal error: pm_summary prompt missing at {SUMMARY_PROMPT_PATH}", ephemeral=True
+        )
+        return
+
+    log(f"PM_SUMMARY start: repo={config.default_repo}")
+
+    ok, issues, err = await list_open_issues(config.default_repo)
+    if not ok:
+        await interaction.followup.send(f"Failed to list open issues: `{err}`", ephemeral=True)
+        log(f"PM_SUMMARY fetch FAILED: error={err}")
+        return
+
+    if not issues:
+        await interaction.followup.send(
+            f"**Open: 0** · No open issues on `{config.default_repo}`. Board is clean.",
+            ephemeral=True,
+        )
+        log("PM_SUMMARY: no open issues")
+        return
+
+    template = SUMMARY_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt = build_summary_prompt(template, repo=config.default_repo, issues=issues)
+
+    ok, stdout, err = await call_claude(prompt)
+    if not ok:
+        await interaction.followup.send(f"claude -p failed for pm-summary: `{err}`", ephemeral=True)
+        log(f"PM_SUMMARY claude FAILED: error={err}")
+        return
+
+    summary_text = truncate_for_discord(stdout.strip())
+    await interaction.followup.send(summary_text, ephemeral=True)
+    log(f"PM_SUMMARY done: open={len(issues)} chars={len(summary_text)}")
 
 
 async def handle_squad_discuss(interaction: discord.Interaction, config: BotConfig, topic: str) -> None:
