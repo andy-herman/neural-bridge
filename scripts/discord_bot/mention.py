@@ -22,6 +22,31 @@ MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARS_PER_MESSAGE = 500
 
 
+# Per-agent allowed_tools when responding to a Discord @-mention.
+# Read-only tools only for PR-P-1.5: agents can search the web, fetch URLs,
+# read files, glob, and grep. They cannot Write, Edit, or run Bash in this
+# mode — autonomous file/issue creation comes in PR-P-2 with a tighter
+# allowlist scoped per agent.
+MENTION_ALLOWED_TOOLS: dict[str, str] = {
+    "research":            "WebSearch,WebFetch,Read,Glob,Grep",
+    "teaching-prep":       "WebSearch,WebFetch,Read,Glob,Grep",
+    "content":             "WebSearch,WebFetch,Read,Glob,Grep",
+    "social":              "WebSearch,WebFetch,Read,Glob,Grep",
+    "recruiter":           "WebSearch,WebFetch,Read,Glob,Grep",
+    "automation-engineer": "Read,Glob,Grep",  # no web; deals with local infra
+    "security-reviewer":   "WebSearch,WebFetch,Read,Glob,Grep",
+    "docs-editor":         "WebSearch,WebFetch,Read,Glob,Grep",
+    "senior-pm":           "WebSearch,WebFetch,Read,Glob,Grep",
+}
+
+
+def allowed_tools_for(agent_id: str) -> str | None:
+    """Return the comma-separated --allowedTools value for this agent's
+    Discord mentions, or None if the agent has no tool access in mention
+    mode."""
+    return MENTION_ALLOWED_TOOLS.get(agent_id)
+
+
 def load_agent_definition(agent_id: str, agents_dir: Path = AGENTS_DIR) -> str:
     """Read plugins/neural-bridge-core/agents/<agent-id>.md and strip the
     YAML frontmatter. Returns the body — the agent's role definition,

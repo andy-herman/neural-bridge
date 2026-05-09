@@ -24,6 +24,7 @@ from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
 from .mention import (
     MENTION_PROMPT_PATH,
+    allowed_tools_for,
     build_mention_prompt,
     is_mention_for_self,
     load_agent_definition,
@@ -190,7 +191,9 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             message_content=message.content,
         )
 
-        ok, stdout, err = await call_claude(prompt)
+        tools = allowed_tools_for(agent_id)
+        log(f"MENTION calling claude: agent={agent_id} tools={tools or 'none'}")
+        ok, stdout, err = await call_claude(prompt, allowed_tools=tools)
 
     if not ok:
         log(f"MENTION claude FAILED: agent={agent_id} error={err}")

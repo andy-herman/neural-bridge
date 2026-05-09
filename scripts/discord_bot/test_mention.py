@@ -134,5 +134,30 @@ class TestIsMentionForSelf(unittest.TestCase):
         self.assertFalse(is_mention_for_self([_FakeUser(123)], None))
 
 
+class TestAllowedTools(unittest.TestCase):
+    def test_research_has_web_tools(self):
+        from scripts.discord_bot.mention import allowed_tools_for
+        tools = allowed_tools_for("research")
+        self.assertIn("WebSearch", tools)
+        self.assertIn("WebFetch", tools)
+
+    def test_automation_engineer_no_web(self):
+        from scripts.discord_bot.mention import allowed_tools_for
+        tools = allowed_tools_for("automation-engineer")
+        self.assertNotIn("WebSearch", tools)
+
+    def test_no_write_or_bash_anywhere(self):
+        # PR-P-1.5: read-only only. Write / Edit / Bash come in PR-P-2.
+        from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
+        for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
+            self.assertNotIn("Write", tools, f"{agent_id} should not have Write in mention mode")
+            self.assertNotIn("Edit", tools, f"{agent_id} should not have Edit in mention mode")
+            self.assertNotIn("Bash", tools, f"{agent_id} should not have Bash in mention mode")
+
+    def test_unknown_agent_returns_none(self):
+        from scripts.discord_bot.mention import allowed_tools_for
+        self.assertIsNone(allowed_tools_for("not-a-real-agent"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
