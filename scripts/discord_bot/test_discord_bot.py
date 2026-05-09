@@ -265,6 +265,27 @@ class TestCallClaude(unittest.TestCase):
         # so the bot's claude binary still resolves.
         self.assertIn("PATH", env)
 
+    def test_subprocess_env_strips_nb_discord_webhook(self):
+        # MEDIUM finding from the 2026-05-09 security-reviewer run:
+        # NB_DISCORD_WEBHOOK should NOT propagate into the claude -p
+        # subprocess. Defense in depth: if env-var override is in use,
+        # don't expose the token to a process where a tool call could
+        # surface it.
+        import os as _os
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _FakeResult(0, "ok", "")
+
+        with patch.dict(_os.environ, {"NB_DISCORD_WEBHOOK": "https://leaky/webhook"}, clear=False):
+            with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+                claude_invoke.call_claude_sync("prompt", "model", 30)
+
+        env = captured["env"]
+        self.assertNotIn("NB_DISCORD_WEBHOOK", env)
+        self.assertEqual(env.get("NB_NO_DISCORD"), "1")
+
     def test_nonzero_exit(self):
         with patch("scripts.discord_bot.claude_invoke.subprocess.run",
                    return_value=_FakeResult(1, "", "nope")):

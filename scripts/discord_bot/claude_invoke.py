@@ -24,15 +24,22 @@ DEFAULT_TIMEOUT = 300
 def _subprocess_env() -> dict[str, str]:
     """Environment for bot-spawned `claude -p` subprocesses.
 
-    Sets NB_NO_DISCORD=1 so that the SessionEnd hook's flush.py for these
-    subprocesses doesn't double-post to Discord. The original action (the
-    /triage comment, /pm-summary reply, etc.) already went to Discord; the
-    flush summary of that same subprocess would just echo it.
+    Sets NB_NO_DISCORD=1 so the SessionEnd hook's flush.py doesn't
+    double-post to Discord (the original action already posted; the
+    flush summary would just echo it).
 
-    The flush.py daily-log write to disk still happens — only the outbound
-    Discord push is suppressed. Audit trail preserved.
+    Strips NB_DISCORD_WEBHOOK before passing to the subprocess. Even
+    though the webhook token normally lives in keychain (not env), if
+    it's been overridden via env var it would otherwise propagate into
+    every claude -p invocation, where any tool call that reads or logs
+    env vars could surface it. Defense in depth.
+
+    The flush.py daily-log write to disk still happens — only the
+    outbound Discord push is suppressed. Audit trail preserved.
     """
-    return {**os.environ, "NB_NO_DISCORD": "1"}
+    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env["NB_NO_DISCORD"] = "1"
+    return env
 
 
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
