@@ -146,13 +146,29 @@ class TestAllowedTools(unittest.TestCase):
         tools = allowed_tools_for("automation-engineer")
         self.assertNotIn("WebSearch", tools)
 
-    def test_no_write_or_bash_anywhere(self):
-        # PR-P-1.5: read-only only. Write / Edit / Bash come in PR-P-2.
+    def test_no_bash_anywhere(self):
+        # Agents must NEVER have Bash in mention mode. Autonomous gh /
+        # shell access ships via a structured tool-use protocol later.
         from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
         for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
-            self.assertNotIn("Write", tools, f"{agent_id} should not have Write in mention mode")
-            self.assertNotIn("Edit", tools, f"{agent_id} should not have Edit in mention mode")
             self.assertNotIn("Bash", tools, f"{agent_id} should not have Bash in mention mode")
+
+    def test_security_reviewer_is_read_only(self):
+        # Per its plugin definition, security-reviewer surfaces findings
+        # but does not apply fixes; it must not get Write or Edit.
+        from scripts.discord_bot.mention import allowed_tools_for
+        tools = allowed_tools_for("security-reviewer")
+        self.assertNotIn("Write", tools)
+        self.assertNotIn("Edit", tools)
+
+    def test_writers_have_write_and_edit(self):
+        # Every agent EXCEPT security-reviewer should be able to take notes.
+        from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
+        for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
+            if agent_id == "security-reviewer":
+                continue
+            self.assertIn("Write", tools, f"{agent_id} should have Write in mention mode")
+            self.assertIn("Edit", tools, f"{agent_id} should have Edit in mention mode")
 
     def test_unknown_agent_returns_none(self):
         from scripts.discord_bot.mention import allowed_tools_for

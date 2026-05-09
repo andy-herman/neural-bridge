@@ -23,20 +23,25 @@ MAX_HISTORY_CHARS_PER_MESSAGE = 500
 
 
 # Per-agent allowed_tools when responding to a Discord @-mention.
-# Read-only tools only for PR-P-1.5: agents can search the web, fetch URLs,
-# read files, glob, and grep. They cannot Write, Edit, or run Bash in this
-# mode — autonomous file/issue creation comes in PR-P-2 with a tighter
-# allowlist scoped per agent.
+# PR-P-2: read-only PLUS Write + Edit so agents can take notes, save drafts,
+# update prior notes. Each agent's plugin definition scopes WHERE they should
+# write (to their own knowledge/agents/<id>/ subdir); the prompt enforces it.
+# Bash is still excluded — agents cannot run shell commands or gh from
+# mentions. Autonomous gh actions ship in a later PR via a structured
+# tool-use protocol (agent emits intent JSON, daemon executes).
+#
+# security-reviewer is intentionally read-only (per its plugin: surfaces
+# findings but never auto-applies fixes).
 MENTION_ALLOWED_TOOLS: dict[str, str] = {
-    "research":            "WebSearch,WebFetch,Read,Glob,Grep",
-    "teaching-prep":       "WebSearch,WebFetch,Read,Glob,Grep",
-    "content":             "WebSearch,WebFetch,Read,Glob,Grep",
-    "social":              "WebSearch,WebFetch,Read,Glob,Grep",
-    "recruiter":           "WebSearch,WebFetch,Read,Glob,Grep",
-    "automation-engineer": "Read,Glob,Grep",  # no web; deals with local infra
-    "security-reviewer":   "WebSearch,WebFetch,Read,Glob,Grep",
-    "docs-editor":         "WebSearch,WebFetch,Read,Glob,Grep",
-    "senior-pm":           "WebSearch,WebFetch,Read,Glob,Grep",
+    "research":            "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "teaching-prep":       "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "content":             "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "social":              "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "recruiter":           "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "automation-engineer": "Read,Glob,Grep,Write,Edit",  # no web; deals with local infra
+    "security-reviewer":   "WebSearch,WebFetch,Read,Glob,Grep",  # read-only by design
+    "docs-editor":         "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    "senior-pm":           "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
 }
 
 
