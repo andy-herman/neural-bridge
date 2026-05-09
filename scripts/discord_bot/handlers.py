@@ -22,6 +22,13 @@ from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
+from .mention import (
+    MENTION_PROMPT_PATH,
+    build_mention_prompt,
+    is_mention_for_self,
+    load_agent_definition,
+    truncate_response,
+)
 from .squad_discuss import (
     FRAMING_PROMPT_PATH,
     TURN_PROMPT_PATH,
@@ -126,6 +133,80 @@ async def handle_pm_task(interaction: discord.Interaction, config: BotConfig, re
     await interaction.followup.send(
         f"Started clarification thread: <#{thread.id}>", ephemeral=True
     )
+
+
+# ---------- on_mention: any agent answers when @-mentioned (PR-P-1) ----------
+
+async def handle_mention(client, message, config: BotConfig) -> None:
+    """Called from any AgentClient's on_message when this bot is @-mentioned.
+
+    The agent_id is the bot's own role (client.agent.id). Spawns claude -p
+    against the agent's plugin definition with recent thread context and
+    Andy's message, posts the response as this bot.
+
+    PR-P-1 scope: read-only conversation. No tools, no GitHub action, no
+    cross-agent handoff. Those land in PR-P-2 and PR-P-3.
+    """
+    if message.author.bot:
+        return  # never respond to other bots (avoid loops in shared channels)
+    user_id = str(message.author.id)
+    if not is_authorized(user_id, config):
+        return  # silently ignore unauthorized; refusal would just spam
+
+    agent_id = client.agent.id
+
+    if not MENTION_PROMPT_PATH.exists():
+        await message.channel.send(f"_(internal: mention prompt missing at {MENTION_PROMPT_PATH})_")
+        return
+
+    log(f"MENTION: agent={agent_id} channel={message.channel.id} from={user_id}")
+
+    # Acknowledge so Andy sees the bot is thinking. Discord shows typing for ~10s
+    # automatically when we use typing(); use it as a thinking indicator.
+    async with message.channel.typing():
+        # Fetch recent context. discord.py: history(limit=N).
+        history: list[dict] = []
+        try:
+            async for h_msg in message.channel.history(limit=20, before=message):
+                history.append({
+                    "author": getattr(h_msg.author, "display_name", str(h_msg.author)),
+                    "content": h_msg.content,
+                })
+            history.reverse()  # oldest -> newest
+        except Exception as exc:
+            log(f"MENTION history fetch failed (non-fatal): {type(exc).__name__}: {exc}")
+
+        # Build prompt
+        template = MENTION_PROMPT_PATH.read_text(encoding="utf-8")
+        agent_definition = load_agent_definition(agent_id)
+        channel_kind = "thread" if isinstance(message.channel, discord.Thread) else "channel"
+
+        prompt = build_mention_prompt(
+            template,
+            agent_id=agent_id,
+            agent_definition=agent_definition,
+            channel_kind=channel_kind,
+            history=history,
+            message_content=message.content,
+        )
+
+        ok, stdout, err = await call_claude(prompt)
+
+    if not ok:
+        log(f"MENTION claude FAILED: agent={agent_id} error={err}")
+        await message.channel.send(
+            f"_(I hit an error: `{err}`. Try again, or @-mention senior-pm to escalate.)_"
+        )
+        return
+
+    response = truncate_response(stdout)
+    if not response:
+        log(f"MENTION empty response: agent={agent_id}")
+        await message.channel.send("_(I had nothing useful to add. Try rephrasing or @-mention a different specialist.)_")
+        return
+
+    await message.channel.send(response)
+    log(f"MENTION done: agent={agent_id} chars={len(response)}")
 
 
 # ---------- on_message: thread replies that continue an intake session ----------
