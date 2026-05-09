@@ -44,6 +44,7 @@ COMPILE_STATE_FILE = SCRIPTS_DIR / ".compile_state.json"
 FILING_GATE_PROMPT = SCRIPTS_DIR / "prompts" / "filing_gate_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
+import discord_post  # noqa: E402
 import schema  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -442,6 +443,11 @@ def main() -> int:
         "If omitted, uses last_run_at from .compile_state.json, or all logs if first run.",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--no-discord",
+        action="store_true",
+        help="Skip the Discord outbound push of the run summary.",
+    )
     args = parser.parse_args()
 
     if not FILING_GATE_PROMPT.exists():
@@ -524,6 +530,25 @@ def main() -> int:
         f"REJECT={counts[REJECT]} errors={counts['errors']} skipped={counts['skipped_already_compiled']}"
     )
     print(summary)
+
+    if not args.no_discord:
+        mode = "dry-run" if args.dry_run else "live"
+        header = f"**Compile run** | {utc_today()} | {mode}"
+        body_lines = [
+            header,
+            "",
+            f"`PROMOTE={counts[PROMOTE]}` `QUARANTINE={counts[QUARANTINE]}` `REJECT={counts[REJECT]}` "
+            f"`errors={counts['errors']}` `skipped={counts['skipped_already_compiled']}`",
+        ]
+        # First 10 actions for visibility; rest live in the run log on disk.
+        action_lines = [line for line in run_log_lines if line.startswith("- ")][:10]
+        if action_lines:
+            body_lines.append("")
+            body_lines.extend(action_lines)
+        if len([line for line in run_log_lines if line.startswith("- ")]) > 10:
+            body_lines.append(f"_…and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
+        message = discord_post.truncate_for_discord("\n".join(body_lines))
+        discord_post.send(message)
 
     # Always write a run log to docs/compile/
     DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
