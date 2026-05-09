@@ -18,7 +18,9 @@ from .claude_invoke import call_claude
 from .client_registry import post_as_agent
 from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
+from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
+from .handoff_budget import BUDGET as HANDOFF_BUDGET
 from .state_machine import add_label as add_label_async, remove_label as remove_label_async
 from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
@@ -140,21 +142,59 @@ async def handle_pm_task(interaction: discord.Interaction, config: BotConfig, re
 
 # ---------- on_mention: any agent answers when @-mentioned (PR-P-1) ----------
 
+def _is_handoff_eligible(message, config: BotConfig) -> tuple[bool, str | None]:
+    """Decide whether a message is allowed to invoke a mention handler.
+
+    Returns (eligible, reason_to_skip).
+    - Authorized human (Andy) → always eligible; resets the budget.
+    - One of our own bots → eligible if budget allows; consumes one turn.
+    - Anything else (other bots, unauthorized humans) → skip silently.
+    """
+    user_id = str(message.author.id)
+
+    # Authorized human → reset budget, always eligible.
+    if not message.author.bot and is_authorized(user_id, config):
+        HANDOFF_BUDGET.reset(str(message.channel.id))
+        return True, None
+
+    # Bot author: only allow if it's one of OUR bots and budget remains.
+    if message.author.bot:
+        is_ours = any(
+            getattr(c, "user", None) is not None
+            and getattr(c.user, "id", None) == message.author.id
+            for c in CLIENT_REGISTRY._by_id.values()
+        )
+        if not is_ours:
+            return False, None
+        if not HANDOFF_BUDGET.consume(str(message.channel.id)):
+            return False, "handoff_budget_exhausted"
+        return True, None
+
+    # Unauthorized human, or anything else.
+    return False, None
+
+
 async def handle_mention(client, message, config: BotConfig) -> None:
     """Called from any AgentClient's on_message when this bot is @-mentioned.
 
-    The agent_id is the bot's own role (client.agent.id). Spawns claude -p
-    against the agent's plugin definition with recent thread context and
-    Andy's message, posts the response as this bot.
-
-    PR-P-1 scope: read-only conversation. No tools, no GitHub action, no
-    cross-agent handoff. Those land in PR-P-2 and PR-P-3.
+    Eligibility:
+      - Andy → always allowed; resets the per-channel handoff budget.
+      - Another Neural Bridge bot → allowed if budget remains; consumes one
+        turn. Cap default 5 turns/channel; reset on next Andy message.
+      - Other bots / unauthorized humans → ignored silently.
     """
-    if message.author.bot:
-        return  # never respond to other bots (avoid loops in shared channels)
-    user_id = str(message.author.id)
-    if not is_authorized(user_id, config):
-        return  # silently ignore unauthorized; refusal would just spam
+    eligible, skip_reason = _is_handoff_eligible(message, config)
+    if not eligible:
+        if skip_reason == "handoff_budget_exhausted":
+            log(f"MENTION skip: handoff budget exhausted in channel={message.channel.id}")
+            try:
+                await message.channel.send(
+                    "_(Handoff budget exhausted on this thread. "
+                    "@-mention me directly to continue, or wait for Andy.)_"
+                )
+            except Exception:
+                pass
+        return
 
     agent_id = client.agent.id
 

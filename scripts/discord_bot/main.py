@@ -110,11 +110,14 @@ class AgentClient(discord.Client):
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
 
     async def on_message(self, message: discord.Message) -> None:
-        # Don't respond to ourselves or to other bots (loop prevention).
-        if message.author.bot:
+        # Never respond to messages from ourselves (the bot itself).
+        if message.author.id == getattr(self.user, "id", None):
             return
 
         # 1. Mention routing — every agent listens for its own @-mention.
+        # Bot-author messages are allowed through to handle_mention, which
+        # checks the handoff budget. Other bots and unauthorized humans
+        # are filtered there.
         try:
             if is_mention_for_self(message.mentions, self.user):
                 await handle_mention(self, message, self.bot_config)
@@ -122,8 +125,12 @@ class AgentClient(discord.Client):
         except Exception as exc:
             log(f"on_message (mention) error: {type(exc).__name__}: {exc}")
 
-        # 2. PM intake thread replies — only the orchestrator processes those.
+        # 2. PM intake thread replies — only the orchestrator processes those,
+        # and only if the author is a human (bots talking to themselves in PM
+        # threads is not in scope).
         if not self.agent.is_orchestrator:
+            return
+        if message.author.bot:
             return
         try:
             await on_thread_message(message, self.bot_config)
