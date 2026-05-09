@@ -35,7 +35,7 @@ PROMPT_TEMPLATE = HOOKS_DIR / "prompts" / "flush_v1.md"
 sys.path.insert(0, str(HOOKS_DIR))
 import schema  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-4-7"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
 
@@ -84,6 +84,7 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"

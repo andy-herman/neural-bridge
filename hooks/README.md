@@ -53,7 +53,7 @@ python3 hooks/flush.py \
   --hook-event SessionEnd
 ```
 
-Optional flags: `--model claude-sonnet-4-7` (default), `--timeout 300` (seconds).
+Optional flags: `--model claude-sonnet-4-6` (default — `claude-sonnet-4-7` referenced in the build plan does not yet exist as a released model), `--timeout 300` (seconds).
 
 ## Status reporting
 
