@@ -407,15 +407,25 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         log(f"TRIAGE schema FAILED: issue=#{issue_number} error={schema_err}")
         return
 
-    # Apply label changes. Always include the recommended_state in adds and
+    # Quality-flag gate: if the triage surfaced any quality flags, the issue
+    # has gaps that block a specialist from starting. Override the state to
+    # needs-human regardless of what the model recommended. Andy unblocks by
+    # editing the issue body to address the flags, then re-running /triage.
+    effective_state = data["recommended_state"]
+    if data["quality_flags"]:
+        if effective_state != "needs-human":
+            log(f"TRIAGE override: quality_flags non-empty -> state {effective_state} -> needs-human")
+        effective_state = "needs-human"
+
+    # Apply label changes. Always include the effective_state in adds and
     # remove any stale state labels.
     current_state_labels = [
         lbl["name"]
         for lbl in issue.get("labels", [])
         if isinstance(lbl, dict) and lbl.get("name") in STATE_LABEL_SET
     ]
-    add_set = set(data["labels_to_add"]) | {data["recommended_state"]}
-    remove_set = set(data["labels_to_remove"]) | (set(current_state_labels) - {data["recommended_state"]})
+    add_set = set(data["labels_to_add"]) | {effective_state}
+    remove_set = set(data["labels_to_remove"]) | (set(current_state_labels) - {effective_state})
     # Don't try to remove what we're adding.
     remove_set -= add_set
 
@@ -427,10 +437,16 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     )
     log(f"TRIAGE labels applied: issue=#{issue_number} applied={applied} failures={failures}")
 
-    # Post a triage report comment on the issue
+    # Post a triage report comment on the issue. Quality flags render as a
+    # task list so Andy can check items off as he edits the issue body.
     quality_flags_md = ""
     if data["quality_flags"]:
-        quality_flags_md = "\n\n**Quality flags:**\n" + "\n".join(f"- {f}" for f in data["quality_flags"])
+        quality_flags_md = (
+            "\n\n**Address these to unblock the specialist** "
+            "(state auto-set to `needs-human` until done):\n"
+            + "\n".join(f"- [ ] {f}" for f in data["quality_flags"])
+            + "\n\nRe-run `/triage` after editing the issue body to confirm gaps are resolved."
+        )
     failures_md = ""
     if failures:
         failures_md = "\n\n_Label changes that failed: " + ", ".join(f"`{lbl}` ({reason})" for lbl, reason in failures) + "_"
@@ -439,8 +455,10 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         f"**senior-pm triage**\n\n"
         f"- Recommended specialist: `{data['recommended_specialist']}`\n"
         f"- Priority: `{data['priority']}`\n"
-        f"- Recommended state: `{data['recommended_state']}`\n"
-        f"- Labels applied: `{', '.join(applied) if applied else 'none'}`\n\n"
+        f"- Effective state: `{effective_state}`"
+        + (f" _(model recommended `{data['recommended_state']}`; downgraded due to quality flags)_"
+           if effective_state != data['recommended_state'] else "")
+        + f"\n- Labels applied: `{', '.join(applied) if applied else 'none'}`\n\n"
         f"**Reason.** {data['reason']}"
         f"{quality_flags_md}"
         f"{failures_md}"
@@ -492,17 +510,22 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     summary = (
         f"**Triaged issue #{issue_number}**\n"
         f"- Specialist: `{data['recommended_specialist']}`\n"
-        f"- Priority: `{data['priority']}` · State: `{data['recommended_state']}`\n"
-        f"- Labels: `{', '.join(applied) if applied else 'none'}`\n"
+        f"- Priority: `{data['priority']}` · State: `{effective_state}`"
+    )
+    if effective_state != data["recommended_state"]:
+        summary += f" _(downgraded from `{data['recommended_state']}` because of quality flags)_"
+    summary += (
+        f"\n- Labels: `{', '.join(applied) if applied else 'none'}`\n"
         f"- Reason: {data['reason']}"
         f"{handoff_status}"
     )
     if failures:
         summary += f"\n\n_(Some label changes failed; see issue comment for details.)_"
     if data["quality_flags"]:
-        summary += f"\n\n**Quality flags:** {', '.join(data['quality_flags'])}"
+        flag_list = "\n".join(f"  - [ ] {f}" for f in data["quality_flags"])
+        summary += f"\n\n**Address these to unblock:**\n{flag_list}\n\nRe-run `/triage {issue_number}` after editing the issue body."
     await interaction.followup.send(summary, ephemeral=True)
-    log(f"TRIAGE done: issue=#{issue_number} specialist={data['recommended_specialist']}")
+    log(f"TRIAGE done: issue=#{issue_number} specialist={data['recommended_specialist']} state={effective_state}")
 
 
 async def handle_close(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:

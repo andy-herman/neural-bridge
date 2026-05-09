@@ -108,5 +108,36 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn("(empty body)", out)
 
 
+class TestQualityFlagGate(unittest.TestCase):
+    """The triage handler downgrades to needs-human when quality_flags is non-empty.
+
+    These tests cover the override logic via the validated triage payload shape;
+    the actual state-override happens in handlers.handle_triage at runtime, but
+    the contract validated here is: a payload with quality_flags is structurally
+    valid, and the prompt + handler agree on the schema."""
+
+    def _payload(self, quality_flags=None, recommended_state="agent-ready"):
+        return {
+            "recommended_specialist": "content",
+            "priority": "P1",
+            "recommended_state": recommended_state,
+            "labels_to_add": ["squad:content"],
+            "labels_to_remove": [],
+            "reason": "Concrete content task.",
+            "quality_flags": quality_flags or [],
+        }
+
+    def test_payload_with_no_flags_passes(self):
+        ok, err = validate_triage_output(self._payload())
+        self.assertTrue(ok, err)
+
+    def test_payload_with_flags_passes(self):
+        ok, err = validate_triage_output(self._payload(quality_flags=[
+            "Add closure criteria. Specify: scenario count, required citations, word-count range",
+            "Add the vault path to the v0.1 source",
+        ]))
+        self.assertTrue(ok, err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
