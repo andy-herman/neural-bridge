@@ -35,6 +35,7 @@ from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .config import AgentConfig, BotConfig, load_config
 from .handlers import (
     handle_close,
+    handle_mention,
     handle_pm_summary,
     handle_pm_task,
     handle_squad_discuss,
@@ -42,6 +43,7 @@ from .handlers import (
     log,
     on_thread_message,
 )
+from .mention import is_mention_for_self
 from .keychain import get_token
 
 
@@ -55,11 +57,12 @@ class AgentClient(discord.Client):
 
     def __init__(self, agent: AgentConfig, config: BotConfig):
         intents = discord.Intents.default()
-        if agent.is_orchestrator:
-            # Senior-pm needs message_content to read user replies in PM intake
-            # threads. Andy must enable Message Content Intent on this bot's
-            # Developer Portal page (Application 1502038606905344162 → Bot tab).
-            intents.message_content = True
+        # All agents now need message_content: senior-pm reads thread replies
+        # for PM intake; specialists read mentions of themselves to respond
+        # (PR-P-1). Andy must enable Message Content Intent on each of the 9
+        # bots' Developer Portal pages (Application -> Bot -> Privileged
+        # Gateway Intents -> Message Content Intent).
+        intents.message_content = True
         super().__init__(intents=intents)
         self.agent = agent
         self.bot_config = config
@@ -107,13 +110,25 @@ class AgentClient(discord.Client):
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
 
     async def on_message(self, message: discord.Message) -> None:
-        # Only the orchestrator processes thread messages for PM intake.
+        # Don't respond to ourselves or to other bots (loop prevention).
+        if message.author.bot:
+            return
+
+        # 1. Mention routing — every agent listens for its own @-mention.
+        try:
+            if is_mention_for_self(message.mentions, self.user):
+                await handle_mention(self, message, self.bot_config)
+                return
+        except Exception as exc:
+            log(f"on_message (mention) error: {type(exc).__name__}: {exc}")
+
+        # 2. PM intake thread replies — only the orchestrator processes those.
         if not self.agent.is_orchestrator:
             return
         try:
             await on_thread_message(message, self.bot_config)
         except Exception as exc:
-            log(f"on_message error: {type(exc).__name__}: {exc}")
+            log(f"on_message (intake) error: {type(exc).__name__}: {exc}")
 
 
 def _resolve_token(agent: AgentConfig) -> str:
