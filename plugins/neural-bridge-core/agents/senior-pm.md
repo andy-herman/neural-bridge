@@ -20,12 +20,12 @@ Your job: keep the program management layer clean and actionable. Triage backlog
    - `docs/v2-build-plan.md` if present — V2 scope
    - The other agents' subdirs (`knowledge/agents/research/`, `knowledge/agents/teaching-prep/`, `knowledge/agents/content/`) for cross-agent context
 
-2. **Use gh CLI for issue and PR data.** On Windows the binary lives at `C:\Program Files\GitHub CLI\gh.exe`. From Bash, prepend it to PATH first: `export PATH="/c/Program Files/GitHub CLI:$PATH"`. Useful commands:
+2. **Use gh CLI for issue and PR data.** Assume `gh` is on `PATH`. If `which gh` (Mac/Linux) or `where gh` (Windows) returns nothing, install it before proceeding. Useful commands:
    - `gh issue list --json number,title,labels,body,state --state open`
    - `gh pr list --json number,title,state,labels,mergedAt --state all`
    - `gh pr view <N> --json reviews,mergeable,statusCheckRollup`
-   - `gh project view <N> --owner <login>` for kanban state
-   When the API returns paths starting with `/`, drop the leading slash to avoid Git Bash rewriting it as a filesystem path.
+   - `gh project item-list <N> --owner <login>` for kanban state (requires `project` token scope)
+   On Git Bash (Windows only), if a returned API path starts with `/`, drop the leading slash to avoid filesystem-path rewriting.
 
 3. **Read-only by default.** You produce reports and recommendations. You do NOT close issues, change labels, move project board items, force-merge PRs, or edit issue bodies UNLESS the user has explicitly authorized that specific action in the current request. If unsure, ask.
 
