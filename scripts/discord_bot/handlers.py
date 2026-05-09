@@ -15,6 +15,7 @@ import json
 
 from .auth import REFUSAL_MESSAGE, is_authorized
 from .claude_invoke import call_claude
+from .client_registry import post_as_agent
 from .config import BotConfig
 from .github_client import close_issue, create_issue
 from .obsidian_writer import ObsidianWriter
@@ -319,6 +320,27 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     except Exception as exc:
         log(f"VAULT triage-mirror FAILED (non-fatal): {type(exc).__name__}: {exc}")
 
+    # Hand off in Discord — if there's a bound thread for this issue and the
+    # recommended specialist is a different bot, post AS that specialist in
+    # the thread. Visual signal: each agent speaks as itself.
+    handoff_status = ""
+    bound_thread = THREAD_MAP.get_thread(issue_number)
+    specialist = data["recommended_specialist"]
+    if bound_thread is not None and specialist != "senior-pm":
+        handoff_msg = (
+            f"**Hand-off from senior-pm.** I'm picking up #{issue_number}.\n"
+            f"- Priority: `{data['priority']}`\n"
+            f"- Reason: {data['reason']}\n\n"
+            f"_I'll comment on the issue with progress; this thread stays open for follow-ups._"
+        )
+        ok_post, err_post = await post_as_agent(specialist, thread_id=int(bound_thread), content=handoff_msg)
+        if ok_post:
+            log(f"HANDOFF: issue=#{issue_number} specialist={specialist} posted in thread={bound_thread}")
+            handoff_status = f"\n\n**{specialist}** has been notified in the bound thread."
+        else:
+            log(f"HANDOFF FAILED (non-fatal): issue=#{issue_number} specialist={specialist} error={err_post}")
+            handoff_status = f"\n\n_(Hand-off post failed: `{err_post}`. {specialist} bot may not be online.)_"
+
     # Reply to Andy
     summary = (
         f"**Triaged issue #{issue_number}**\n"
@@ -326,6 +348,7 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         f"- Priority: `{data['priority']}` · State: `{data['recommended_state']}`\n"
         f"- Labels: `{', '.join(applied) if applied else 'none'}`\n"
         f"- Reason: {data['reason']}"
+        f"{handoff_status}"
     )
     if failures:
         summary += f"\n\n_(Some label changes failed; see issue comment for details.)_"
