@@ -47,8 +47,11 @@ class AgentClient(discord.Client):
     """
 
     def __init__(self, agent: AgentConfig, config: BotConfig):
+        # PR-H foundation only needs default intents (slash commands work via
+        # interaction.data, not message content). PR-I's PM intake will set
+        # intents.message_content = True AND require Andy to enable
+        # "Message Content Intent" on each bot's Developer Portal page.
         intents = discord.Intents.default()
-        intents.message_content = True  # for plain-text PM intake replies in PR-I
         super().__init__(intents=intents)
         self.agent = agent
         self.bot_config = config
