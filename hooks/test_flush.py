@@ -7,6 +7,7 @@ Run: `python3 hooks/test_flush.py` (from repo root or anywhere).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -354,6 +355,33 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
             "research sess-no-tx failed:transcript_missing",
             flush.QUEUE_LOG.read_text(encoding="utf-8"),
         )
+
+
+class TestSecurityFindings(unittest.TestCase):
+    """Tests for the fixes on the 2026-05-09 security-reviewer agent run."""
+
+    def test_redact_transcript_path_replaces_home(self):
+        # MEDIUM/LOW finding: absolute paths in Discord-posted blocks
+        # surface filesystem layout. _redact_transcript_path collapses
+        # /Users/<user>/foo/bar to ~/foo/bar before the value is included
+        # in any post.
+        import os
+        home = os.path.expanduser("~")
+        result = flush._redact_transcript_path(f"{home}/Development/neural-bridge/transcript.jsonl")
+        self.assertEqual(result, "~/Development/neural-bridge/transcript.jsonl")
+
+    def test_redact_transcript_path_passes_through_outside_home(self):
+        result = flush._redact_transcript_path("/tmp/something.jsonl")
+        self.assertEqual(result, "/tmp/something.jsonl")
+
+    def test_subprocess_env_strips_webhook_var(self):
+        # MEDIUM finding: NB_DISCORD_WEBHOOK should NOT be passed to the
+        # claude -p subprocess where a tool call could surface it.
+        with patch.dict(os.environ, {"NB_DISCORD_WEBHOOK": "https://leaky/webhook", "PATH": "/x"}, clear=False):
+            env = flush._subprocess_env_for_claude()
+        self.assertNotIn("NB_DISCORD_WEBHOOK", env)
+        # Other env vars still pass through
+        self.assertIn("PATH", env)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -77,6 +78,17 @@ def build_prompt(template: str, agent: str, session_id: str, hook_event: str, tr
     )
 
 
+def _subprocess_env_for_claude() -> dict[str, str]:
+    """Strip the Discord webhook env var before exec'ing claude -p.
+
+    Defense in depth: if NB_DISCORD_WEBHOOK is set (the keychain-fallback
+    override), it should not propagate into every subprocess where a tool
+    call might surface it. flush.py uses the keychain directly via
+    discord_post.send(), so the env var is unnecessary here regardless.
+    """
+    return {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+
+
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
     try:
@@ -86,6 +98,7 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            env=_subprocess_env_for_claude(),
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
@@ -138,6 +151,19 @@ def render_section(header: str, items: list) -> list[str]:
     return out
 
 
+def _redact_transcript_path(path: str) -> str:
+    """Replace absolute paths with HOME-relative for posts to Discord etc.
+
+    Even though transcript_path is not a secret, surfacing absolute paths
+    over a 3rd-party channel reveals filesystem layout. /Users/<name>/...
+    becomes ~/... in posted output.
+    """
+    home = str(Path.home())
+    if path.startswith(home):
+        return "~" + path[len(home):]
+    return path
+
+
 def build_session_block(
     data: dict,
     session_id: str,
@@ -153,7 +179,7 @@ def build_session_block(
         "",
         "```yaml",
         f"session_id: {session_id}",
-        f"transcript_path: {transcript_path}",
+        f"transcript_path: {_redact_transcript_path(transcript_path)}",
         f"transcript_sha256: {transcript_hash}",
         f"started_at: {started_at}",
         f"ended_at: {ended_at}",
