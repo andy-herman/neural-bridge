@@ -22,6 +22,15 @@ from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
+from .squad_discuss import (
+    FRAMING_PROMPT_PATH,
+    TURN_PROMPT_PATH,
+    build_framing_prompt,
+    build_turn_prompt,
+    truncate_framing,
+    truncate_turn,
+    validate_framing_output,
+)
 from .summary import (
     PROMPT_PATH as SUMMARY_PROMPT_PATH,
     build_summary_prompt,
@@ -244,10 +253,109 @@ async def handle_pm_summary(interaction: discord.Interaction, config: BotConfig)
 async def handle_squad_discuss(interaction: discord.Interaction, config: BotConfig, topic: str) -> None:
     if not await _gate(interaction, config, "squad-discuss"):
         return
-    await interaction.response.send_message(
-        f"Received squad-discuss topic: `{topic[:200]}`\n\n_Multi-agent huddle ships in a later PR._",
+
+    topic = topic.strip()
+    if not topic:
+        await interaction.response.send_message("Empty topic. Give me something to discuss.", ephemeral=True)
+        return
+
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "create_thread"):
+        await interaction.response.send_message(
+            "Run /squad-discuss from a text channel that supports threads (e.g., #neural-bridge).",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not FRAMING_PROMPT_PATH.exists() or not TURN_PROMPT_PATH.exists():
+        await interaction.followup.send("Internal error: squad-discuss prompts missing.", ephemeral=True)
+        return
+
+    log(f"SQUAD_DISCUSS start: topic={topic[:80]!r}")
+
+    # 1. Senior-pm drafts framing + picks specialists.
+    framing_template = FRAMING_PROMPT_PATH.read_text(encoding="utf-8")
+    framing_prompt = build_framing_prompt(framing_template, topic=topic)
+    ok, stdout, err = await call_claude(framing_prompt)
+    if not ok:
+        await interaction.followup.send(f"Framing failed: `{err}`", ephemeral=True)
+        log(f"SQUAD_DISCUSS framing FAILED: error={err}")
+        return
+
+    text = strip_code_fences(stdout)
+    try:
+        framing_data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        await interaction.followup.send(
+            f"Framing output was not valid JSON: `{exc.msg}`. Raw output in stderr log.",
+            ephemeral=True,
+        )
+        log(f"SQUAD_DISCUSS framing parse FAILED: raw={text[:200]!r}")
+        return
+
+    ok, schema_err = validate_framing_output(framing_data)
+    if not ok:
+        await interaction.followup.send(f"Framing schema check failed: `{schema_err}`", ephemeral=True)
+        log(f"SQUAD_DISCUSS framing schema FAILED: {schema_err}")
+        return
+
+    framing = truncate_framing(framing_data["framing"])
+    selected = framing_data["selected_agents"]
+    log(f"SQUAD_DISCUSS picked: {selected}")
+
+    # 2. Create the thread.
+    truncated_name = topic if len(topic) <= 80 else topic[:79] + "…"
+    try:
+        thread = await channel.create_thread(  # type: ignore[union-attr]
+            name=f"squad: {truncated_name}",
+            type=discord.ChannelType.public_thread,
+            auto_archive_duration=10080,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I don't have permission to create threads in this channel.",
+            ephemeral=True,
+        )
+        return
+
+    # 3. Senior-pm posts framing as itself (this client).
+    await thread.send(f"**Squad discussion** · topic: _{topic[:200]}_\n\n{framing}")
+
+    # 4. Each selected specialist posts a turn AS itself via the registry.
+    turn_template = TURN_PROMPT_PATH.read_text(encoding="utf-8")
+    turn_outcomes: list[str] = []
+    for agent_id in selected:
+        turn_prompt = build_turn_prompt(turn_template, agent_id=agent_id, topic=topic, framing=framing)
+        ok, stdout, err = await call_claude(turn_prompt)
+        if not ok:
+            log(f"SQUAD_DISCUSS turn FAILED ({agent_id}): {err}")
+            turn_outcomes.append(f"{agent_id}: failed ({err})")
+            continue
+        turn_text = truncate_turn(stdout)
+        ok_post, err_post = await post_as_agent(agent_id, thread_id=thread.id, content=turn_text)
+        if ok_post:
+            turn_outcomes.append(f"{agent_id}: posted")
+            log(f"SQUAD_DISCUSS turn posted ({agent_id})")
+        else:
+            log(f"SQUAD_DISCUSS turn post FAILED ({agent_id}): {err_post}")
+            # Fall back to senior-pm posting it on their behalf
+            await thread.send(f"_(could not post as `{agent_id}` ({err_post}); turn below)_\n\n{turn_text}")
+            turn_outcomes.append(f"{agent_id}: fallback")
+
+    # 5. Senior-pm closes the round.
+    await thread.send(
+        "_Round 1 complete. Reply in this thread to continue, or use `/triage <issue#>` "
+        "or `/pm-task` to convert this discussion into action._"
+    )
+
+    await interaction.followup.send(
+        f"Discussion opened in <#{thread.id}> with `{', '.join(selected)}`. Outcomes: "
+        + "; ".join(turn_outcomes),
         ephemeral=True,
     )
+    log(f"SQUAD_DISCUSS done: thread={thread.id} outcomes={turn_outcomes}")
 
 
 async def handle_triage(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
