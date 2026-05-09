@@ -30,6 +30,7 @@ from urllib import error, request
 
 KEYCHAIN_SERVICE = "neural-bridge-discord-webhook"
 ENV_VAR = "NB_DISCORD_WEBHOOK"
+SUPPRESS_ENV_VAR = "NB_NO_DISCORD"  # set to "1" to silently skip all outbound posts
 DEFAULT_TIMEOUT = 5
 DISCORD_MAX_CONTENT = 2000  # hard limit per Discord webhook spec
 SAFE_CONTENT_BUDGET = 1900   # leave room for our own framing
@@ -75,8 +76,14 @@ def truncate_for_discord(text: str, suffix: str = "") -> str:
 def send(content: str, *, webhook_url: str | None = None, timeout: int = DEFAULT_TIMEOUT) -> bool:
     """POST a message to the Discord webhook. Return True on 2xx, False otherwise.
 
-    Never raises. If no webhook is configured, returns False.
+    Never raises. Returns False when:
+      - NB_NO_DISCORD=1 in the environment (suppress flag, used by bot-spawned
+        claude -p subprocesses to avoid double-posting their own activity)
+      - No webhook URL configured (keychain empty, env var unset)
+      - HTTP request fails
     """
+    if os.environ.get(SUPPRESS_ENV_VAR) == "1":
+        return False
     url = webhook_url if webhook_url is not None else get_webhook_url()
     if not url:
         return False

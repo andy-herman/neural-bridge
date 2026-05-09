@@ -83,6 +83,27 @@ class TestSend(unittest.TestCase):
             with patch("discord_post.subprocess.run", return_value=_FakeKeychainResult(44)):
                 self.assertFalse(discord_post.send("hello"))
 
+    def test_suppressed_by_nb_no_discord(self):
+        # NB_NO_DISCORD=1 suppresses outbound posting even when webhook is configured.
+        with patch.dict("os.environ", {discord_post.SUPPRESS_ENV_VAR: "1"}):
+            # Mock the underlying urlopen to verify it's NEVER called.
+            with patch("discord_post.request.urlopen") as urlopen_mock:
+                result = discord_post.send("hello", webhook_url="https://example/wh")
+                self.assertFalse(result)
+                urlopen_mock.assert_not_called()
+
+    def test_suppress_var_other_values_do_not_skip(self):
+        # Only "1" suppresses; "0", "true", or empty string don't.
+        for value in ["0", "true", "", "yes"]:
+            with patch.dict("os.environ", {discord_post.SUPPRESS_ENV_VAR: value}, clear=False):
+                class _Resp:
+                    status = 204
+                    def __enter__(self): return self
+                    def __exit__(self, *a): pass
+                with patch("discord_post.request.urlopen", return_value=_Resp()):
+                    result = discord_post.send("hello", webhook_url="https://example/wh")
+                    self.assertTrue(result, f"NB_NO_DISCORD={value!r} should not have suppressed")
+
     def test_explicit_url_skips_keychain(self):
         class _Resp:
             status = 204
