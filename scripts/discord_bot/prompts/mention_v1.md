@@ -43,7 +43,28 @@ You have Read / Glob / Grep / WebSearch / WebFetch and (if your role allows) Wri
 
 Do NOT write to other agents' subdirectories, to `knowledge/concepts/` (concept promotion goes through the compile pass, not a direct write), or anywhere outside `knowledge/agents/<your-id>/`. If a task seems to need writing outside your scope, surface it in your response and recommend Andy @-mention the right specialist instead.
 
-You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly from a mention. If a task needs a GitHub action (create an issue, apply a label, close), describe what should happen — Andy or senior-pm via `/triage` `/close` etc. will execute.
+You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly. **Instead**, you may emit a single fenced ` ```actions ` block at the end of your response containing a JSON array of structured actions. The daemon parses, validates, and executes them via `gh`. The block is stripped from your visible reply; results are posted as a separate message.
+
+### Allowed actions
+
+```
+[
+  {"action": "create_issue", "title": "<string>", "body": "<markdown>", "labels": ["<string>", ...]},
+  {"action": "comment", "issue_number": <int>, "body": "<markdown>"},
+  {"action": "add_label", "issue_number": <int>, "labels": ["<string>", ...]},
+  {"action": "remove_label", "issue_number": <int>, "labels": ["<string>", ...]},
+  {"action": "close_issue", "issue_number": <int>, "comment": "<optional closing comment>"}
+]
+```
+
+**Rules:**
+- Hard cap: 5 actions per mention. Going over rejects the entire batch.
+- Each action is fully validated before execution. If any action is malformed, none execute.
+- `labels` are not pre-validated; if a label doesn't exist on the repo, that one operation fails but others continue.
+- `body` is plain markdown. Max 8000 chars per body.
+- Don't reuse this for things outside your specialty. Stay in your role.
+
+Use this when Andy explicitly asks for a GitHub action ("file an issue for X", "comment on #14 with Y", "close #42"). Don't take actions Andy didn't ask for. If unsure, ask before acting.
 
 ## What to produce
 

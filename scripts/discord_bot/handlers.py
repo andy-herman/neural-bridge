@@ -17,7 +17,9 @@ from .auth import REFUSAL_MESSAGE, is_authorized
 from .claude_invoke import call_claude
 from .client_registry import post_as_agent
 from .config import BotConfig
-from .github_client import close_issue, create_issue, edit_issue_body
+from .actions import extract_actions, validate_action_batch
+from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
+from .state_machine import add_label as add_label_async, remove_label as remove_label_async
 from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
@@ -202,14 +204,102 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         )
         return
 
-    response = truncate_response(stdout)
-    if not response:
+    # Extract any structured action block before truncating + posting.
+    parsed = extract_actions(stdout)
+    response = truncate_response(parsed.visible_response)
+
+    if not response and not parsed.actions and not parsed.parse_error:
         log(f"MENTION empty response: agent={agent_id}")
         await message.channel.send("_(I had nothing useful to add. Try rephrasing or @-mention a different specialist.)_")
         return
 
-    await message.channel.send(response)
-    log(f"MENTION done: agent={agent_id} chars={len(response)}")
+    if response:
+        await message.channel.send(response)
+
+    # Action block handling.
+    if parsed.parse_error:
+        await message.channel.send(
+            f"_(I tried to emit an action block but it didn't parse: `{parsed.parse_error}`. "
+            f"No actions were taken.)_"
+        )
+        log(f"MENTION action parse FAILED: agent={agent_id} error={parsed.parse_error}")
+    elif parsed.actions:
+        ok, err, valid = validate_action_batch(parsed.actions)
+        if not ok:
+            await message.channel.send(f"_(Action batch rejected: `{err}`. No actions taken.)_")
+            log(f"MENTION action validation FAILED: agent={agent_id} error={err}")
+        else:
+            results = await _execute_action_batch(valid, config)
+            summary_lines = [f"**Actions taken by `{agent_id}`:**"]
+            for line in results:
+                summary_lines.append(f"- {line}")
+            await message.channel.send("\n".join(summary_lines)[:1900])
+            log(f"MENTION actions executed: agent={agent_id} count={len(valid)}")
+
+    log(f"MENTION done: agent={agent_id} chars={len(response)} actions={len(parsed.actions or [])}")
+
+
+async def _execute_action_batch(actions: list[dict], config: BotConfig) -> list[str]:
+    """Execute each validated action via gh wrappers. Returns a list of
+    human-readable result lines."""
+    results: list[str] = []
+    repo = config.default_repo
+    for action in actions:
+        atype = action["action"]
+        try:
+            if atype == "create_issue":
+                r = await create_issue(
+                    repo=repo,
+                    title=action["title"],
+                    body=action["body"],
+                    labels=action.get("labels"),
+                )
+                if r.ok:
+                    results.append(f"✅ Created #{r.issue_number}: `{action['title'][:60]}` → {r.issue_url}")
+                else:
+                    results.append(f"❌ create_issue (`{action['title'][:40]}…`): `{r.error}`")
+            elif atype == "comment":
+                r = await comment_issue(repo=repo, issue_number=action["issue_number"], body=action["body"])
+                if r.ok:
+                    results.append(f"✅ Commented on #{action['issue_number']}")
+                else:
+                    results.append(f"❌ comment on #{action['issue_number']}: `{r.error}`")
+            elif atype == "add_label":
+                fails = []
+                for lbl in action["labels"]:
+                    r = await add_label_async(repo=repo, issue_number=action["issue_number"], label=lbl)
+                    if not r.ok:
+                        fails.append((lbl, r.error))
+                if not fails:
+                    results.append(f"✅ Added labels {action['labels']} to #{action['issue_number']}")
+                else:
+                    results.append(f"❌ add_label on #{action['issue_number']}: " + ", ".join(f"{l}({e})" for l, e in fails))
+            elif atype == "remove_label":
+                fails = []
+                for lbl in action["labels"]:
+                    r = await remove_label_async(repo=repo, issue_number=action["issue_number"], label=lbl)
+                    if not r.ok:
+                        fails.append((lbl, r.error))
+                if not fails:
+                    results.append(f"✅ Removed labels {action['labels']} from #{action['issue_number']}")
+                else:
+                    results.append(f"❌ remove_label on #{action['issue_number']}: " + ", ".join(f"{l}({e})" for l, e in fails))
+            elif atype == "close_issue":
+                r = await close_issue(
+                    repo=repo,
+                    issue_number=action["issue_number"],
+                    comment=action.get("comment"),
+                )
+                if r.ok:
+                    results.append(f"✅ Closed #{action['issue_number']}")
+                else:
+                    results.append(f"❌ close_issue #{action['issue_number']}: `{r.error}`")
+            else:
+                # Should be unreachable due to validate_action_batch().
+                results.append(f"❌ unknown action type: `{atype}`")
+        except Exception as exc:
+            results.append(f"❌ {atype}: exception `{type(exc).__name__}: {exc}`")
+    return results
 
 
 # ---------- on_message: thread replies that continue an intake session ----------
