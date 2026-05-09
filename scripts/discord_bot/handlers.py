@@ -11,12 +11,23 @@ import sys
 
 import discord
 
+import json
+
 from .auth import REFUSAL_MESSAGE, is_authorized
+from .claude_invoke import call_claude
 from .config import BotConfig
 from .github_client import close_issue, create_issue
 from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
+from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
+from .triage import (
+    TRIAGE_PROMPT_PATH,
+    build_triage_prompt,
+    fetch_issue,
+    strip_code_fences,
+    validate_triage_output,
+)
 
 
 def log(msg: str) -> None:
@@ -202,10 +213,126 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
 async def handle_triage(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
     if not await _gate(interaction, config, "triage"):
         return
-    await interaction.response.send_message(
-        f"Received triage request for issue #{issue_number}. _senior-pm triage ships in PR-K._",
-        ephemeral=True,
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not TRIAGE_PROMPT_PATH.exists():
+        await interaction.followup.send(
+            f"Internal error: triage prompt missing at {TRIAGE_PROMPT_PATH}", ephemeral=True
+        )
+        return
+
+    log(f"TRIAGE start: issue=#{issue_number} repo={config.default_repo}")
+
+    ok, issue, err = await fetch_issue(config.default_repo, issue_number)
+    if not ok:
+        await interaction.followup.send(f"Failed to fetch issue #{issue_number}: `{err}`", ephemeral=True)
+        log(f"TRIAGE fetch FAILED: issue=#{issue_number} error={err}")
+        return
+
+    template = TRIAGE_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt = build_triage_prompt(template, repo=config.default_repo, issue_number=issue_number, issue=issue)
+
+    ok, stdout, err = await call_claude(prompt)
+    if not ok:
+        await interaction.followup.send(f"claude -p failed for triage: `{err}`", ephemeral=True)
+        log(f"TRIAGE claude FAILED: issue=#{issue_number} error={err}")
+        return
+
+    text = strip_code_fences(stdout)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        await interaction.followup.send(
+            f"Triage output was not valid JSON: `{exc.msg}`. Raw output preserved in stderr log.",
+            ephemeral=True,
+        )
+        log(f"TRIAGE parse FAILED: issue=#{issue_number} raw={text[:200]!r}")
+        return
+
+    ok, schema_err = validate_triage_output(data)
+    if not ok:
+        await interaction.followup.send(
+            f"Triage output failed schema check: `{schema_err}`",
+            ephemeral=True,
+        )
+        log(f"TRIAGE schema FAILED: issue=#{issue_number} error={schema_err}")
+        return
+
+    # Apply label changes. Always include the recommended_state in adds and
+    # remove any stale state labels.
+    current_state_labels = [
+        lbl["name"]
+        for lbl in issue.get("labels", [])
+        if isinstance(lbl, dict) and lbl.get("name") in STATE_LABEL_SET
+    ]
+    add_set = set(data["labels_to_add"]) | {data["recommended_state"]}
+    remove_set = set(data["labels_to_remove"]) | (set(current_state_labels) - {data["recommended_state"]})
+    # Don't try to remove what we're adding.
+    remove_set -= add_set
+
+    applied, failures = await apply_labels(
+        repo=config.default_repo,
+        issue_number=issue_number,
+        add=sorted(add_set),
+        remove=sorted(remove_set),
     )
+    log(f"TRIAGE labels applied: issue=#{issue_number} applied={applied} failures={failures}")
+
+    # Post a triage report comment on the issue
+    quality_flags_md = ""
+    if data["quality_flags"]:
+        quality_flags_md = "\n\n**Quality flags:**\n" + "\n".join(f"- {f}" for f in data["quality_flags"])
+    failures_md = ""
+    if failures:
+        failures_md = "\n\n_Label changes that failed: " + ", ".join(f"`{lbl}` ({reason})" for lbl, reason in failures) + "_"
+
+    comment_body = (
+        f"**senior-pm triage**\n\n"
+        f"- Recommended specialist: `{data['recommended_specialist']}`\n"
+        f"- Priority: `{data['priority']}`\n"
+        f"- Recommended state: `{data['recommended_state']}`\n"
+        f"- Labels applied: `{', '.join(applied) if applied else 'none'}`\n\n"
+        f"**Reason.** {data['reason']}"
+        f"{quality_flags_md}"
+        f"{failures_md}"
+    )
+
+    # Use gh issue comment to post
+    import subprocess as sp
+    try:
+        sp.run(
+            ["gh", "issue", "comment", str(issue_number), "--repo", config.default_repo, "--body", comment_body],
+            capture_output=True, text=True, timeout=30, stdin=sp.DEVNULL, check=False,
+        )
+    except Exception as exc:
+        log(f"TRIAGE comment FAILED (non-fatal): {type(exc).__name__}: {exc}")
+
+    # Mirror to vault
+    try:
+        path = VAULT.append_status(
+            issue_number=issue_number,
+            line=f"triaged → {data['recommended_specialist']} ({data['priority']}, {data['recommended_state']})",
+        )
+        if path is not None:
+            log(f"VAULT triage-mirror: issue=#{issue_number} -> {path}")
+    except Exception as exc:
+        log(f"VAULT triage-mirror FAILED (non-fatal): {type(exc).__name__}: {exc}")
+
+    # Reply to Andy
+    summary = (
+        f"**Triaged issue #{issue_number}**\n"
+        f"- Specialist: `{data['recommended_specialist']}`\n"
+        f"- Priority: `{data['priority']}` · State: `{data['recommended_state']}`\n"
+        f"- Labels: `{', '.join(applied) if applied else 'none'}`\n"
+        f"- Reason: {data['reason']}"
+    )
+    if failures:
+        summary += f"\n\n_(Some label changes failed; see issue comment for details.)_"
+    if data["quality_flags"]:
+        summary += f"\n\n**Quality flags:** {', '.join(data['quality_flags'])}"
+    await interaction.followup.send(summary, ephemeral=True)
+    log(f"TRIAGE done: issue=#{issue_number} specialist={data['recommended_specialist']}")
 
 
 async def handle_close(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
