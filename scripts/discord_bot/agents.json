@@ -1,9 +1,9 @@
 {
   "_comment": "Neural Bridge Discord bot config. Client IDs are public; bot tokens live in macOS keychain under the named service. authorized_user_ids must contain ONLY Andy's Discord user ID for V1.",
   "authorized_user_ids": [
-    "TODO_REPLACE_WITH_ANDYS_DISCORD_USER_ID"
+    "1288934410992750592"
   ],
-  "guild_id": "TODO_REPLACE_WITH_NEURAL_BRIDGE_GUILD_ID",
+  "guild_id": "1502587535384379533",
   "agents": [
     {
       "id": "senior-pm",
