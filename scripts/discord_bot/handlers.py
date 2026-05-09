@@ -13,7 +13,8 @@ import discord
 
 from .auth import REFUSAL_MESSAGE, is_authorized
 from .config import BotConfig
-from .github_client import create_issue
+from .github_client import close_issue, create_issue
+from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .thread_map import ThreadMap
 
@@ -25,6 +26,7 @@ def log(msg: str) -> None:
 # Singleton state for the daemon process.
 INTAKE = PMIntake()
 THREAD_MAP = ThreadMap()
+VAULT = ObsidianWriter()
 
 
 async def _gate(interaction: discord.Interaction, config: BotConfig, command: str) -> bool:
@@ -152,6 +154,25 @@ async def _file_issue(thread: discord.Thread, config: BotConfig, thread_id: str)
     INTAKE.mark_filed(thread_id=thread_id, issue_number=result.issue_number)
     THREAD_MAP.bind(result.issue_number, thread_id)
     log(f"INTAKE filed: thread={thread_id} issue=#{result.issue_number}")
+
+    # Mirror to Obsidian vault. Failing the mirror does NOT fail the file:
+    # GitHub is the canonical record; vault is a mirror.
+    session = INTAKE.get(thread_id)
+    if session is not None:
+        try:
+            note_path = VAULT.write_initial_note(
+                issue_number=result.issue_number,
+                title=title,
+                issue_url=result.issue_url,
+                source_request=session.original_request,
+                closure_criteria=session.closure_criteria(),
+                initial_owner="senior-pm",
+                discord_thread_url=thread_url,
+            )
+            log(f"VAULT mirror: issue=#{result.issue_number} -> {note_path}")
+        except Exception as exc:
+            log(f"VAULT mirror FAILED (non-fatal): issue=#{result.issue_number} {type(exc).__name__}: {exc}")
+
     await thread.send(
         f"**Filed as #{result.issue_number}.** {result.issue_url}\n\n"
         f"This thread stays open for follow-ups. Senior-pm or a specialist will pick it up next."
@@ -190,7 +211,52 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
 async def handle_close(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
     if not await _gate(interaction, config, "close"):
         return
-    await interaction.response.send_message(
-        f"Received close request for issue #{issue_number}. _Per-thread authorization-to-close ships in PR-K._",
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    closing_comment = (
+        "Closed via Discord bot per Andy's authorization. "
+        "Closure criteria checked against the issue body."
+    )
+    result = await close_issue(
+        repo=config.default_repo,
+        issue_number=issue_number,
+        comment=closing_comment,
+    )
+
+    if not result.ok:
+        log(f"CLOSE FAILED: issue=#{issue_number} error={result.error}")
+        await interaction.followup.send(
+            f"Failed to close issue #{issue_number}: `{result.error}`", ephemeral=True
+        )
+        return
+
+    log(f"CLOSED: issue=#{issue_number}")
+
+    # Mirror to vault (non-fatal if missing).
+    try:
+        path = VAULT.append_status(
+            issue_number=issue_number,
+            line="closed via Discord bot",
+            new_status="closed",
+        )
+        if path is not None:
+            log(f"VAULT close-mirror: issue=#{issue_number} -> {path}")
+    except Exception as exc:
+        log(f"VAULT close-mirror FAILED (non-fatal): issue=#{issue_number} {type(exc).__name__}: {exc}")
+
+    # If the issue had a bound thread, post a notice there.
+    thread_id = THREAD_MAP.get_thread(issue_number)
+    if thread_id is not None:
+        # Best-effort: try to fetch the thread and post. Failure is non-fatal.
+        try:
+            thread = interaction.client.get_channel(int(thread_id))
+            if thread is not None and isinstance(thread, discord.Thread):
+                await thread.send(f"**Issue #{issue_number} closed.**")
+        except Exception as exc:
+            log(f"thread close-notice FAILED (non-fatal): {type(exc).__name__}: {exc}")
+
+    await interaction.followup.send(
+        f"Closed issue #{issue_number}. Vault note updated if it existed.",
         ephemeral=True,
     )
