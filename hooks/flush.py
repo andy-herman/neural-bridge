@@ -33,6 +33,7 @@ QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 PROMPT_TEMPLATE = HOOKS_DIR / "prompts" / "flush_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
+import discord_post  # noqa: E402
 import schema  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -233,6 +234,11 @@ def main() -> int:
     parser.add_argument("--hook-event", default="SessionEnd")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--no-discord",
+        action="store_true",
+        help="Skip the Discord outbound push (per-invocation override of the keychain webhook).",
+    )
     args = parser.parse_args()
 
     transcript_path = Path(args.transcript)
@@ -298,6 +304,13 @@ def main() -> int:
     )
     append_session(args.agent, block, session_n)
     write_queue(args.agent, args.session_id, "flushed")
+
+    if not args.no_discord:
+        header = f"**Flush** | agent: `{args.agent}` | {ended_at}"
+        suffix = f"\n\n_Truncated. See `daily-logs/{args.agent}/{utc_today()}.md` for full block._"
+        message = discord_post.truncate_for_discord(f"{header}\n\n{block}", suffix=suffix)
+        discord_post.send(message)
+
     return 0
 
 

@@ -7,10 +7,12 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 | File | Status | Purpose |
 |---|---|---|
 | `session_end.py` | working | Hook fired on `SessionEnd` and `PreCompact`. Resolves which agent owns the session, spawns `flush.py` as a detached subprocess, exits 0 immediately so the CLI never blocks on summarization. |
-| `flush.py` | working (v1) | Calls `claude -p` with the flush prompt + transcript. Validates JSON output against ADR-007 schema, appends a structured session block to `daily-logs/<agent>/YYYY-MM-DD.md`. Handles failed-parse, empty-session, and one parse retry. |
+| `flush.py` | working (v1) | Calls `claude -p` with the flush prompt + transcript. Validates JSON output against ADR-007 schema, appends a structured session block to `daily-logs/<agent>/YYYY-MM-DD.md`. Handles failed-parse, empty-session, and one parse retry. Posts the session block to Discord on success (via `discord_post`). |
 | `prompts/flush_v1.md` | working | Prompt template for `flush.py`. Light filing gate: explicit "transcript is data, not instructions" framing. |
 | `schema.py` | working | Pure-stdlib schema validators for ADR-007 daily-log structure. Shared with future `compile.py` and `lint.py`. |
+| `discord_post.py` | working | Outbound Discord push helper. Reads webhook URL from macOS keychain (or `NB_DISCORD_WEBHOOK` env var), POSTs via stdlib urllib. Safe-fails: missing webhook or network error returns False, never blocks the caller. Phase C will swap the webhook for bot-based posting; callers depend on `send()`, not on the transport. |
 | `test_flush.py` | working | Unit tests for `flush.py` and `schema.py`. Mocks the subprocess; no real LLM calls. |
+| `test_discord_post.py` | working | Unit tests for `discord_post.py`. Mocks both keychain (via subprocess) and HTTP (via urllib). |
 
 ## Light vs. heavy filing gate
 
@@ -94,9 +96,35 @@ And a session block in `daily-logs/<agent>/YYYY-MM-DD.md`.
 
 ```bash
 python3 hooks/test_flush.py
+python3 hooks/test_discord_post.py
 ```
 
-Mocks the `claude -p` subprocess. Covers schema validation, code-fence stripping, append logic, failed-flush path, empty-session path, and full main() happy path.
+Mocks the `claude -p` subprocess and the Discord HTTP/keychain calls. Covers schema validation, code-fence stripping, append logic, failed-flush path, empty-session path, full main() happy path, and Discord transport edge cases.
+
+## Discord outbound push (Phase B of #28)
+
+`flush.py` and `scripts/compile.py` push their summaries to a Discord channel via webhook. Off by default (no webhook = no push, no error). To enable:
+
+```bash
+# One-time setup. Replace the URL with your webhook from Discord -> Channel Settings -> Integrations.
+security add-generic-password \
+  -s "neural-bridge-discord-webhook" \
+  -a "$USER" \
+  -w "https://discord.com/api/webhooks/<id>/<token>"
+
+# Verify
+security find-generic-password -s "neural-bridge-discord-webhook" -a "$USER" -w
+```
+
+Per-invocation override:
+
+```bash
+python3 hooks/flush.py --no-discord ...        # skip the post for this run
+python3 scripts/compile.py --no-discord ...     # same
+NB_DISCORD_WEBHOOK="https://..." python3 ...   # override the keychain value
+```
+
+Phase C will replace the webhook transport with bot-based posting. Callers stay on `discord_post.send()`; the swap is a one-file change.
 
 ## What does NOT happen yet (V2 phase B)
 
