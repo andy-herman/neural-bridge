@@ -68,6 +68,13 @@
       "token_keychain_service": "neural-bridge-discord-bot-social",
       "is_orchestrator": false,
       "display_name": "Social"
+    },
+    {
+      "id": "librarian",
+      "client_id": "1503033403665158326",
+      "token_keychain_service": "neural-bridge-discord-bot-librarian",
+      "is_orchestrator": false,
+      "display_name": "Librarian"
     }
   ]
 }
