@@ -7,6 +7,7 @@ they get real logic in PR-K.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import discord
@@ -64,8 +65,27 @@ from .triage import (
 )
 
 
+_logger = logging.getLogger("nb_discord")
+
+
 def log(msg: str) -> None:
-    print(f"[discord_bot] {msg}", file=sys.stderr, flush=True)
+    """Route through Python logging.
+
+    Output goes to two places:
+      - the rotating file at ~/Library/Logs/neural-bridge/discord-bot.log
+        (configured in main._configure_logging — 10MB cap, 7 backups)
+      - stderr (which launchd captures into discord-bot.stderr.log for
+        boot-time diagnostics; that file is small and doesn't need rotation
+        because most volume goes to the rotating .log instead)
+
+    If the logger has no handlers (e.g., handlers.py is imported by tests
+    without main.py setting up the daemon logger), we fall back to a
+    print to stderr so test output isn't swallowed.
+    """
+    if _logger.handlers:
+        _logger.info(msg)
+    else:
+        print(f"[discord_bot] {msg}", file=sys.stderr, flush=True)
 
 
 # Singleton state for the daemon process.
