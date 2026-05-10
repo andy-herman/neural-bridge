@@ -57,12 +57,25 @@ install_agent() {
     if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
         echo "  agent already loaded; unloading first..."
         launchctl bootout "gui/$(id -u)/${label}" || true
+        # bootout returns immediately but launchd may still be reaping the
+        # service — bootstrap'ing too fast yields "Bootstrap failed: 5: I/O
+        # error". Give it a beat to clean up.
+        sleep 2
     fi
 
-    launchctl bootstrap "gui/$(id -u)" "${target_path}"
+    # Bootstrap with one retry on transient I/O errors. The race above is
+    # the most common cause; a second bootstrap after a short sleep almost
+    # always succeeds.
+    if ! launchctl bootstrap "gui/$(id -u)" "${target_path}" 2>/dev/null; then
+        echo "  first bootstrap failed (likely bootout race); retrying after 3s..."
+        sleep 3
+        launchctl bootstrap "gui/$(id -u)" "${target_path}"
+    fi
     echo "  bootstrapped"
 
-    sleep 1
+    # Some daemons (notably discord-bot, which spins up 9 bot clients) take
+    # several seconds to fully come online. Give them time before checking.
+    sleep 3
     if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
         echo "  status: loaded"
     else
