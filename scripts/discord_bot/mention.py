@@ -39,6 +39,20 @@ def max_response_chars_for(agent_id: str) -> int:
     return MAX_RESPONSE_CHARS_PER_AGENT.get(agent_id, MAX_RESPONSE_CHARS)
 
 
+# Per-agent subprocess timeout (seconds). teaching-prep hits web + corpus reads
+# that routinely run past the 300s global default; 600s gives it real headroom.
+TIMEOUT_PER_AGENT: dict[str, int] = {
+    "teaching-prep": 600,
+    "recruiter": 480,  # charter write + create_agent action can exceed 300s default
+}
+
+
+def timeout_for(agent_id: str) -> int:
+    """Per-agent claude -p timeout, with a default."""
+    from .claude_invoke import DEFAULT_TIMEOUT
+    return TIMEOUT_PER_AGENT.get(agent_id, DEFAULT_TIMEOUT)
+
+
 # Per-agent extra read directories granted to claude -p via --add-dir. Used when
 # an agent's source-of-truth lives outside the daemon's CWD (e.g., the INFO 310A
 # corpus in the vault for the professor agent).
