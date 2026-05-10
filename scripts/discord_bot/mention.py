@@ -72,13 +72,69 @@ INFO_310A_CORPUS = str(
     Path.home() / "Documents" / "Luna Master" / "Neural Bridge" / "Corpus" / "INFO 310A"
 )
 HUSKYHUB_LABS = str(Path.home() / "Development" / "huskyhub")
+LUNA_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Luna")
+# Full Obsidian vault root — Luna gets read access to everything Andy has
+# in his vault so she can stay current on his life: Seoul E-Land FC fan
+# content (Sports/Seoul_E-Land), INFO 310 teaching schedule and lesson-plan
+# corpus (Neural Bridge/Corpus/INFO 310A), Neural Bridge build journal,
+# regulatory research, etc. The Luna/ subpath inside is where she writes
+# her own notes (charter forbids writing anywhere else under the vault).
+OBSIDIAN_VAULT_ROOT = str(Path.home() / "Documents" / "Luna Master")
 
 ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # Professor: read the corpus + the actual lab repo for end-to-end context.
     "teaching-prep": [INFO_310A_CORPUS, HUSKYHUB_LABS],
     # automation-engineer also benefits from huskyhub when reviewing lab code.
     "automation-engineer": [HUSKYHUB_LABS],
+    # Luna: full Obsidian vault read access (Andy's entire life context —
+    # Sports/Seoul_E-Land, Neural Bridge, INFO 310 teaching, regulatory
+    # research, etc.) plus her own working-memory file. She writes ONLY
+    # to Luna/notes.md per charter; the vault-root add-dir grants read
+    # context that travels across all her conversations.
+    "luna": [OBSIDIAN_VAULT_ROOT],
 }
+
+
+# ----------- Luna's persistent memory: vault notes auto-injection -----------
+#
+# Luna's notes.md is her own working memory across Discord sessions. Every
+# mention against Luna prefixes the rendered prompt with the current contents
+# of that file, so anything she's written travels with her into the next
+# conversation. She doesn't have to read it as a tool call — it's already in
+# her context window when claude -p starts.
+
+LUNA_NOTES_PATH = Path.home() / "Documents" / "Luna Master" / "Luna" / "notes.md"
+LUNA_NOTES_MAX_CHARS = 8000  # bound prompt size; truncate-with-ellipsis otherwise
+
+
+def _luna_notes_block() -> str:
+    """Read Luna's vault notes file and return a context block to prepend to
+    her mention prompt. Empty string if the file is missing or unreadable.
+    """
+    if not LUNA_NOTES_PATH.exists():
+        return ""
+    try:
+        notes = LUNA_NOTES_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if not notes.strip():
+        return ""
+    if len(notes) > LUNA_NOTES_MAX_CHARS:
+        # Keep the most recent end of the file (chronologically newest entries
+        # for an append-style notes file).
+        notes = "[…earlier notes truncated to fit prompt budget…]\n\n" + notes[-LUNA_NOTES_MAX_CHARS:]
+    sanitized = sanitize_untrusted_text(notes, "luna-notes")
+    return (
+        "## Your prior notes (auto-injected from "
+        "~/Documents/Luna Master/Luna/notes.md)\n\n"
+        "These are notes you wrote in past sessions about Andy's preferences, "
+        "voice, recurring commitments, open conversation threads, and decisions "
+        "he's made. Read them as your own working memory; they're already in "
+        "your context, so don't re-read the file via a tool call. When something "
+        "new is worth remembering across sessions, append to notes.md during "
+        "this session via Edit (the daemon grants you write access there).\n\n"
+        f"<luna-notes>\n{sanitized}\n</luna-notes>\n\n"
+    )
 
 
 def add_dirs_for(agent_id: str) -> list[str] | None:
@@ -225,7 +281,7 @@ def build_mention_prompt(
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
     sanitized_definition = sanitize_untrusted_text(agent_definition, "agent-definition")
-    return (
+    rendered = (
         template
         .replace("{agent_id}", agent_id)
         .replace("{agent_definition}", sanitized_definition)
@@ -233,6 +289,14 @@ def build_mention_prompt(
         .replace("{discord_history}", history_block)
         .replace("{message}", sanitized_message)
     )
+    # Luna gets her own working-memory file auto-injected at the very top of
+    # the prompt so context from past sessions (preferences, voice, recurring
+    # commitments, open threads) travels with her into the current one.
+    if agent_id == "luna":
+        prefix = _luna_notes_block()
+        if prefix:
+            rendered = prefix + rendered
+    return rendered
 
 
 def truncate_response(text: str, *, limit: int = MAX_RESPONSE_CHARS) -> str:
