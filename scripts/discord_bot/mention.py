@@ -73,17 +73,25 @@ INFO_310A_CORPUS = str(
 )
 HUSKYHUB_LABS = str(Path.home() / "Development" / "huskyhub")
 LUNA_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Luna")
+# Full Obsidian vault root — Luna gets read access to everything Andy has
+# in his vault so she can stay current on his life: Seoul E-Land FC fan
+# content (Sports/Seoul_E-Land), INFO 310 teaching schedule and lesson-plan
+# corpus (Neural Bridge/Corpus/INFO 310A), Neural Bridge build journal,
+# regulatory research, etc. The Luna/ subpath inside is where she writes
+# her own notes (charter forbids writing anywhere else under the vault).
+OBSIDIAN_VAULT_ROOT = str(Path.home() / "Documents" / "Luna Master")
 
 ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # Professor: read the corpus + the actual lab repo for end-to-end context.
     "teaching-prep": [INFO_310A_CORPUS, HUSKYHUB_LABS],
     # automation-engineer also benefits from huskyhub when reviewing lab code.
     "automation-engineer": [HUSKYHUB_LABS],
-    # Luna: read/write access to her own working-memory file in the vault.
-    # ~/Documents/Luna Master/Luna/notes.md is auto-injected into her mention
-    # prompt (see _luna_notes_block); --add-dir lets her append to it during
-    # a session.
-    "luna": [LUNA_VAULT],
+    # Luna: full Obsidian vault read access (Andy's entire life context —
+    # Sports/Seoul_E-Land, Neural Bridge, INFO 310 teaching, regulatory
+    # research, etc.) plus her own working-memory file. She writes ONLY
+    # to Luna/notes.md per charter; the vault-root add-dir grants read
+    # context that travels across all her conversations.
+    "luna": [OBSIDIAN_VAULT_ROOT],
 }
 
 
