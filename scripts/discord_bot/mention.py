@@ -135,6 +135,30 @@ MENTION_ALLOWED_TOOLS: dict[str, str] = {
     "security-reviewer":   "WebSearch,WebFetch,Read,Glob,Grep",  # read-only by design
     "docs-editor":         "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
     "senior-pm":           "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    # Luna: executive assistant. General read/write for her notes file +
+    # Calendar (read+write) and Gmail (read+draft) via the claude.ai MCP
+    # connectors. List specific tool names because Claude Code's --allowedTools
+    # doesn't support mcp__server__* wildcards. Add more entries here as Luna's
+    # workflow surfaces new tool needs.
+    "luna": (
+        "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit,"
+        "mcp__claude_ai_Google_Calendar__authenticate,"
+        "mcp__claude_ai_Google_Calendar__list_events,"
+        "mcp__claude_ai_Google_Calendar__create_event,"
+        "mcp__claude_ai_Google_Calendar__update_event,"
+        "mcp__claude_ai_Google_Calendar__delete_event,"
+        "mcp__claude_ai_Gmail__authenticate,"
+        "mcp__claude_ai_Gmail__search_threads,"
+        "mcp__claude_ai_Gmail__get_thread,"
+        "mcp__claude_ai_Gmail__create_draft,"
+        "mcp__claude_ai_Gmail__list_drafts,"
+        "mcp__claude_ai_Gmail__list_labels"
+    ),
+    # Librarian: Obsidian vault index + audits + restructure proposals.
+    # Read/Write/Edit on the vault (which is mounted into knowledge/ via
+    # symlink) plus Glob/Grep for navigation. No web, no MCP — pure
+    # local-substrate work.
+    "librarian":           "Read,Glob,Grep,Write,Edit",
 }
 
 
