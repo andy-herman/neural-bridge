@@ -98,6 +98,19 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # their own subdirs. (Phase 5 of the Echo build.)
     "content": [OBSIDIAN_VAULT_ROOT],
     "social": [OBSIDIAN_VAULT_ROOT],
+    # Echo: needs full vault read to do profile maintenance (reads Build
+    # Journal, Drafts, Voice, etc.) AND voice authentication reviews (which
+    # consume the Andy Profile/ files). Writes ONLY to Andy Profile/ per
+    # charter; vault-root add-dir is for reads.
+    "echo": [OBSIDIAN_VAULT_ROOT],
+    # UX-designer: needs read access to the blog repo (Astro templates,
+    # existing CSS, content frontmatter conventions) since that's the
+    # primary surface she designs. Plus vault read for design rationale
+    # docs and reference samples.
+    "ux-designer": [
+        str(Path.home() / "Development" / "neural-bridge-blog"),
+        OBSIDIAN_VAULT_ROOT,
+    ],
 }
 
 
@@ -276,6 +289,16 @@ MENTION_ALLOWED_TOOLS: dict[str, str] = {
     # symlink) plus Glob/Grep for navigation. No web, no MCP — pure
     # local-substrate work.
     "librarian":           "Read,Glob,Grep,Write,Edit",
+    # Echo: Andy's voice-double. Profile maintenance + voice authentication
+    # review of drafts. Pure local work — reads vault corpus + draft text,
+    # writes profile files + structured review verdicts. No web needed
+    # (her job is observation of Andy's own writing, not external research).
+    "echo":                "Read,Glob,Grep,Write,Edit",
+    # UX-designer: visual / interaction design for neural-bridge-blog and
+    # other web surfaces. Web tools so she can fetch design references
+    # (typography, palette examples, component patterns). Write/Edit for
+    # CSS, Astro template fragments, and design rationale notes.
+    "ux-designer":         "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
 }
 
 
