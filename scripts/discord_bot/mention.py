@@ -90,13 +90,22 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # Sports/Seoul_E-Land, Neural Bridge, INFO 310 teaching, regulatory
     # research, etc.) plus her own working-memory file. She writes ONLY
     # to Luna/notes.md per charter; the vault-root add-dir grants read
-    # context that travels across all her conversations.
-    "luna": [OBSIDIAN_VAULT_ROOT],
+    # context that travels across all her conversations. Blog-repo read
+    # access supports her `open_pr_with_changes` push rights — she needs
+    # to Read existing files before deciding what to change.
+    "luna": [
+        OBSIDIAN_VAULT_ROOT,
+        str(Path.home() / "Development" / "neural-bridge-blog"),
+    ],
     # Content + social: full vault read so they can pull style observations
     # from Andy Profile/, build journal context for technical pieces, the
     # Voice corpus for LinkedIn samples, etc. Charter constrains writes to
-    # their own subdirs. (Phase 5 of the Echo build.)
-    "content": [OBSIDIAN_VAULT_ROOT],
+    # their own subdirs. (Phase 5 of the Echo build.) Content also gets
+    # blog-repo read so she can ship posts via `open_pr_with_changes`.
+    "content": [
+        OBSIDIAN_VAULT_ROOT,
+        str(Path.home() / "Development" / "neural-bridge-blog"),
+    ],
     "social": [OBSIDIAN_VAULT_ROOT],
     # Echo: needs full vault read to do profile maintenance (reads Build
     # Journal, Drafts, Voice, etc.) AND voice authentication reviews (which

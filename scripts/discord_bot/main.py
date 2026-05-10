@@ -39,6 +39,7 @@ from .config import AgentConfig, BotConfig, load_config
 from .handlers import (
     handle_close,
     handle_mention,
+    handle_pr_approval,
     handle_pm_summary,
     handle_pm_task,
     handle_squad_discuss,
@@ -46,6 +47,7 @@ from .handlers import (
     log,
     on_thread_message,
 )
+from .auth import is_authorized
 from .mention import is_mention_for_self
 from .keychain import get_token
 
@@ -162,6 +164,20 @@ class AgentClient(discord.Client):
             append_message(message, self.bot_config)
         except Exception as exc:
             log(f"profile_accumulator error: {type(exc).__name__}: {exc}")
+
+        # -1. PR-approval intercept. If this channel has a staged PR proposal
+        # for this agent and the message looks like `approve <id>` / `cancel
+        # <id>` from an authorized user, execute it BEFORE any other routing
+        # — approval is a short text reply that wouldn't otherwise trigger
+        # mention or DM handling. This must come before DM routing because
+        # DMs reach handle_mention which would treat "approve" as a fresh
+        # mention turn and burn a Claude call.
+        if not message.author.bot and is_authorized(message.author.id, self.bot_config):
+            try:
+                if await handle_pr_approval(self, message, self.bot_config):
+                    return
+            except Exception as exc:
+                log(f"on_message (pr_approval) error: {type(exc).__name__}: {exc}")
 
         # 0. Direct messages = implicit mention. In a 1:1 DM with this bot,
         # every message from the human is treated as if they @-mentioned the
