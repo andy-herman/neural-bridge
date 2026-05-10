@@ -282,7 +282,18 @@ MENTION_ALLOWED_TOOLS: dict[str, str] = {
         "mcp__claude_ai_Gmail__get_thread,"
         "mcp__claude_ai_Gmail__create_draft,"
         "mcp__claude_ai_Gmail__list_drafts,"
-        "mcp__claude_ai_Gmail__list_labels"
+        "mcp__claude_ai_Gmail__list_labels,"
+        # Google Drive (read-side only, mirroring the Gmail "no destructive
+        # writes" pattern). Luna needs these to act as file-fetcher for the
+        # squad per her Drive-overflow charter. If she needs to create/copy
+        # files or change sharing permissions, surface to Andy or
+        # @automation-engineer rather than wiring those tools here.
+        "mcp__claude_ai_Google_Drive__search_files,"
+        "mcp__claude_ai_Google_Drive__list_recent_files,"
+        "mcp__claude_ai_Google_Drive__read_file_content,"
+        "mcp__claude_ai_Google_Drive__download_file_content,"
+        "mcp__claude_ai_Google_Drive__get_file_metadata,"
+        "mcp__claude_ai_Google_Drive__get_file_permissions"
     ),
     # Librarian: Obsidian vault index + audits + restructure proposals.
     # Read/Write/Edit on the vault (which is mounted into knowledge/ via
