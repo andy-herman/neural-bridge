@@ -2,8 +2,9 @@
 # Install Neural Bridge launchd user agents.
 #
 # Currently installs:
-#   - com.andyherman.neural-bridge.discord-bot     (always-on Discord daemon)
-#   - com.andyherman.neural-bridge.publish-prep    (Sunday 18:00 PT publish prep)
+#   - com.andyherman.neural-bridge.discord-bot      (always-on Discord daemon)
+#   - com.andyherman.neural-bridge.publish-prep     (Sunday 18:00 PT publish prep)
+#   - com.andyherman.neural-bridge.compile-nightly  (03:00 daily concept compile)
 #
 # Idempotent: safe to run multiple times. Re-bootstraps any agent that's
 # already loaded.
@@ -13,6 +14,7 @@ set -euo pipefail
 AGENTS=(
     "com.andyherman.neural-bridge.discord-bot"
     "com.andyherman.neural-bridge.publish-prep"
+    "com.andyherman.neural-bridge.compile-nightly"
 )
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,9 +88,11 @@ echo ""
 echo "Tail logs:"
 echo "  tail -f ${LOG_DIR}/discord-bot.stderr.log"
 echo "  tail -f ${LOG_DIR}/publish-prep.stderr.log"
+echo "  tail -f ${LOG_DIR}/compile-nightly.stderr.log"
 echo ""
-echo "Manually fire publish-prep (out-of-schedule test):"
+echo "Manually fire a scheduled job (out-of-schedule test):"
 echo "  launchctl kickstart gui/\$(id -u)/com.andyherman.neural-bridge.publish-prep"
+echo "  launchctl kickstart gui/\$(id -u)/com.andyherman.neural-bridge.compile-nightly"
 echo ""
 echo "Uninstall with:"
 echo "  ./scripts/launchd/uninstall.sh"
