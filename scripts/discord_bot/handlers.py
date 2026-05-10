@@ -201,6 +201,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         return
 
     agent_id = client.agent.id
+    user_id = str(message.author.id)
 
     if not MENTION_PROMPT_PATH.exists():
         await message.channel.send(f"_(internal: mention prompt missing at {MENTION_PROMPT_PATH})_")
