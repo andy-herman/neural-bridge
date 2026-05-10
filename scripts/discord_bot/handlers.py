@@ -20,6 +20,7 @@ from .client_registry import post_as_agent
 from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
 from .agent_builder import execute_create_agent
+from .attachments import extract_attachments, validate_attachment_batch
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -279,23 +280,66 @@ async def handle_mention(client, message, config: BotConfig) -> None:
 
     # Extract any structured action block before truncating + posting.
     parsed = extract_actions(stdout)
+    # Then extract any attachments block from what's left (order matters — both
+    # are stripped from visible response before chunk + post).
+    parsed_attach = extract_attachments(parsed.visible_response)
     response_cap = max_response_chars_for(agent_id)
-    response = truncate_response(parsed.visible_response, limit=response_cap)
+    response = truncate_response(parsed_attach.visible_response, limit=response_cap)
 
-    if not response and not parsed.actions and not parsed.parse_error:
+    # Validate attachments up front so we can attach valid ones to the last
+    # chunk and surface a fallback line for any rejected paths.
+    valid_files: list = []
+    attach_errors: list[tuple[str, str]] = []
+    over_cap = False
+    if parsed_attach.paths:
+        validated = validate_attachment_batch(parsed_attach.paths)
+        valid_files = validated.valid_paths
+        attach_errors = validated.errors
+        over_cap = validated.over_cap
+
+    if not response and not parsed.actions and not parsed.parse_error and not valid_files:
         log(f"MENTION empty response: agent={agent_id}")
         await message.channel.send("_(I had nothing useful to add. Try rephrasing or @-mention a different specialist.)_")
         return
 
     if response:
         # Chunk into multiple messages if the response exceeds Discord's per-message limit.
+        # Files (if any) attach to the last chunk so they appear after the prose context.
+        import discord  # local import — keeps module test-importable on system Python
         chunks = chunk_for_discord(response)
         for i, chunk in enumerate(chunks):
             # Tag EVERY chunk when there's a continuation, including part 1 — otherwise users
             # don't know more is coming and stop reading at the end of the first message.
             if len(chunks) > 1:
                 chunk = f"_(part {i + 1}/{len(chunks)})_\n{chunk}"
-            await message.channel.send(chunk)
+            is_last = (i == len(chunks) - 1)
+            if is_last and valid_files:
+                files = [discord.File(str(p)) for p in valid_files]
+                await message.channel.send(chunk, files=files)
+            else:
+                await message.channel.send(chunk)
+    elif valid_files:
+        # No prose response, just files — send them on their own.
+        import discord
+        files = [discord.File(str(p)) for p in valid_files]
+        await message.channel.send(files=files)
+
+    # Attachment validation feedback (rejected paths + over-cap).
+    if parsed_attach.parse_error:
+        await message.channel.send(
+            f"_(I tried to emit an attachments block but it didn't parse: `{parsed_attach.parse_error}`. "
+            f"No files were attached.)_"
+        )
+        log(f"MENTION attachments parse FAILED: agent={agent_id} error={parsed_attach.parse_error}")
+    elif attach_errors or over_cap:
+        lines = [f"_(Attachment issues from `{agent_id}`:)_"]
+        for path, reason in attach_errors:
+            short = path if len(path) <= 80 else "…" + path[-77:]
+            lines.append(f"- ⚠️ `{short}` rejected: `{reason}`")
+        if over_cap:
+            lines.append(f"- ⚠️ More than {5} attachments requested; only the first 5 were considered.")
+        await message.channel.send("\n".join(lines)[:1900])
+        log(f"MENTION attachments rejected: agent={agent_id} count={len(attach_errors)} over_cap={over_cap}")
 
     # Action block handling.
     if parsed.parse_error:
