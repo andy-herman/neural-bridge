@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.publish-prep</string>
+
+    <!-- Runs scripts/publish/prepare_week.py: finds next eligible draft in
+         the blog repo, generates a LinkedIn variant via claude -p, generates
+         a deterministic X draft, writes both to the vault, posts a Discord
+         briefing. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.publish.prepare_week</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- Sunday 18:00 local time. Weekday: Sunday=0 in launchd. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- One-shot per fire; do not keep alive between runs. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/publish-prep.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/publish-prep.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <!-- PATH includes ~/.local/bin so `claude` resolves; Homebrew for `gh`. -->
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
