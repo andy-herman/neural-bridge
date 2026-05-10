@@ -1,27 +1,38 @@
 #!/bin/bash
-# Uninstall the Neural Bridge Discord bot launchd user agent.
+# Uninstall all Neural Bridge launchd user agents.
 
 set -euo pipefail
 
-PLIST_NAME="com.andyherman.neural-bridge.discord-bot.plist"
-PLIST_LABEL="com.andyherman.neural-bridge.discord-bot"
-TARGET_PATH="${HOME}/Library/LaunchAgents/${PLIST_NAME}"
+AGENTS=(
+    "com.andyherman.neural-bridge.discord-bot"
+    "com.andyherman.neural-bridge.publish-prep"
+)
 
-echo "Uninstalling ${PLIST_LABEL}..."
+uninstall_agent() {
+    local label="$1"
+    local plist="${label}.plist"
+    local target_path="${HOME}/Library/LaunchAgents/${plist}"
 
-if launchctl print "gui/$(id -u)/${PLIST_LABEL}" >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/${PLIST_LABEL}"
-    echo "  agent unloaded"
-else
-    echo "  agent was not loaded"
-fi
+    echo "Uninstalling ${label}..."
 
-if [[ -f "${TARGET_PATH}" ]]; then
-    rm -f "${TARGET_PATH}"
-    echo "  removed ${TARGET_PATH}"
-else
-    echo "  no plist at ${TARGET_PATH}"
-fi
+    if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/${label}"
+        echo "  agent unloaded"
+    else
+        echo "  agent was not loaded"
+    fi
 
-echo ""
+    if [[ -f "${target_path}" ]]; then
+        rm -f "${target_path}"
+        echo "  removed ${target_path}"
+    else
+        echo "  no plist at ${target_path}"
+    fi
+    echo ""
+}
+
+for label in "${AGENTS[@]}"; do
+    uninstall_agent "${label}"
+done
+
 echo "Done. Logs at ~/Library/Logs/neural-bridge/ are kept (delete manually if you want)."
