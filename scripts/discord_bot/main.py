@@ -26,7 +26,10 @@ Pre-req:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -45,6 +48,41 @@ from .handlers import (
 )
 from .mention import is_mention_for_self
 from .keychain import get_token
+
+
+def _configure_logging() -> None:
+    """Wire up rotating-file logging at the daemon entrypoint.
+
+    The handlers.log() helper writes through Python's logging module, so
+    this setup is what gives daemon output a 10MB rotating file with 7
+    backups. We also keep the StreamHandler on stderr so launchd's
+    StandardErrorPath continues to capture lines for crash diagnosis.
+    """
+    log_dir = Path.home() / "Library" / "Logs" / "neural-bridge"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "discord-bot.log"
+
+    logger = logging.getLogger("nb_discord")
+    if logger.handlers:
+        return  # already configured (e.g., reload during tests)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    fmt = logging.Formatter("%(asctime)s [discord_bot] %(message)s",
+                            datefmt="%Y-%m-%dT%H:%M:%SZ")
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=10 * 1024 * 1024,  # 10 MB per file
+        backupCount=7,                # keep 7 archives → ~70 MB total cap
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(fmt)
+    logger.addHandler(stderr_handler)
 
 
 class AgentClient(discord.Client):
@@ -190,6 +228,7 @@ async def run() -> None:
 
 
 def main() -> int:
+    _configure_logging()
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

@@ -36,11 +36,13 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
-    <!-- stdout / stderr. main.py writes its log lines to stderr; flush.py and
-         compile.py do not run inside this daemon, so the stderr file is the
-         primary log surface. -->
-    <key>StandardOutPath</key>
-    <string>/Users/andyherman/Library/Logs/neural-bridge/discord-bot.stdout.log</string>
+    <!-- stdout / stderr. The daemon now configures its own RotatingFileHandler
+         in main._configure_logging which writes to discord-bot.log (10MB cap,
+         7 backups). launchd's StandardErrorPath captures anything that escapes
+         the logger (boot-time crashes before _configure_logging runs, asyncio
+         tracebacks, discord.py library output) — that file stays small in
+         practice. StandardOutPath is unused (daemon doesn't print to stdout)
+         so we don't redirect it. -->
     <key>StandardErrorPath</key>
     <string>/Users/andyherman/Library/Logs/neural-bridge/discord-bot.stderr.log</string>
 
