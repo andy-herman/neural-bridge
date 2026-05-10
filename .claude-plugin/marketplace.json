@@ -14,7 +14,7 @@
       "name": "neural-bridge-core",
       "source": "./plugins/neural-bridge-core",
       "description": "V1 specialist agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor) sharing a markdown wiki memory.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "author": {
         "name": "Andy Herman",
         "url": "https://github.com/andy-herman"
