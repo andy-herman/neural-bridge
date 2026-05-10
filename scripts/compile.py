@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -326,6 +327,28 @@ def strip_code_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _subprocess_env_for_compile_claude() -> dict[str, str]:
+    """Environment for compile.py-spawned `claude -p` subprocesses.
+
+    Sets NB_AGENT=compile so the SessionEnd hook attributes the spawned
+    session correctly in daily-logs (instead of falling through to
+    `_unattributed`).
+
+    Sets NB_NO_DISCORD=1 so flush.py writes the daily-log entry but
+    skips the Discord post — a 70-candidate dry-run otherwise floods
+    #neural-bridge-outbound with ~140 flush messages. Audit trail
+    (daily-log) is preserved; only the Discord notification is muted.
+
+    Strips NB_DISCORD_WEBHOOK in case it was set in the parent env —
+    defense in depth so a webhook URL cannot leak into a child
+    process's environment.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env["NB_AGENT"] = "compile"
+    env["NB_NO_DISCORD"] = "1"
+    return env
+
+
 def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
     """Invoke `claude -p` with the filing gate prompt. Return (ok, parsed, error)."""
     try:
@@ -335,6 +358,7 @@ def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict 
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            env=_subprocess_env_for_compile_claude(),
         )
     except subprocess.TimeoutExpired:
         return False, None, "timeout"
@@ -463,6 +487,7 @@ def call_concept_writer(prompt: str, model: str, timeout: int) -> tuple[bool, st
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            env=_subprocess_env_for_compile_claude(),
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
