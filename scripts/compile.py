@@ -9,19 +9,25 @@ writes a real concept article via a separate `claude -p` call.
 Phase A (shipped): filing gate, dry-run default, provenance frontmatter,
 quarantine path, run-log to docs/compile/.
 
-Phase B core (this file): rich concept article writer (separate claude
-call), never-overwrite history (existing concepts move to
+Phase B core: rich concept article writer (separate claude call),
+never-overwrite history (existing concepts move to
 concepts/.history/<slug>/<timestamp>.md), knowledge/log.md and
 knowledge/index.md refresh after each live run.
 
-Phase B expansion (next PR): two-pass per-agent then cross-agent compile,
-cross-link writer for connections/, --flush flag.
+Phase B expansion (this file): connection writer (heuristic: shared
+source session_id between two PROMOTE'd candidates produces a
+knowledge/connections/<a>--<b>.md file), per-agent containment via
+--agent flag, --flush flag for manual single-session flush (folded
+from issue #10).
 
 Usage:
   python3 scripts/compile.py                     # dry-run by default
   python3 scripts/compile.py --no-dry-run        # actually write to concepts/
   python3 scripts/compile.py --since 2026-05-08  # only logs modified after
+  python3 scripts/compile.py --agent research    # per-agent containment
   python3 scripts/compile.py --no-rich-body      # skip concept writer (cheap)
+  python3 scripts/compile.py --no-connections    # skip connection writer
+  python3 scripts/compile.py --flush /path/to/transcript.jsonl --agent research
   python3 scripts/compile.py --verbose
 
 Cron-ready. Runs serial (one filing-gate call at a time, one writer call
@@ -47,19 +53,21 @@ KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
 HISTORY_DIR = CONCEPTS_DIR / ".history"
 QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
+CONNECTIONS_DIR = KNOWLEDGE_DIR / "connections"
 WIKI_INDEX = KNOWLEDGE_DIR / "index.md"
 WIKI_LOG = KNOWLEDGE_DIR / "log.md"
 DRY_RUN_DIR = REPO_ROOT / "docs" / "compile"
 COMPILE_STATE_FILE = SCRIPTS_DIR / ".compile_state.json"
 FILING_GATE_PROMPT = SCRIPTS_DIR / "prompts" / "filing_gate_v1.md"
 CONCEPT_WRITER_PROMPT = SCRIPTS_DIR / "prompts" / "concept_writer_v1.md"
+FLUSH_SCRIPT = HOOKS_DIR / "flush.py"
 
 sys.path.insert(0, str(HOOKS_DIR))
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-COMPILER_VERSION = "1.1"  # bumped: Phase B core
+COMPILER_VERSION = "1.2"  # bumped: Phase B expansion (connections, --agent, --flush)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
 
@@ -244,8 +252,11 @@ def session_to_excerpt(rec: SessionRecord, max_chars: int = 4000) -> str:
     return text
 
 
-def find_daily_log_files(since: datetime | None = None) -> list[Path]:
-    """Return all daily-log files. If `since` is given, filter by mtime."""
+def find_daily_log_files(since: datetime | None = None,
+                          agent: str | None = None) -> list[Path]:
+    """Return all daily-log files. If `since` is given, filter by mtime.
+    If `agent` is given, restrict to daily-logs/<agent>/ (per-agent containment).
+    """
     if not DAILY_LOGS_DIR.exists():
         return []
     out: list[Path] = []
@@ -253,6 +264,8 @@ def find_daily_log_files(since: datetime | None = None) -> list[Path]:
         if not agent_dir.is_dir():
             continue
         if agent_dir.name.startswith("_"):
+            continue
+        if agent is not None and agent_dir.name != agent:
             continue
         for f in sorted(agent_dir.glob("*.md")):
             if since is not None:
@@ -575,6 +588,107 @@ def refresh_index(promoted_slugs: list[str], dry_run: bool) -> None:
     WIKI_INDEX.write_text(new_text, encoding="utf-8")
 
 
+# ---------- connection writer (Phase B expansion) ----------
+
+@dataclass
+class Connection:
+    slug_a: str  # always the alphabetically first slug
+    slug_b: str  # always the alphabetically second slug
+    shared_session_ids: list[str]
+    shared_sources: list[dict]
+
+
+def find_shared_session_pairs(candidates: list[ConceptCandidate]) -> list[Connection]:
+    """Heuristic: two concepts are connected if they share a source session_id.
+
+    A concept's source list is a list of dicts with `session_id`. If concept A
+    and concept B both list the same session_id in their sources, they emerged
+    from the same work and are likely related.
+
+    Returns Connection records with slugs alphabetized for stable filenames.
+    Self-pairs and pairs with no shared session are excluded.
+    """
+    out: list[Connection] = []
+    for i, a in enumerate(candidates):
+        a_sids = {s["session_id"] for s in a.sources if s.get("session_id")}
+        if not a_sids:
+            continue
+        for b in candidates[i + 1:]:
+            b_sids = {s["session_id"] for s in b.sources if s.get("session_id")}
+            shared = sorted(a_sids & b_sids)
+            if not shared:
+                continue
+            slug_a, slug_b = sorted([a.slug, b.slug])
+            shared_sources = [
+                s for s in a.sources + b.sources
+                if s.get("session_id") in shared
+            ]
+            out.append(Connection(
+                slug_a=slug_a, slug_b=slug_b,
+                shared_session_ids=shared,
+                shared_sources=shared_sources,
+            ))
+    return out
+
+
+def render_connection(conn: Connection) -> str:
+    """Compose the connection markdown file."""
+    sids_yaml = "[" + ", ".join(conn.shared_session_ids) + "]"
+    sources_yaml = "\n".join(
+        f"  - agent: {s['agent']}\n"
+        f"    session_id: {s['session_id']}\n"
+        f"    source_log: {s['source_log']}"
+        for s in conn.shared_sources
+    )
+    fm = (
+        "---\n"
+        "type: connection\n"
+        f"discovered_via: shared-session\n"
+        f"concepts: [{conn.slug_a}, {conn.slug_b}]\n"
+        f"shared_session_ids: {sids_yaml}\n"
+        f"created_at: {utc_iso()}\n"
+        f'compiler_version: "{COMPILER_VERSION}"\n'
+        "shared_sources:\n"
+        f"{sources_yaml}\n"
+        "---\n\n"
+    )
+    body = (
+        f"# [[{conn.slug_a}]] ↔ [[{conn.slug_b}]]\n\n"
+        f"Both concepts emerged from the same source session(s): "
+        f"{', '.join(f'`{s}`' for s in conn.shared_session_ids)}. "
+        f"Shared origin suggests they cover related ideas from the same exploration.\n\n"
+        f"## Why these are linked\n\n"
+        f"Discovered via the `shared-session` heuristic: a candidate-pair where both "
+        f"concepts cite at least one source session_id in common after the filing "
+        f"gate has independently approved each one.\n\n"
+        f"## Source sessions\n\n"
+    )
+    body += "\n".join(
+        f"- `{s['session_id']}` (agent: `{s['agent']}`, log: `{s['source_log']}`)"
+        for s in conn.shared_sources
+    ) + "\n\n"
+    body += "## Related\n\n"
+    body += f"- [[{conn.slug_a}]]\n- [[{conn.slug_b}]]\n"
+    return fm + body
+
+
+def write_connection(conn: Connection, dry_run: bool) -> Path | None:
+    """Write a connection file. Returns the path written, or None if skipped.
+
+    Idempotent: if the target file exists, returns None without overwriting
+    (connections accumulate; we never replace an existing one).
+    Skipped entirely in dry-run.
+    """
+    if dry_run:
+        return None
+    target = CONNECTIONS_DIR / f"{conn.slug_a}--{conn.slug_b}.md"
+    if target.exists():
+        return None  # idempotent
+    CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_connection(conn), encoding="utf-8")
+    return target
+
+
 # ---------- state ----------
 
 def read_compile_state() -> dict:
@@ -585,6 +699,37 @@ def read_compile_state() -> dict:
 
 def write_compile_state(state: dict) -> None:
     COMPILE_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+# ---------- --flush delegate (Phase B expansion, folded from issue #10) ----------
+
+def _run_flush_delegate(transcript_path: str, agent: str, verbose: bool) -> int:
+    """Manual single-session flush. Delegates to hooks/flush.py.
+
+    The flush script normally runs as a detached subprocess from session_end.py.
+    --flush mode runs it synchronously in the foreground for a single transcript,
+    so the user can backfill or replay one session without the nightly batch.
+
+    Returns flush.py's exit code passed through.
+    """
+    if not Path(transcript_path).exists():
+        print(f"error: transcript not found at {transcript_path}", file=sys.stderr)
+        return 1
+    if not FLUSH_SCRIPT.exists():
+        print(f"error: flush.py not found at {FLUSH_SCRIPT}", file=sys.stderr)
+        return 1
+    log_line(verbose, f"flush delegate: agent={agent} transcript={transcript_path}")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(FLUSH_SCRIPT),
+             "--transcript", transcript_path,
+             "--agent", agent],
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        print("error: python interpreter not found", file=sys.stderr)
+        return 1
+    return result.returncode
 
 
 # ---------- main ----------
@@ -615,7 +760,33 @@ def main() -> int:
         action="store_true",
         help="Skip the concept-writer claude call; PROMOTE'd concepts get the Phase A stub.",
     )
+    parser.add_argument(
+        "--agent",
+        default=None,
+        help="Per-agent containment: only process daily-logs for this agent (e.g., research). "
+        "Useful for spot-debugging or when one agent's logs are suspect and you don't want "
+        "their candidates influencing the cross-agent merge.",
+    )
+    parser.add_argument(
+        "--no-connections",
+        action="store_true",
+        help="Skip writing connection files for shared-session candidate pairs.",
+    )
+    parser.add_argument(
+        "--flush",
+        default=None,
+        metavar="TRANSCRIPT_PATH",
+        help="One-shot manual flush mode (folded from issue #10). Delegates to hooks/flush.py "
+        "for a single transcript and exits. Requires --agent to be set.",
+    )
     args = parser.parse_args()
+
+    # --flush: short-circuit to manual flush mode and return.
+    if args.flush:
+        if not args.agent:
+            print("error: --flush requires --agent <agent-id>", file=sys.stderr)
+            return 1
+        return _run_flush_delegate(args.flush, args.agent, args.verbose)
 
     if not FILING_GATE_PROMPT.exists():
         print(f"error: filing gate prompt missing at {FILING_GATE_PROMPT}", file=sys.stderr)
@@ -632,8 +803,8 @@ def main() -> int:
     elif state.get("last_run_at"):
         since = datetime.strptime(state["last_run_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
-    log_files = find_daily_log_files(since=since)
-    log_line(args.verbose, f"found {len(log_files)} daily-log files (since={since})")
+    log_files = find_daily_log_files(since=since, agent=args.agent)
+    log_line(args.verbose, f"found {len(log_files)} daily-log files (since={since}, agent={args.agent or 'ALL'})")
 
     candidates = gather_candidates(log_files)
     log_line(args.verbose, f"gathered {len(candidates)} unique candidates")
@@ -651,9 +822,16 @@ def main() -> int:
     )
 
     counts = {PROMOTE: 0, QUARANTINE: 0, REJECT: 0, "errors": 0,
-              "skipped_already_compiled": 0, "writer_failures": 0, "archived": 0}
+              "skipped_already_compiled": 0, "writer_failures": 0,
+              "archived": 0, "connections_written": 0}
     promoted_slugs: list[str] = []
-    run_log_lines: list[str] = [f"# Compile run — {utc_iso()}", "", f"Dry run: {args.dry_run}", ""]
+    promoted_candidates: list[ConceptCandidate] = []  # for connection writer
+    run_log_lines: list[str] = [
+        f"# Compile run — {utc_iso()}", "",
+        f"Dry run: {args.dry_run}",
+        f"Agent scope: {args.agent or 'ALL'}",
+        "",
+    ]
 
     for cand in candidates:
         if cand.slug in state["compiled_concepts"] and not args.dry_run:
@@ -700,6 +878,7 @@ def main() -> int:
             target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=rendered)
             counts[PROMOTE] += 1
             promoted_slugs.append(cand.slug)
+            promoted_candidates.append(cand)
             tag = "PROMOTE-rich" if rendered else "PROMOTE-stub"
             run_log_lines.append(f"- {tag} {cand.slug} -> {target.relative_to(REPO_ROOT)}")
             if not args.dry_run:
@@ -727,6 +906,24 @@ def main() -> int:
     if not args.dry_run:
         write_compile_state(state)
 
+    # Phase B expansion: connection writer.
+    # For PROMOTE'd candidates only, find pairs that share a source session_id
+    # and write a connection file at knowledge/connections/<slug-a>--<slug-b>.md.
+    if not args.no_connections and len(promoted_candidates) >= 2:
+        connections = find_shared_session_pairs(promoted_candidates)
+        for conn in connections:
+            target = write_connection(conn, dry_run=args.dry_run)
+            if target is not None:
+                counts["connections_written"] += 1
+                run_log_lines.append(
+                    f"- CONNECTION {conn.slug_a} ↔ {conn.slug_b} -> {target.relative_to(REPO_ROOT)}"
+                )
+            elif args.dry_run:
+                # Surface dry-run intent.
+                run_log_lines.append(
+                    f"- CONNECTION (dry-run) {conn.slug_a} ↔ {conn.slug_b} via {conn.shared_session_ids}"
+                )
+
     # Phase B: refresh log.md and index.md (live mode only).
     summary = (
         f"compile complete: PROMOTE={counts[PROMOTE]} QUARANTINE={counts[QUARANTINE]} "
@@ -734,6 +931,8 @@ def main() -> int:
     )
     if counts["archived"] or counts["writer_failures"]:
         summary += f" archived={counts['archived']} writer_failures={counts['writer_failures']}"
+    if counts["connections_written"]:
+        summary += f" connections={counts['connections_written']}"
 
     log_action_lines = [line for line in run_log_lines if line.startswith("- ")]
     append_to_log(summary, log_action_lines, dry_run=args.dry_run)

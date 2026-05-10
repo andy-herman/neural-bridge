@@ -719,5 +719,275 @@ class TestMainPhaseB(unittest.TestCase):
         self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original_log)
 
 
+# ============================================================================
+# Phase B expansion: connection writer, --agent, --flush
+# ============================================================================
+
+
+class TestFindSharedSessionPairs(unittest.TestCase):
+    def _candidate(self, slug: str, source_sids: list[str]) -> "cmp.ConceptCandidate":
+        return cmp.ConceptCandidate(
+            slug=slug,
+            summary=f"summary for {slug}",
+            sources=[
+                {"agent": "research", "session_id": sid,
+                 "transcript_sha256": "h", "source_log": "log", "session_n": 1}
+                for sid in source_sids
+            ],
+            excerpt="...",
+        )
+
+    def test_finds_pair_with_shared_session(self):
+        cands = [self._candidate("alpha", ["s1"]), self._candidate("beta", ["s1", "s2"])]
+        pairs = cmp.find_shared_session_pairs(cands)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual((pairs[0].slug_a, pairs[0].slug_b), ("alpha", "beta"))
+        self.assertEqual(pairs[0].shared_session_ids, ["s1"])
+
+    def test_no_pairs_returns_empty(self):
+        cands = [self._candidate("alpha", ["s1"]), self._candidate("beta", ["s2"])]
+        self.assertEqual(cmp.find_shared_session_pairs(cands), [])
+
+    def test_alphabetizes_slugs(self):
+        cands = [self._candidate("zeta", ["s1"]), self._candidate("alpha", ["s1"])]
+        pairs = cmp.find_shared_session_pairs(cands)
+        self.assertEqual((pairs[0].slug_a, pairs[0].slug_b), ("alpha", "zeta"))
+
+    def test_multiple_shared_sessions_collected(self):
+        cands = [self._candidate("alpha", ["s1", "s2", "s3"]),
+                 self._candidate("beta", ["s2", "s3", "s4"])]
+        pairs = cmp.find_shared_session_pairs(cands)
+        self.assertEqual(pairs[0].shared_session_ids, ["s2", "s3"])
+
+    def test_three_concepts_two_pairs(self):
+        cands = [self._candidate("alpha", ["s1"]),
+                 self._candidate("beta", ["s1", "s2"]),
+                 self._candidate("gamma", ["s2"])]
+        pairs = cmp.find_shared_session_pairs(cands)
+        self.assertEqual(len(pairs), 2)
+
+
+class TestRenderAndWriteConnection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = cmp.CONNECTIONS_DIR
+        cmp.CONNECTIONS_DIR = self.tmp_path / "connections"
+
+    def tearDown(self):
+        cmp.CONNECTIONS_DIR = self._saved
+        self.tmp.cleanup()
+
+    def _conn(self):
+        return cmp.Connection(
+            slug_a="alpha", slug_b="beta",
+            shared_session_ids=["sess-1"],
+            shared_sources=[{
+                "agent": "research", "session_id": "sess-1",
+                "transcript_sha256": "h",
+                "source_log": "daily-logs/research/2026-05-09.md", "session_n": 1,
+            }],
+        )
+
+    def test_render_includes_both_slugs(self):
+        text = cmp.render_connection(self._conn())
+        self.assertIn("[[alpha]]", text)
+        self.assertIn("[[beta]]", text)
+
+    def test_render_has_proper_frontmatter(self):
+        text = cmp.render_connection(self._conn())
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("type: connection\n", text)
+        self.assertIn("concepts: [alpha, beta]\n", text)
+        self.assertIn("shared_session_ids: [sess-1]\n", text)
+        self.assertIn("discovered_via: shared-session\n", text)
+
+    def test_write_creates_file(self):
+        target = cmp.write_connection(self._conn(), dry_run=False)
+        self.assertIsNotNone(target)
+        self.assertEqual(target.name, "alpha--beta.md")
+        self.assertTrue(target.exists())
+
+    def test_write_idempotent_skips_existing(self):
+        cmp.write_connection(self._conn(), dry_run=False)
+        target2 = cmp.write_connection(self._conn(), dry_run=False)
+        self.assertIsNone(target2)
+
+    def test_write_dry_run_returns_none(self):
+        target = cmp.write_connection(self._conn(), dry_run=True)
+        self.assertIsNone(target)
+        self.assertFalse(cmp.CONNECTIONS_DIR.exists())
+
+
+class TestFlushDelegate(unittest.TestCase):
+    def test_missing_transcript_returns_1(self):
+        rc = cmp._run_flush_delegate("/nonexistent/transcript.jsonl", "research", verbose=False)
+        self.assertEqual(rc, 1)
+
+    def test_invokes_flush_subprocess(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            f.write(b'{"role":"system"}\n')
+            transcript = f.name
+
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0] if args else None
+
+            class _R:
+                returncode = 0
+            return _R()
+
+        try:
+            with patch("compile.subprocess.run", side_effect=fake_run):
+                rc = cmp._run_flush_delegate(transcript, "research", verbose=False)
+            self.assertEqual(rc, 0)
+            self.assertIn("--transcript", captured["args"])
+            self.assertIn(transcript, captured["args"])
+            self.assertIn("--agent", captured["args"])
+            self.assertIn("research", captured["args"])
+        finally:
+            Path(transcript).unlink()
+
+
+class TestMainPhaseBExpansion(unittest.TestCase):
+    """Integration tests for connection writer + --agent + --flush via main()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = (
+            cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+            cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+            cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX,
+        )
+        cmp.REPO_ROOT = self.tmp_path
+        cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
+        cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        # Two daily logs: research + content. Both reference session sess-1.
+        for agent in ("research", "content"):
+            agent_dir = cmp.DAILY_LOGS_DIR / agent
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "2026-05-09.md").write_text(self._daily_log(agent), encoding="utf-8")
+        cmp.WIKI_LOG.parent.mkdir(parents=True, exist_ok=True)
+        cmp.WIKI_LOG.write_text("---\ntype: log\n---\n\n# Log\n", encoding="utf-8")
+        cmp.WIKI_INDEX.write_text(
+            "---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+         cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+         cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+        self.tmp.cleanup()
+
+    def _daily_log(self, agent: str) -> str:
+        unique_concept = f"{agent}-only-concept"
+        return f"""---
+type: daily-log
+agent: {agent}
+date: 2026-05-09
+schema_version: "1.0"
+session_count: 1
+last_flushed_at: 2026-05-09T08:01:23Z
+---
+
+## Session 1 — 08:01 UTC
+
+```yaml
+session_id: shared-sess
+transcript_path: /tmp/transcript.jsonl
+transcript_sha256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+started_at: 2026-05-09T08:01:17Z
+ended_at: 2026-05-09T08:01:23Z
+flush_version: "1.0"
+hook_event: SessionEnd
+```
+
+### Decisions
+
+- Some decision
+
+### Findings
+
+- (none)
+
+### Open questions
+
+- (none)
+
+### Proposed concepts
+
+- shared-concept: A concept both agents proposed
+- {unique_concept}: A concept only this agent proposed
+"""
+
+    def _run_main(self, argv: list[str]) -> int:
+        with patch.object(sys, "argv", ["compile.py", *argv]):
+            return cmp.main()
+
+    def test_connections_written_when_promoted_share_session(self):
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+
+        # 3 unique concepts; all share `shared-sess`. Pairs = 3 (alpha-beta, alpha-gamma, beta-gamma).
+        connections = list(cmp.CONNECTIONS_DIR.glob("*.md"))
+        self.assertEqual(len(connections), 3)
+        for path in connections:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("type: connection", text)
+            self.assertIn("shared-sess", text)
+
+    def test_no_connections_flag_skips_connection_writing(self):
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord", "--no-connections"])
+
+        self.assertFalse(cmp.CONNECTIONS_DIR.exists())
+
+    def test_agent_flag_filters_daily_logs(self):
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord", "--agent", "research"])
+
+        promoted = sorted(p.stem for p in cmp.CONCEPTS_DIR.glob("*.md"))
+        # Only research's candidates: shared-concept + research-only-concept.
+        # content-only-concept should NOT be promoted.
+        self.assertEqual(promoted, ["research-only-concept", "shared-concept"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
