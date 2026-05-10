@@ -92,6 +92,12 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # to Luna/notes.md per charter; the vault-root add-dir grants read
     # context that travels across all her conversations.
     "luna": [OBSIDIAN_VAULT_ROOT],
+    # Content + social: full vault read so they can pull style observations
+    # from Andy Profile/, build journal context for technical pieces, the
+    # Voice corpus for LinkedIn samples, etc. Charter constrains writes to
+    # their own subdirs. (Phase 5 of the Echo build.)
+    "content": [OBSIDIAN_VAULT_ROOT],
+    "social": [OBSIDIAN_VAULT_ROOT],
 }
 
 
@@ -134,6 +140,53 @@ def _luna_notes_block() -> str:
         "new is worth remembering across sessions, append to notes.md during "
         "this session via Edit (the daemon grants you write access there).\n\n"
         f"<luna-notes>\n{sanitized}\n</luna-notes>\n\n"
+    )
+
+
+# ----------- Echo profile auto-inject (Phase 5) -----------
+#
+# Echo (the self-knowledge agent) maintains profile files at
+# ~/Documents/Luna Master/Andy Profile/. The voice file in particular is
+# what content / social / luna need pre-loaded when generating user-facing
+# prose — having it in context means they don't need to fish for it via a
+# tool call.
+#
+# vocabulary.md is left as on-demand Read; it's a reference table, not a
+# rule set, and pre-loading it would burn budget for marginal benefit.
+
+ECHO_VOICE_PATH = Path.home() / "Documents" / "Luna Master" / "Andy Profile" / "voice.md"
+ECHO_VOICE_MAX_CHARS = 6000
+
+# Agents that get Echo's voice profile auto-injected at the top of their prompt.
+# Limit to voice-mirroring agents; agents with technical / structural roles
+# (research, automation-engineer, security-reviewer, etc.) don't need it.
+ECHO_VOICE_AGENTS = {"content", "social", "luna"}
+
+
+def _echo_voice_block() -> str:
+    """Read Echo's voice.md profile and return an auto-inject block.
+    Empty string if missing/unreadable so the prompt builder degrades gracefully.
+    """
+    if not ECHO_VOICE_PATH.exists():
+        return ""
+    try:
+        voice = ECHO_VOICE_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if not voice.strip():
+        return ""
+    if len(voice) > ECHO_VOICE_MAX_CHARS:
+        voice = voice[: ECHO_VOICE_MAX_CHARS - 1].rstrip() + "\n[…profile truncated to fit prompt budget. Read the full file via the Read tool if needed: `~/Documents/Luna Master/Andy Profile/voice.md`]"
+    sanitized = sanitize_untrusted_text(voice, "echo-voice")
+    return (
+        "## Andy's voice profile (auto-injected from Echo's `voice.md`)\n\n"
+        "Echo (the self-knowledge agent) maintains a structured, citation-grounded "
+        "profile of how Andy writes. The block below is the latest `voice.md`. Use "
+        "it to mirror his voice when generating user-facing prose. Don't re-read "
+        "the file via a tool call — it's already in your context. For deeper detail "
+        "(vocabulary list, thinking patterns, opinions, raw examples), Read the "
+        "sibling files at `~/Documents/Luna Master/Andy Profile/` on demand.\n\n"
+        f"<echo-voice>\n{sanitized}\n</echo-voice>\n\n"
     )
 
 
@@ -289,13 +342,21 @@ def build_mention_prompt(
         .replace("{discord_history}", history_block)
         .replace("{message}", sanitized_message)
     )
-    # Luna gets her own working-memory file auto-injected at the very top of
-    # the prompt so context from past sessions (preferences, voice, recurring
-    # commitments, open threads) travels with her into the current one.
+    # Echo's voice profile auto-injected for voice-mirroring agents
+    # (content, social, luna). Lets them reference Andy's voice without a
+    # tool call. Phase 5 of the Echo build.
+    if agent_id in ECHO_VOICE_AGENTS:
+        echo_prefix = _echo_voice_block()
+        if echo_prefix:
+            rendered = echo_prefix + rendered
+
+    # Luna gets her own working-memory file auto-injected on top of Echo's
+    # voice profile. Echo gives her stylistic mirror; her notes give her
+    # episodic memory across conversations.
     if agent_id == "luna":
-        prefix = _luna_notes_block()
-        if prefix:
-            rendered = prefix + rendered
+        notes_prefix = _luna_notes_block()
+        if notes_prefix:
+            rendered = notes_prefix + rendered
     return rendered
 
 
