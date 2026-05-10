@@ -12,7 +12,7 @@ Why this instead of giving agents Bash:
 - No risk of `rm -rf` or arbitrary shell
 
 Allowed actions: `create_issue`, `comment`, `add_label`, `remove_label`,
-`close_issue`. Cap at 5 actions per mention to bound impact and cost.
+`close_issue`, `create_agent`. Cap at 5 actions per mention to bound impact and cost.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-ALLOWED_ACTIONS = {"create_issue", "comment", "add_label", "remove_label", "close_issue"}
+from .agent_builder import validate_create_agent_payload
+
+ALLOWED_ACTIONS = {"create_issue", "comment", "add_label", "remove_label", "close_issue", "create_agent"}
 MAX_ACTIONS_PER_MENTION = 5
 MAX_BODY_CHARS = 8000  # generous; gh accepts large bodies but stay sane
 
@@ -139,6 +141,12 @@ def validate_action(action: Any) -> ValidationResult:
                 return ValidationResult(ok=False, error="close_issue: comment must be string if present", action_type=action_type)
             if len(action["comment"]) > MAX_BODY_CHARS:
                 return ValidationResult(ok=False, error=f"close_issue: comment exceeds {MAX_BODY_CHARS} chars", action_type=action_type)
+        return ValidationResult(ok=True, action_type=action_type)
+
+    if action_type == "create_agent":
+        ok, err = validate_create_agent_payload(action)
+        if not ok:
+            return ValidationResult(ok=False, error=f"create_agent: {err}", action_type=action_type)
         return ValidationResult(ok=True, action_type=action_type)
 
     # Should be unreachable given the ALLOWED_ACTIONS check above.

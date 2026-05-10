@@ -157,6 +157,53 @@ async def close_issue(
 
 
 @dataclass
+class CommentIssueResult:
+    ok: bool
+    error: str | None
+
+
+def comment_issue_sync(
+    *,
+    repo: str,
+    issue_number: int,
+    body: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> CommentIssueResult:
+    """Post a comment on an issue. Uses --body-file - via stdin to avoid argv length limits."""
+    args = ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body-file", "-"]
+    try:
+        proc = subprocess.run(
+            args,
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return CommentIssueResult(ok=False, error="timeout")
+    except FileNotFoundError:
+        return CommentIssueResult(ok=False, error="gh_cli_not_found")
+    if proc.returncode != 0:
+        snippet = (proc.stderr or "")[:300].replace("\n", " ").strip()
+        return CommentIssueResult(ok=False, error=f"gh_exit_{proc.returncode}: {snippet}")
+    return CommentIssueResult(ok=True, error=None)
+
+
+async def comment_issue(
+    *,
+    repo: str,
+    issue_number: int,
+    body: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> CommentIssueResult:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: comment_issue_sync(repo=repo, issue_number=issue_number, body=body, timeout=timeout),
+    )
+
+
+@dataclass
 class EditIssueBodyResult:
     ok: bool
     error: str | None
