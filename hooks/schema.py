@@ -13,7 +13,7 @@ SCHEMA_VERSION = "1.0"
 KNOWN_AGENTS = {
     "research", "teaching-prep", "content", "senior-pm", "social",
     "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
-    "luna", "librarian", "echo", "front-end-designer",
+    "luna", "librarian", "echo", "ux-designer",
     "_unattributed",
 }
 HOOK_EVENTS = {"SessionEnd", "PreCompact"}
