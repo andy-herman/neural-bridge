@@ -24,7 +24,11 @@ from typing import Any
 
 from .agent_builder import validate_create_agent_payload
 
-ALLOWED_ACTIONS = {"create_issue", "comment", "add_label", "remove_label", "close_issue", "create_agent"}
+ALLOWED_ACTIONS = {
+    "create_issue", "comment", "add_label", "remove_label", "close_issue",
+    "create_agent",
+    "open_pr_with_changes",  # staged action — requires Andy's chat approval before execution
+}
 MAX_ACTIONS_PER_MENTION = 5
 MAX_BODY_CHARS = 8000  # generous; gh accepts large bodies but stay sane
 
@@ -147,6 +151,23 @@ def validate_action(action: Any) -> ValidationResult:
         ok, err = validate_create_agent_payload(action)
         if not ok:
             return ValidationResult(ok=False, error=f"create_agent: {err}", action_type=action_type)
+        return ValidationResult(ok=True, action_type=action_type)
+
+    if action_type == "open_pr_with_changes":
+        # Full per-agent + per-repo validation happens in handlers (which has the
+        # agent_id and channel_id in scope). At this layer we only do shape
+        # checks so a malformed action doesn't pollute the batch.
+        for required in ("repo", "branch", "files", "commit_message", "pr_title"):
+            if required not in action:
+                return ValidationResult(
+                    ok=False, error=f"open_pr_with_changes: missing required field {required!r}",
+                    action_type=action_type,
+                )
+        if not isinstance(action["files"], list) or not action["files"]:
+            return ValidationResult(
+                ok=False, error="open_pr_with_changes: files must be non-empty list",
+                action_type=action_type,
+            )
         return ValidationResult(ok=True, action_type=action_type)
 
     # Should be unreachable given the ALLOWED_ACTIONS check above.

@@ -41,6 +41,22 @@ Read this before drafting. The site has a deliberate visual language already.
 
 7. **Don't ship blind.** When you change a page or component, surface a short note in your response explaining what changed visually and why. The site's a journal; keep the journal honest.
 
+## Shipping changes to GitHub
+
+You can open PRs against `neural-bridge-blog`. The repo is cloned at `~/Development/neural-bridge-blog/` and you have read access via `--add-dir`.
+
+**Mechanism:** emit an `open_pr_with_changes` action with the file diffs. The daemon stages the proposal, posts a preview to Andy in the same channel, and waits for `approve <id>` before pushing. You never push directly. See the mention prompt for the action shape and rules.
+
+**Scope:** Astro components (`src/components/`, `src/layouts/`), CSS (`src/styles/`), Tailwind config, page templates (`src/pages/`). Don't touch `src/content/` — that's content's territory. Don't touch the GitHub workflows or `package.json` without surfacing first.
+
+**Branch naming:** `ux/<short-slug>`. Example: `ux/timeline-month-anchors`.
+
+**Commit shape:** conventional commit, e.g., `feat(timeline): add month anchors to BuildLog`, `style(typography): tighten body line-height to 1.55`.
+
+**One coherent change per PR.** A page-level redesign that touches 5–8 files is fine if it's one coherent design decision. Two unrelated tweaks should be two PRs.
+
+**Don't self-merge.** Andy reviews on the Vercel preview and merges from his end.
+
 ## Charter output format
 
 When asked to redesign or build a new visual surface, produce:

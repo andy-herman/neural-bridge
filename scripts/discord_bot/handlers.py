@@ -28,6 +28,14 @@ from .attachment_ingest import (
     format_prompt_block as ingest_format_prompt_block,
     ingest_attachments,
 )
+from .pr_proposals import (
+    STORE as PR_STORE,
+    execute_proposal,
+    format_preview as format_pr_preview,
+    is_approval_text,
+    is_cancel_text,
+    validate_open_pr_action,
+)
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -413,20 +421,38 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             await message.channel.send(f"_(Action batch rejected: `{err}`. No actions taken.)_")
             log(f"MENTION action validation FAILED: agent={agent_id} error={err}")
         else:
-            results = await _execute_action_batch(valid, config)
+            results, pr_previews = await _execute_action_batch(
+                valid, config, agent_id=agent_id, channel_id=int(message.channel.id),
+            )
             summary_lines = [f"**Actions taken by `{agent_id}`:**"]
             for line in results:
                 summary_lines.append(f"- {line}")
             await message.channel.send("\n".join(summary_lines)[:1900])
+            # PR proposals get their preview as a separate message (richer
+            # formatting, won't get clipped by the action-summary truncation).
+            for preview in pr_previews:
+                await message.channel.send(preview[:1900])
             log(f"MENTION actions executed: agent={agent_id} count={len(valid)}")
 
     log(f"MENTION done: agent={agent_id} chars={len(response)} actions={len(parsed.actions or [])}")
 
 
-async def _execute_action_batch(actions: list[dict], config: BotConfig) -> list[str]:
-    """Execute each validated action via gh wrappers. Returns a list of
-    human-readable result lines."""
+async def _execute_action_batch(
+    actions: list[dict],
+    config: BotConfig,
+    *,
+    agent_id: str,
+    channel_id: int,
+) -> tuple[list[str], list[str]]:
+    """Execute each validated action via gh wrappers.
+
+    Returns (result_lines, pr_preview_blocks). Most actions execute inline
+    and contribute a result line; `open_pr_with_changes` is the exception
+    — it stages a proposal and contributes both a short result line AND
+    a longer preview block that the caller posts as a separate message.
+    """
     results: list[str] = []
+    pr_previews: list[str] = []
     repo = config.default_repo
     for action in actions:
         atype = action["action"]
@@ -478,6 +504,23 @@ async def _execute_action_batch(actions: list[dict], config: BotConfig) -> list[
                     results.append(f"✅ Closed #{action['issue_number']}")
                 else:
                     results.append(f"❌ close_issue #{action['issue_number']}: `{r.error}`")
+            elif atype == "open_pr_with_changes":
+                # Two-phase: validate + stage; don't execute yet. The push
+                # happens only after Andy replies `approve <id>` in this
+                # channel (intercepted by handle_pr_approval below).
+                validated = validate_open_pr_action(
+                    action, agent_id=agent_id, channel_id=channel_id,
+                )
+                if not validated.ok:
+                    results.append(f"❌ open_pr_with_changes: `{validated.error}`")
+                else:
+                    PR_STORE.stage(validated.proposal)
+                    pr_previews.append(format_pr_preview(validated.proposal))
+                    results.append(
+                        f"🛫 Staged PR proposal `{validated.proposal.proposal_id}` for "
+                        f"`{validated.proposal.repo.gh_slug}` "
+                        f"(awaiting `approve {validated.proposal.proposal_id}` in this channel)"
+                    )
             elif atype == "create_agent":
                 # Run the full agent_builder workflow in a thread (it does
                 # synchronous git/gh subprocess calls).
@@ -501,7 +544,84 @@ async def _execute_action_batch(actions: list[dict], config: BotConfig) -> list[
                 results.append(f"❌ unknown action type: `{atype}`")
         except Exception as exc:
             results.append(f"❌ {atype}: exception `{type(exc).__name__}: {exc}`")
-    return results
+    return results, pr_previews
+
+
+# ---------- handle_pr_approval: Andy approves/cancels a staged PR proposal ----------
+
+async def handle_pr_approval(client, message, config: BotConfig) -> bool:
+    """Intercept approve/cancel text in a channel that has a pending
+    PR proposal for THIS bot's agent. Returns True if the message was
+    handled (caller should `return` and skip mention routing), False
+    otherwise (no pending proposal, or text doesn't match).
+
+    Only authorized users (Andy) can approve/cancel — the auth check is
+    upstream in on_message before this is called.
+    """
+    text = (message.content or "").strip()
+    agent_id = client.agent.id
+    channel_id = int(message.channel.id)
+
+    approval_ok, approval_id = is_approval_text(text)
+    cancel_ok, cancel_id = is_cancel_text(text)
+    if not approval_ok and not cancel_ok:
+        return False
+
+    # Specific id → look up directly. Generic approve/cancel → pick the
+    # most recent pending proposal in this channel by this agent.
+    target_id = approval_id or cancel_id
+    if target_id:
+        proposal = PR_STORE.get(target_id)
+        if proposal is None or proposal.channel_id != channel_id or proposal.agent_id != agent_id:
+            # Don't claim a proposal that belongs to another agent or channel.
+            return False
+    else:
+        proposal = PR_STORE.peek_for_channel_agent(channel_id, agent_id)
+        if proposal is None:
+            return False
+
+    if cancel_ok:
+        PR_STORE.pop(proposal.proposal_id)
+        await message.channel.send(
+            f"_Cancelled PR proposal `{proposal.proposal_id}` for `{proposal.repo.gh_slug}`. "
+            f"No branch was created. Nothing pushed._"
+        )
+        log(f"PR_APPROVAL cancel: agent={agent_id} id={proposal.proposal_id}")
+        return True
+
+    # Approval path. Pop first (so a second `approve` doesn't double-fire
+    # while we're pushing), then execute in a thread (synchronous git/gh).
+    PR_STORE.pop(proposal.proposal_id)
+    await message.channel.send(
+        f"_Approved `{proposal.proposal_id}` — opening PR against `{proposal.repo.gh_slug}` "
+        f"on branch `{proposal.branch}`. This takes ~10–20 seconds._"
+    )
+    import asyncio as _asyncio
+    loop = _asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, lambda: execute_proposal(proposal))
+    except Exception as exc:
+        await message.channel.send(
+            f"❌ PR `{proposal.proposal_id}` crashed during execution: "
+            f"`{type(exc).__name__}: {exc}`"
+        )
+        log(f"PR_APPROVAL execute CRASH: agent={agent_id} id={proposal.proposal_id} {type(exc).__name__}: {exc}")
+        return True
+
+    if result.ok:
+        await message.channel.send(
+            f"✅ PR opened: {result.pr_url}\n"
+            f"_(branch: `{result.branch}` on `{proposal.repo.gh_slug}`. "
+            f"Review, edit, merge from your end.)_"
+        )
+        log(f"PR_APPROVAL ok: agent={agent_id} id={proposal.proposal_id} url={result.pr_url}")
+    else:
+        await message.channel.send(
+            f"❌ PR `{proposal.proposal_id}` failed: `{result.error}`"
+            + (f"\n_(branch `{result.branch}` may have been pushed; check manually.)_" if result.branch else "")
+        )
+        log(f"PR_APPROVAL fail: agent={agent_id} id={proposal.proposal_id} err={result.error}")
+    return True
 
 
 # ---------- on_message: thread replies that continue an intake session ----------

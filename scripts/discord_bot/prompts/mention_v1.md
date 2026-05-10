@@ -54,7 +54,8 @@ You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly
   {"action": "add_label", "issue_number": <int>, "labels": ["<string>", ...]},
   {"action": "remove_label", "issue_number": <int>, "labels": ["<string>", ...]},
   {"action": "close_issue", "issue_number": <int>, "comment": "<optional closing comment>"},
-  {"action": "create_agent", "agent_id": "<kebab-case>", "display_name": "<string>", "description": "<routing description>", "color": "<color>", "tools": ["Read", ...], "model": "<model id>", "body": "<full markdown body>"}
+  {"action": "create_agent", "agent_id": "<kebab-case>", "display_name": "<string>", "description": "<routing description>", "color": "<color>", "tools": ["Read", ...], "model": "<model id>", "body": "<full markdown body>"},
+  {"action": "open_pr_with_changes", "repo": "<repo_id>", "branch": "<branch-name>", "files": [{"path": "<repo-relative path>", "content": "<full file content>"}, ...], "commit_message": "<conventional commit subject + body>", "pr_title": "<short PR title>", "pr_body": "<markdown PR description>"}
 ]
 ```
 
@@ -65,8 +66,9 @@ You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly
 - `body` is plain markdown. Max 8000 chars per body.
 - Don't reuse this for things outside your specialty. Stay in your role.
 - `create_agent` is **recruiter-only** in practice. It writes the plugin file, updates `KNOWN_AGENTS`, bumps versions, branches/commits/pushes, and opens a PR. Manual Discord-side steps (application, token, invite) still belong to Andy.
+- `open_pr_with_changes` is the **only two-phase action**. The daemon validates, stages the proposal, posts a preview to Andy, and waits for him to reply `approve <id>` (or `cancel <id>`) in the same channel. Nothing is pushed until then. The TTL is 15 minutes. Only agents in the per-repo push allowlist may emit it (see your charter); if your charter doesn't say you can push to a specific repo, this action will be rejected. Caps: 10 files per PR, 200 KB per file, 800 KB total. Path traversal is blocked. Always branch off the repo's default branch, never push to it directly. Don't self-merge after the PR opens — that's Andy's job.
 
-Use this when Andy explicitly asks for a GitHub action ("file an issue for X", "comment on #14 with Y", "close #42"). Don't take actions Andy didn't ask for. If unsure, ask before acting.
+Use this when Andy explicitly asks for a GitHub action ("file an issue for X", "comment on #14 with Y", "close #42", "ship the fix to the blog"). Don't take actions Andy didn't ask for. If unsure, ask before acting.
 
 ### Attaching files (optional, ≤25 MB)
 
