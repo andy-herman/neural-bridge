@@ -92,19 +92,26 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # to Luna/notes.md per charter; the vault-root add-dir grants read
     # context that travels across all her conversations. Blog-repo read
     # access supports her `open_pr_with_changes` push rights — she needs
-    # to Read existing files before deciding what to change.
+    # to Read existing files before deciding what to change. Scoped to
+    # src/ + public/ to skip node_modules (~14k files makes claude do a
+    # very slow startup inventory). For top-level files like
+    # astro.config.mjs, ask Andy or @automation-engineer to surface them
+    # — that's rare enough to not pay the scan cost on every mention.
     "luna": [
         OBSIDIAN_VAULT_ROOT,
-        str(Path.home() / "Development" / "neural-bridge-blog"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "src"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "public"),
     ],
     # Content + social: full vault read so they can pull style observations
     # from Andy Profile/, build journal context for technical pieces, the
     # Voice corpus for LinkedIn samples, etc. Charter constrains writes to
     # their own subdirs. (Phase 5 of the Echo build.) Content also gets
-    # blog-repo read so she can ship posts via `open_pr_with_changes`.
+    # blog-repo read (scoped — see Luna's entry above for why) so she can
+    # ship posts via `open_pr_with_changes`.
     "content": [
         OBSIDIAN_VAULT_ROOT,
-        str(Path.home() / "Development" / "neural-bridge-blog"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "src"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "public"),
     ],
     "social": [OBSIDIAN_VAULT_ROOT],
     # Echo: needs full vault read to do profile maintenance (reads Build
@@ -112,12 +119,14 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # consume the Andy Profile/ files). Writes ONLY to Andy Profile/ per
     # charter; vault-root add-dir is for reads.
     "echo": [OBSIDIAN_VAULT_ROOT],
-    # UX-designer: needs read access to the blog repo (Astro templates,
+    # UX-designer: read access to the blog repo (Astro templates,
     # existing CSS, content frontmatter conventions) since that's the
     # primary surface she designs. Plus vault read for design rationale
-    # docs and reference samples.
+    # docs and reference samples. Same node_modules-skip rationale as
+    # Luna above — scoped to src/ + public/.
     "ux-designer": [
-        str(Path.home() / "Development" / "neural-bridge-blog"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "src"),
+        str(Path.home() / "Development" / "neural-bridge-blog" / "public"),
         OBSIDIAN_VAULT_ROOT,
     ],
 }
