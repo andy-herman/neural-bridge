@@ -82,6 +82,20 @@
       "token_keychain_service": "neural-bridge-discord-bot-librarian",
       "is_orchestrator": false,
       "display_name": "Librarian"
+    },
+    {
+      "id": "echo",
+      "client_id": "1503089179259699380",
+      "token_keychain_service": "neural-bridge-discord-bot-echo",
+      "is_orchestrator": false,
+      "display_name": "Echo"
+    },
+    {
+      "id": "ux-designer",
+      "client_id": "1503088747397517485",
+      "token_keychain_service": "neural-bridge-discord-bot-ux-designer",
+      "is_orchestrator": false,
+      "display_name": "UX Designer"
     }
   ]
 }

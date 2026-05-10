@@ -152,6 +152,17 @@ class AgentClient(discord.Client):
         if message.author.id == getattr(self.user, "id", None):
             return
 
+        # Profile accumulator (Echo Phase 3). Captures every Andy-authored
+        # message — guild or DM — into ~/Documents/Luna Master/Andy Profile/
+        # raw-conversations.md for Echo's corpus passes. Idempotent via
+        # message-id sidecar; only the first bot to see a given message
+        # writes. Never raises; never blocks routing.
+        try:
+            from .profile_accumulator import append_message
+            append_message(message, self.bot_config)
+        except Exception as exc:
+            log(f"profile_accumulator error: {type(exc).__name__}: {exc}")
+
         # 0. Direct messages = implicit mention. In a 1:1 DM with this bot,
         # every message from the human is treated as if they @-mentioned the
         # agent. No mention prefix required. The auth gate inside

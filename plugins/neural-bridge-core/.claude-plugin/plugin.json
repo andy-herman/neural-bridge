@@ -1,6 +1,6 @@
 {
   "name": "neural-bridge-core",
-  "description": "Specialist agents for the Neural Bridge personal AI substrate. Thirteen agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor, luna, librarian, echo, front-end-designer) read across a shared markdown wiki and write narrowly into per-agent memory subdirectories.",
+  "description": "Specialist agents for the Neural Bridge personal AI substrate. Thirteen agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor, luna, librarian, echo, ux-designer) read across a shared markdown wiki and write narrowly into per-agent memory subdirectories.",
   "version": "0.8.0",
   "author": {
     "name": "Andy Herman",

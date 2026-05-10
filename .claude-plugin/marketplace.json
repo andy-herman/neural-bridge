@@ -13,7 +13,7 @@
     {
       "name": "neural-bridge-core",
       "source": "./plugins/neural-bridge-core",
-      "description": "Specialist agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor, luna, librarian, echo, front-end-designer) sharing a markdown wiki memory.",
+      "description": "Specialist agents (research, teaching-prep, content, senior-pm, social, recruiter, automation-engineer, security-reviewer, docs-editor, luna, librarian, echo, ux-designer) sharing a markdown wiki memory.",
       "version": "0.8.0",
       "author": {
         "name": "Andy Herman",
