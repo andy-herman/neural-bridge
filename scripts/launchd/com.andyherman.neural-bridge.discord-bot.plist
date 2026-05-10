@@ -5,8 +5,19 @@
     <key>Label</key>
     <string>com.andyherman.neural-bridge.discord-bot</string>
 
+    <!-- caffeinate -s -i wraps the daemon to:
+         (a) prevent process-scoped idle sleep (-i)
+         (b) prevent system sleep on AC power (-s)
+         The assertion is scoped to the daemon's lifetime — when the daemon
+         exits, caffeinate exits, the assertion is released. This is on top
+         of system-wide pmset settings as a belt-and-suspenders defense
+         against macOS App Nap suspending background Python processes after
+         long idle periods. -->
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>-i</string>
         <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
         <string>-m</string>
         <string>scripts.discord_bot.main</string>
