@@ -114,6 +114,19 @@ class AgentClient(discord.Client):
         if message.author.id == getattr(self.user, "id", None):
             return
 
+        # 0. Direct messages = implicit mention. In a 1:1 DM with this bot,
+        # every message from the human is treated as if they @-mentioned the
+        # agent. No mention prefix required. The auth gate inside
+        # handle_mention still runs (only authorized_user_ids can talk).
+        # Other bots talking to this bot in a DM are ignored.
+        if message.guild is None and not message.author.bot:
+            try:
+                await handle_mention(self, message, self.bot_config)
+                return
+            except Exception as exc:
+                log(f"on_message (DM) error: {type(exc).__name__}: {exc}")
+                return
+
         # 1. Mention routing — every agent listens for its own @-mention.
         # Bot-author messages are allowed through to handle_mention, which
         # checks the handoff budget. Other bots and unauthorized humans
