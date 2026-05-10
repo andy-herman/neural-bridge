@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 import discord
 
@@ -21,6 +22,11 @@ from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
 from .agent_builder import execute_create_agent
 from .attachments import extract_attachments, validate_attachment_batch
+from .attachment_ingest import (
+    ALLOWED_EXTENSIONS as INGEST_ALLOWED_EXTENSIONS,
+    format_prompt_block as ingest_format_prompt_block,
+    ingest_attachments,
+)
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -234,6 +240,49 @@ async def handle_mention(client, message, config: BotConfig) -> None:
     # Acknowledge so Andy sees the bot is thinking. Discord shows typing for ~10s
     # automatically when we use typing(); use it as a thinking indicator.
     async with message.channel.typing():
+        # Inbound attachment ingest — currently only wired for Echo (her job is
+        # to build Andy's voice profile from his actual writing, so dropping
+        # emails / docs / PDFs into chat with her is a core workflow). If any
+        # other agent grows a use case for inbound files, expand this allow-list.
+        ingest_block = ""
+        if agent_id == "echo" and getattr(message, "attachments", None):
+            relevant = [
+                a for a in message.attachments
+                if Path(getattr(a, "filename", "") or "").suffix.lower() in INGEST_ALLOWED_EXTENSIONS
+            ]
+            if relevant:
+                try:
+                    ingest_result = await ingest_attachments(message, agent_id=agent_id)
+                except Exception as exc:
+                    log(f"MENTION ingest CRASHED (non-fatal): agent={agent_id} {type(exc).__name__}: {exc}")
+                    ingest_result = None
+
+                if ingest_result is not None:
+                    if ingest_result.ingested:
+                        ingest_block = ingest_format_prompt_block(ingest_result)
+                        log(
+                            f"MENTION ingest ok: agent={agent_id} "
+                            f"files={len(ingest_result.ingested)} "
+                            f"rejected={len(ingest_result.rejected)} "
+                            f"over_cap={ingest_result.over_cap}"
+                        )
+                    # Surface rejections / over-cap as their own message so Andy
+                    # knows what didn't make it through. Echo's prompt won't see
+                    # rejected files, so they wouldn't otherwise be visible.
+                    if ingest_result.rejected or ingest_result.over_cap:
+                        lines = ["_(Attachment ingest issues for `echo`:)_"]
+                        for name, reason in ingest_result.rejected:
+                            short = name if len(name) <= 80 else "…" + name[-77:]
+                            lines.append(f"- ⚠️ `{short}` skipped: `{reason}`")
+                        if ingest_result.over_cap:
+                            lines.append(
+                                f"- ⚠️ More than {5} files attached; only the first 5 were considered."
+                            )
+                        try:
+                            await message.channel.send("\n".join(lines)[:1900])
+                        except Exception as exc:
+                            log(f"MENTION ingest notice send failed (non-fatal): {type(exc).__name__}: {exc}")
+
         # Fetch recent context. discord.py: history(limit=N).
         history: list[dict] = []
         try:
@@ -259,6 +308,11 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             history=history,
             message_content=message.content,
         )
+        # Prepend the ingest block so Echo sees the dropped-files section before
+        # the standard mention scaffold. Same composition pattern as the Echo
+        # voice and Luna notes blocks (which are prepended inside build_mention_prompt).
+        if ingest_block:
+            prompt = ingest_block + prompt
 
         tools = allowed_tools_for(agent_id)
         extra_dirs = add_dirs_for(agent_id)
