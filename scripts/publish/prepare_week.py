@@ -54,8 +54,10 @@ VOICE_CORPUS = VAULT_ROOT / "Neural Bridge" / "Voice" / "linkedin-andy.md"
 SCHEDULED_DRAFTS = VAULT_ROOT / "Neural Bridge" / "Drafts" / "scheduled"
 
 LINKEDIN_PROMPT_TEMPLATE = REPO_ROOT / "scripts" / "publish" / "prompts" / "linkedin_v1.md"
+TRANSLATE_SCRIPT = BLOG_REPO / "scripts" / "translate-to-korean.mjs"
 
-CLAUDE_TIMEOUT = 600  # 10 min — long-form generation
+CLAUDE_TIMEOUT = 600          # 10 min — long-form LinkedIn generation
+TRANSLATE_TIMEOUT = 900       # 15 min — Korean translation, can be longer
 
 URL_TWITTER_LENGTH = 23
 MAX_TWEET = 280
@@ -202,19 +204,35 @@ def build_x_draft(candidate: Candidate) -> str:
 
 
 def discord_brief(candidate: Candidate, target_monday: date,
-                  linkedin_path: Path, x_path: Path) -> str:
+                  linkedin_path: Path, x_path: Path,
+                  korean_result: tuple[bool, str] | None = None) -> str:
     rel_blog = candidate.file_path.relative_to(BLOG_REPO)
     rel_linkedin = linkedin_path.relative_to(VAULT_ROOT)
     rel_x = x_path.relative_to(VAULT_ROOT)
     monday_iso = target_monday.isoformat()
+
+    artifacts = (
+        f"• 📰 Blog: `neural-bridge-blog/{rel_blog}`\n"
+        f"• 💼 LinkedIn: `{rel_linkedin}`\n"
+        f"• 🐦 X: `{rel_x}`"
+    )
+    artifact_count = "Three"
+
+    if korean_result is not None:
+        ok, msg = korean_result
+        if ok:
+            artifacts += f"\n• 🇰🇷 Korean: `neural-bridge-blog/{msg}`"
+            artifact_count = "Four"
+        else:
+            artifacts += f"\n• 🇰🇷 Korean: ⚠️ translation failed (`{msg}`)"
+            artifact_count = "Four"
+
     return (
         f"📅 **Sunday brief — publishing Monday {monday_iso}**\n\n"
         f"📝 **{candidate.title}**\n"
         f"_{candidate.description}_\n\n"
-        f"Three artifacts ready for review in Obsidian:\n"
-        f"• 📰 Blog: `neural-bridge-blog/{rel_blog}`\n"
-        f"• 💼 LinkedIn: `{rel_linkedin}`\n"
-        f"• 🐦 X: `{rel_x}`\n\n"
+        f"{artifact_count} artifacts ready for review in Obsidian:\n"
+        f"{artifacts}\n\n"
         f"Edit any of them in the vault. Monday 18:00 PT, the blog cron flips "
         f"`draft: true` → published and Vercel auto-deploys. To skip this week, "
         f"change `pubDate` in the blog file's frontmatter to a future Monday."
@@ -258,6 +276,50 @@ def post_discord(message: str, *, dry_run: bool) -> bool:
     return discord_post.send(message)
 
 
+def generate_korean_translation(candidate: Candidate, *, dry_run: bool, force: bool) -> tuple[bool, str]:
+    """Run the blog repo's translate-to-korean.mjs script for this candidate.
+
+    The script writes to src/content/<collection>/ko/<slug>.<ext> on success.
+    Returns (ok, message). Idempotent: the script itself skips files where
+    the Korean sidecar already exists unless --force is passed.
+    """
+    if not TRANSLATE_SCRIPT.exists():
+        return False, f"translate script missing at {TRANSLATE_SCRIPT}"
+
+    collection = candidate.file_path.parent.name  # 'research' or 'posts'
+    ko_target = BLOG_REPO / "src" / "content" / collection / "ko" / candidate.file_path.name
+
+    if dry_run:
+        return True, f"<dry-run: would invoke {TRANSLATE_SCRIPT.name} → {ko_target}>"
+
+    args = ["node", str(TRANSLATE_SCRIPT), str(candidate.file_path)]
+    if force:
+        args.append("--force")
+
+    try:
+        result = subprocess.run(
+            args,
+            cwd=str(BLOG_REPO),
+            capture_output=True,
+            text=True,
+            timeout=TRANSLATE_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "translate timeout"
+    except FileNotFoundError:
+        return False, "node not in PATH"
+    if result.returncode != 0:
+        snippet = (result.stderr or result.stdout or "")[:300].replace("\n", " ").strip()
+        return False, f"translate exit_{result.returncode}: {snippet}"
+
+    # Verify the output actually landed
+    if not ko_target.exists():
+        return False, f"translate ran but no file at {ko_target}"
+
+    return True, str(ko_target.relative_to(BLOG_REPO))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sunday prep for the weekly publish.")
     parser.add_argument("--for-monday", type=str, default=None,
@@ -266,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Plan only; do not call Claude, write files, or post.")
     parser.add_argument("--force", action="store_true",
                         help="Regenerate LinkedIn variant even if a cached file exists.")
+    parser.add_argument("--no-korean", action="store_true",
+                        help="Skip Korean translation step. Default is to translate.")
     args = parser.parse_args(argv)
 
     target_monday = (
@@ -310,8 +374,20 @@ def main(argv: list[str] | None = None) -> int:
     else:
         write_artifact(x_path, build_x_draft(candidate) + "\n", dry_run=args.dry_run)
 
+    # Korean translation (calls into the blog repo's translate-to-korean.mjs).
+    # Skip on --no-korean. Idempotent: the script itself skips if Korean
+    # already exists unless --force is also passed.
+    korean_result: tuple[bool, str] | None = None
+    if not args.no_korean:
+        print(f"running Korean translation for {candidate.slug}...", file=sys.stderr)
+        korean_result = generate_korean_translation(candidate, dry_run=args.dry_run, force=args.force)
+        if korean_result[0]:
+            print(f"  ✓ Korean: {korean_result[1]}", file=sys.stderr)
+        else:
+            print(f"  ⚠ Korean failed: {korean_result[1]}", file=sys.stderr)
+
     # Discord briefing.
-    brief = discord_brief(candidate, target_monday, linkedin_path, x_path)
+    brief = discord_brief(candidate, target_monday, linkedin_path, x_path, korean_result)
     print(brief, file=sys.stderr)
     posted = post_discord(brief, dry_run=args.dry_run)
     if not posted and not args.dry_run:
