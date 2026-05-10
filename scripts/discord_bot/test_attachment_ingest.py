@@ -168,13 +168,21 @@ def _run(coro):
 
 class TestIngestAttachments(unittest.TestCase):
     def setUp(self):
-        # Redirect dropped-files dir to a tempdir so tests don't pollute the vault.
+        # Redirect dropped-files dirs to a tempdir so tests don't pollute the vault.
+        # We override both Echo's and Luna's drop dirs because tests below exercise
+        # both agents.
         self._tmp = tempfile.TemporaryDirectory()
+        tmp_root = Path(self._tmp.name)
         self._orig_dir = ai.DROPPED_FILES_DIR
-        ai.DROPPED_FILES_DIR = Path(self._tmp.name) / "dropped-files"
+        self._orig_map = dict(ai.DROPPED_FILES_DIR_PER_AGENT)
+        ai.DROPPED_FILES_DIR = tmp_root / "echo-dropped"
+        ai.DROPPED_FILES_DIR_PER_AGENT["echo"] = tmp_root / "echo-dropped"
+        ai.DROPPED_FILES_DIR_PER_AGENT["luna"] = tmp_root / "luna-dropped"
 
     def tearDown(self):
         ai.DROPPED_FILES_DIR = self._orig_dir
+        ai.DROPPED_FILES_DIR_PER_AGENT.clear()
+        ai.DROPPED_FILES_DIR_PER_AGENT.update(self._orig_map)
         self._tmp.cleanup()
 
     def test_empty_attachments_returns_empty_result(self):
@@ -258,6 +266,87 @@ class TestIngestAttachments(unittest.TestCase):
         self.assertEqual(len(result.ingested), 2)
         paths = {i.saved_path for i in result.ingested}
         self.assertEqual(len(paths), 2)  # different paths despite same filename
+
+    # ---- per-agent routing ----
+
+    def test_luna_accepts_png_no_sidecar(self):
+        # 8-byte PNG signature is enough; we don't validate the rest.
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        att = FakeAttachment("screenshot.png", png_bytes)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="luna"))
+        self.assertEqual(len(result.ingested), 1)
+        self.assertEqual(len(result.rejected), 0)
+        ing = result.ingested[0]
+        self.assertEqual(ing.original_filename, "screenshot.png")
+        self.assertTrue(ing.saved_path.exists())
+        # Images get no sidecar — the Read tool handles them as multimodal input.
+        self.assertIsNone(ing.sidecar_text_path)
+        # And the file landed in Luna's drop dir, not Echo's.
+        self.assertIn("luna-dropped", str(ing.saved_path))
+
+    def test_echo_rejects_png(self):
+        # Echo's allowlist is docs-only; an image is `unsupported_extension`.
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        att = FakeAttachment("screenshot.png", png_bytes)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="echo"))
+        self.assertEqual(len(result.ingested), 0)
+        self.assertEqual(len(result.rejected), 1)
+        self.assertIn("unsupported_extension", result.rejected[0][1])
+
+    def test_luna_still_accepts_docs(self):
+        # Luna's allowlist is the union of docs + images.
+        att = FakeAttachment("notes.txt", b"hello\n")
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="luna"))
+        self.assertEqual(len(result.ingested), 1)
+        self.assertIn("luna-dropped", str(result.ingested[0].saved_path))
+
+    def test_unwired_agent_rejects_everything(self):
+        # An agent not in ALLOWED_EXTENSIONS_PER_AGENT has every attachment
+        # rejected with `agent_not_wired_for_ingest`. handlers.py shouldn't
+        # call us in this case, but the function must not crash if it happens.
+        att = FakeAttachment("anything.txt", b"data")
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="content"))
+        self.assertEqual(len(result.ingested), 0)
+        self.assertEqual(len(result.rejected), 1)
+        self.assertEqual(result.rejected[0][1], "agent_not_wired_for_ingest")
+
+    def test_image_filename_sanitized_extension_preserved(self):
+        # Filenames with spaces/unicode still keep the image extension so
+        # the Read tool recognizes them as images.
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        att = FakeAttachment("My Cool 📸.png", png_bytes)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="luna"))
+        self.assertEqual(len(result.ingested), 1)
+        self.assertTrue(str(result.ingested[0].saved_path).endswith(".png"))
+
+
+# --------------- per-agent accessors ---------------
+
+
+class TestPerAgentAccessors(unittest.TestCase):
+    def test_allowed_extensions_for_echo(self):
+        from scripts.discord_bot.attachment_ingest import allowed_extensions_for
+        exts = allowed_extensions_for("echo")
+        self.assertIn(".txt", exts)
+        self.assertIn(".docx", exts)
+        self.assertNotIn(".png", exts)
+
+    def test_allowed_extensions_for_luna(self):
+        from scripts.discord_bot.attachment_ingest import allowed_extensions_for
+        exts = allowed_extensions_for("luna")
+        self.assertIn(".txt", exts)
+        self.assertIn(".png", exts)
+        self.assertIn(".jpg", exts)
+        self.assertIn(".heic", exts)
+
+    def test_allowed_extensions_for_unknown_agent_empty(self):
+        from scripts.discord_bot.attachment_ingest import allowed_extensions_for
+        self.assertEqual(allowed_extensions_for("some-future-agent"), set())
+
+    def test_dropped_files_dir_routing(self):
+        from scripts.discord_bot.attachment_ingest import dropped_files_dir_for
+        self.assertIn("Andy Profile", str(dropped_files_dir_for("echo")))
+        self.assertIn("Luna", str(dropped_files_dir_for("luna")))
 
 
 # --------------- format_prompt_block ---------------

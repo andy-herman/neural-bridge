@@ -1,4 +1,4 @@
-"""Inbound attachment ingestion — files dropped to Echo via Discord DMs/mentions.
+"""Inbound attachment ingestion — files dropped to an agent via Discord DMs/mentions.
 
 This is the INBOUND lane. It's distinct from `attachments.py`, which handles
 OUTBOUND attachments (agents emitting an ```attachments``` block to send files
@@ -7,28 +7,33 @@ threat models are different:
 
 - OUTBOUND: agent says "send /Users/.../foo.pem to Discord". We must
   refuse to exfiltrate credentials. Path-prefix denylist over $HOME.
-- INBOUND: Andy drops a file (.eml, .pdf, .docx, .txt, .md) into a Discord
-  chat with Echo. We download it, save it inside the vault under
-  `Andy Profile/dropped-files/YYYY-MM-DD/`, extract text from binary
-  formats (.docx, .eml) so the Read tool can consume them, and pass the
-  paths back to the caller so they can be injected into Echo's mention
-  prompt.
+- INBOUND: Andy drops a file into a Discord chat with an agent. We
+  download it, save it inside the vault under the agent's drop dir
+  (`Andy Profile/dropped-files/` for Echo, `Luna/dropped-files/` for
+  Luna), extract text from binary doc formats so the Read tool can
+  consume them, and pass the paths back to the caller so they can be
+  injected into the agent's mention prompt.
 
-Why inside the vault: Echo already has read access to the vault root via
-ADD_DIRS_PER_AGENT[echo], so anything we drop in `Andy Profile/dropped-files/`
-is automatically reachable without a separate --add-dir. The path is
-namespaced under Echo's writable subdirectory so dropping a file is
-indistinguishable, from a sandbox-permissions perspective, from Echo
-writing a profile note.
+Why inside the vault: each ingest-capable agent already has read access
+to the vault root via ADD_DIRS_PER_AGENT, so anything we drop under the
+agent's namespace is automatically reachable without a separate --add-dir.
+The drop dir lives inside the agent's writable subdirectory so dropping
+a file is, from a sandbox-permissions perspective, indistinguishable from
+the agent writing a note herself.
 
-Supported types:
+Supported types are per-agent (see `ALLOWED_EXTENSIONS_PER_AGENT`):
     .txt, .md       → saved as-is. Read tool handles natively.
     .pdf            → saved as-is. Read tool handles natively.
     .eml            → saved as-is, PLUS a `.txt` sidecar with extracted text.
     .docx           → saved as-is, PLUS a `.txt` sidecar with extracted text.
+    image formats   → saved as-is. Read tool handles natively (multimodal).
+                      .png, .jpg, .jpeg, .gif, .webp, .heic. No sidecar —
+                      Claude Code's Read tool loads the image directly.
 
-The sidecar text files are what the agent will read first; the originals
-are kept alongside in case Andy wants to look at them in Obsidian/Finder.
+The sidecar text files (for .docx/.eml) are what the agent will read
+first; the originals are kept alongside in case Andy wants to look at
+them in Obsidian/Finder. Images have no sidecar; the agent reads the
+image file itself.
 """
 
 from __future__ import annotations
@@ -46,13 +51,43 @@ from xml.etree import ElementTree as ET
 
 _logger = logging.getLogger("nb_discord.ingest")
 
-# Where dropped files land. Lives inside the vault under Andy Profile/ so Echo
-# already has read access via her existing --add-dir grant.
-DROPPED_FILES_DIR = (
-    Path.home() / "Documents" / "Luna Master" / "Andy Profile" / "dropped-files"
-)
+# Per-agent ingest config. Each agent that supports inbound attachments gets
+# its own drop directory (inside the agent's writable vault subdir) and its
+# own allowed-extensions set (Echo is text-corpus; Luna also handles images
+# because she's the assistant Andy actually screenshots things to).
+_VAULT_ROOT = Path.home() / "Documents" / "Luna Master"
 
-ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".eml", ".docx"}
+_DOC_EXTENSIONS = {".txt", ".md", ".pdf", ".eml", ".docx"}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"}
+
+ALLOWED_EXTENSIONS_PER_AGENT: dict[str, set[str]] = {
+    "echo": _DOC_EXTENSIONS,
+    "luna": _DOC_EXTENSIONS | _IMAGE_EXTENSIONS,
+}
+
+DROPPED_FILES_DIR_PER_AGENT: dict[str, Path] = {
+    "echo": _VAULT_ROOT / "Andy Profile" / "dropped-files",
+    "luna": _VAULT_ROOT / "Luna" / "dropped-files",
+}
+
+# Back-compat aliases. `DROPPED_FILES_DIR` is what older tests monkey-patch;
+# `ALLOWED_EXTENSIONS` is what the handlers gate filtered on before per-agent
+# routing landed. New code should use the per-agent accessors below.
+DROPPED_FILES_DIR = DROPPED_FILES_DIR_PER_AGENT["echo"]
+ALLOWED_EXTENSIONS = set().union(*ALLOWED_EXTENSIONS_PER_AGENT.values())
+
+
+def allowed_extensions_for(agent_id: str) -> set[str]:
+    """Return the set of accepted file extensions for `agent_id`, or empty set
+    if this agent isn't wired for inbound ingest."""
+    return ALLOWED_EXTENSIONS_PER_AGENT.get(agent_id, set())
+
+
+def dropped_files_dir_for(agent_id: str) -> Path:
+    """Return the drop directory for `agent_id`. Falls back to the Echo
+    default for unknown agents so we never write outside the vault, though
+    handlers.py won't call us for an un-wired agent."""
+    return DROPPED_FILES_DIR_PER_AGENT.get(agent_id, DROPPED_FILES_DIR)
 
 # Discord caps non-Nitro uploads at 25 MB; we accept up to that. The OUTBOUND
 # 24 MB cap is about Discord rejecting OUR uploads, not theirs.
@@ -232,16 +267,17 @@ def _strip_html(html: str) -> str:
 # ---------- the main entry point ----------
 
 async def ingest_attachments(message, *, agent_id: str) -> IngestResult:
-    """Download every supported attachment on `message`, save under
-    `dropped-files/YYYY-MM-DD/`, and extract text sidecars for .docx/.eml.
+    """Download every supported attachment on `message`, save under the
+    agent's `dropped-files/YYYY-MM-DD/`, and extract text sidecars for
+    .docx/.eml. Images are saved as-is for the Read tool to consume.
 
     `message` is a discord.Message. We type it loosely to keep this module
     test-importable without the discord dependency (the tests mock attachments).
 
-    `agent_id` is informational; we always save into Echo's dropped-files
-    directory regardless of which agent received the message, because that
-    directory is what's wired into Echo's profile workflow. Future: per-agent
-    drop dirs if other agents want this protocol.
+    `agent_id` selects both the allowed-extensions set and the drop dir.
+    If the agent isn't wired for ingest, every attachment is rejected with
+    `agent_not_wired_for_ingest`; handlers.py shouldn't call us in that
+    case, but we guard defensively.
     """
     attachments = list(getattr(message, "attachments", []) or [])
     result = IngestResult()
@@ -253,8 +289,16 @@ async def ingest_attachments(message, *, agent_id: str) -> IngestResult:
         result.over_cap = True
         attachments = attachments[:MAX_ATTACHMENTS_PER_MESSAGE]
 
+    allowed = allowed_extensions_for(agent_id)
+    if not allowed:
+        for att in attachments:
+            name = getattr(att, "filename", None) or "untitled"
+            result.rejected.append((name, "agent_not_wired_for_ingest"))
+            _logger.info("INGEST reject (agent): agent=%s name=%r", agent_id, name)
+        return result
+
     today = _dt.date.today().isoformat()
-    day_dir = DROPPED_FILES_DIR / today
+    day_dir = dropped_files_dir_for(agent_id) / today
     day_dir.mkdir(parents=True, exist_ok=True)
 
     for att in attachments:
@@ -262,7 +306,7 @@ async def ingest_attachments(message, *, agent_id: str) -> IngestResult:
         size_bytes = int(getattr(att, "size", 0) or 0)
         ext = Path(original_name).suffix.lower()
 
-        if ext not in ALLOWED_EXTENSIONS:
+        if ext not in allowed:
             result.rejected.append((original_name, f"unsupported_extension:{ext or '<none>'}"))
             _logger.info("INGEST reject (ext): agent=%s name=%r ext=%s", agent_id, original_name, ext)
             continue
@@ -361,9 +405,10 @@ def format_prompt_block(result: IngestResult) -> str:
     """Render the ingested files as a markdown block to prepend to a mention prompt.
 
     Returns "" if no files were ingested. The agent sees concrete paths it
-    can pass to the Read tool. Sidecar paths (extracted text) lead because
-    that's the format Read can natively consume; the original path is
-    listed as a reference.
+    can pass to the Read tool. For .docx/.eml the `.txt` sidecar leads
+    (extracted prose) and the original is a sub-bullet. For images and
+    other directly-readable formats, the saved path is the Read target —
+    the Read tool handles PNG/JPG/etc. natively as multimodal input.
     """
     if not result.ingested:
         return ""
@@ -371,9 +416,10 @@ def format_prompt_block(result: IngestResult) -> str:
     lines = ["## Andy dropped files into this conversation\n"]
     lines.append(
         "He attached the file(s) below for you to study. Read them with the "
-        "`Read` tool. For `.docx` and `.eml` files, the `.txt` sidecar is what "
-        "you read — it's the extracted prose. The original is preserved on "
-        "disk if you need to reference its filename or format.\n"
+        "`Read` tool. For `.docx` and `.eml` files, the `.txt` sidecar is the "
+        "extracted prose — read that. For images (PNG/JPG/etc.) and plain "
+        "text, read the saved path directly; the Read tool loads images as "
+        "visual input.\n"
     )
     for f in result.ingested:
         readable = f.sidecar_text_path or f.saved_path

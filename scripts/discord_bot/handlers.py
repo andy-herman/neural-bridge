@@ -23,7 +23,8 @@ from .actions import extract_actions, validate_action_batch
 from .agent_builder import execute_create_agent
 from .attachments import extract_attachments, validate_attachment_batch
 from .attachment_ingest import (
-    ALLOWED_EXTENSIONS as INGEST_ALLOWED_EXTENSIONS,
+    ALLOWED_EXTENSIONS_PER_AGENT as INGEST_ALLOWED_EXTENSIONS_PER_AGENT,
+    allowed_extensions_for as ingest_allowed_extensions_for,
     format_prompt_block as ingest_format_prompt_block,
     ingest_attachments,
 )
@@ -240,15 +241,17 @@ async def handle_mention(client, message, config: BotConfig) -> None:
     # Acknowledge so Andy sees the bot is thinking. Discord shows typing for ~10s
     # automatically when we use typing(); use it as a thinking indicator.
     async with message.channel.typing():
-        # Inbound attachment ingest — currently only wired for Echo (her job is
-        # to build Andy's voice profile from his actual writing, so dropping
-        # emails / docs / PDFs into chat with her is a core workflow). If any
-        # other agent grows a use case for inbound files, expand this allow-list.
+        # Inbound attachment ingest — agents in INGEST_ALLOWED_EXTENSIONS_PER_AGENT
+        # are wired for this. Echo gets text/doc corpus (.txt/.md/.pdf/.eml/.docx).
+        # Luna also gets images (.png/.jpg/etc.) because she's the assistant Andy
+        # screenshots things to. Each agent's allowed-extensions set and drop dir
+        # are defined in attachment_ingest.py.
         ingest_block = ""
-        if agent_id == "echo" and getattr(message, "attachments", None):
+        agent_allowed_exts = ingest_allowed_extensions_for(agent_id)
+        if agent_allowed_exts and getattr(message, "attachments", None):
             relevant = [
                 a for a in message.attachments
-                if Path(getattr(a, "filename", "") or "").suffix.lower() in INGEST_ALLOWED_EXTENSIONS
+                if Path(getattr(a, "filename", "") or "").suffix.lower() in agent_allowed_exts
             ]
             if relevant:
                 try:
@@ -270,7 +273,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
                     # knows what didn't make it through. Echo's prompt won't see
                     # rejected files, so they wouldn't otherwise be visible.
                     if ingest_result.rejected or ingest_result.over_cap:
-                        lines = ["_(Attachment ingest issues for `echo`:)_"]
+                        lines = [f"_(Attachment ingest issues for `{agent_id}`:)_"]
                         for name, reason in ingest_result.rejected:
                             short = name if len(name) <= 80 else "…" + name[-77:]
                             lines.append(f"- ⚠️ `{short}` skipped: `{reason}`")
