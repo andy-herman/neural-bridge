@@ -18,6 +18,7 @@ from .claude_invoke import call_claude
 from .client_registry import post_as_agent
 from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
+from .agent_builder import execute_create_agent
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -334,6 +335,24 @@ async def _execute_action_batch(actions: list[dict], config: BotConfig) -> list[
                     results.append(f"✅ Closed #{action['issue_number']}")
                 else:
                     results.append(f"❌ close_issue #{action['issue_number']}: `{r.error}`")
+            elif atype == "create_agent":
+                # Run the full agent_builder workflow in a thread (it does
+                # synchronous git/gh subprocess calls).
+                import asyncio as _asyncio
+                loop = _asyncio.get_running_loop()
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: execute_create_agent(action, repo),
+                )
+                if r.ok:
+                    line = (
+                        f"✅ Created agent `{r.agent_id}`: branch `{r.branch}`, PR {r.pr_url}"
+                    )
+                    if r.skipped_reasons:
+                        line += f" _(skipped: {'; '.join(r.skipped_reasons)})_"
+                    results.append(line)
+                else:
+                    results.append(f"❌ create_agent `{action.get('agent_id')}`: `{r.error}`")
             else:
                 # Should be unreachable due to validate_action_batch().
                 results.append(f"❌ unknown action type: `{atype}`")

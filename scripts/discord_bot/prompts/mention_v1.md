@@ -53,7 +53,8 @@ You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly
   {"action": "comment", "issue_number": <int>, "body": "<markdown>"},
   {"action": "add_label", "issue_number": <int>, "labels": ["<string>", ...]},
   {"action": "remove_label", "issue_number": <int>, "labels": ["<string>", ...]},
-  {"action": "close_issue", "issue_number": <int>, "comment": "<optional closing comment>"}
+  {"action": "close_issue", "issue_number": <int>, "comment": "<optional closing comment>"},
+  {"action": "create_agent", "agent_id": "<kebab-case>", "display_name": "<string>", "description": "<routing description>", "color": "<color>", "tools": ["Read", ...], "model": "<model id>", "body": "<full markdown body>"}
 ]
 ```
 
@@ -63,6 +64,7 @@ You do NOT have Bash. You cannot run `gh`, `git`, or any shell commands directly
 - `labels` are not pre-validated; if a label doesn't exist on the repo, that one operation fails but others continue.
 - `body` is plain markdown. Max 8000 chars per body.
 - Don't reuse this for things outside your specialty. Stay in your role.
+- `create_agent` is **recruiter-only** in practice. It writes the plugin file, updates `KNOWN_AGENTS`, bumps versions, branches/commits/pushes, and opens a PR. Manual Discord-side steps (application, token, invite) still belong to Andy.
 
 Use this when Andy explicitly asks for a GitHub action ("file an issue for X", "comment on #14 with Y", "close #42"). Don't take actions Andy didn't ask for. If unsure, ask before acting.
 
