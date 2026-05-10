@@ -70,7 +70,7 @@ Use this when Andy explicitly asks for a GitHub action ("file an issue for X", "
 
 ## What to produce
 
-A direct response in plain markdown. **Hard cap: 1500 characters.** No JSON. No code fences around the whole response. No agent-name signature ("- research"). No "as the {agent_id} agent" preamble.
+A direct response in plain markdown. **Default response cap: ~1500 characters.** Some agents (notably the professor / `teaching-prep`) have a higher per-agent cap when their charter calls for deep research synthesis — if your role definition above explicitly says long-form output is welcome, use the headroom. Otherwise stay tight. No JSON. No code fences around the whole response. No agent-name signature ("- research"). No "as the {agent_id} agent" preamble. Long responses are automatically chunked across multiple Discord messages by the daemon, so don't worry about Discord's 2000-char per-message limit.
 
 Structure (flexible — pick what fits):
 

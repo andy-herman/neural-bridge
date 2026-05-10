@@ -79,15 +79,25 @@ def call_claude_sync(
     model: str = DEFAULT_MODEL,
     timeout: int = DEFAULT_TIMEOUT,
     allowed_tools: str | None = None,
+    add_dirs: list[str] | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
     If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
     enable headless tool use. Default is no tools (text-only generation).
+
+    If `add_dirs` is set, each path is passed as `--add-dir <path>`, granting
+    the agent access (subject to `allowed_tools`) to directories outside the
+    daemon's CWD. Used to give per-agent access to vault-only corpora (e.g.,
+    the INFO 310A corpus for the professor agent). Paths are not validated
+    here — caller is responsible for passing trusted paths.
     """
     args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
+    if add_dirs:
+        for d in add_dirs:
+            args.extend(["--add-dir", d])
     try:
         result = subprocess.run(
             args,
@@ -112,10 +122,11 @@ async def call_claude(
     model: str = DEFAULT_MODEL,
     timeout: int = DEFAULT_TIMEOUT,
     allowed_tools: str | None = None,
+    add_dirs: list[str] | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: call_claude_sync(prompt, model, timeout, allowed_tools),
+        lambda: call_claude_sync(prompt, model, timeout, allowed_tools, add_dirs),
     )

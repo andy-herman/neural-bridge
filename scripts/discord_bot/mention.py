@@ -21,6 +21,85 @@ MAX_RESPONSE_CHARS = 1500
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARS_PER_MESSAGE = 500
 
+# Discord hard limit per message is 2000 chars. Leaving room for any
+# trailing markdown safety, we chunk at 1900.
+DISCORD_CHUNK_BUDGET = 1900
+
+# Per-agent response cap override. Agents not listed fall back to MAX_RESPONSE_CHARS.
+# Long values trigger chunking across multiple Discord messages (DISCORD_CHUNK_BUDGET each).
+# Use sparingly: longer responses cost more tokens and clutter the channel. The professor
+# (teaching-prep) gets 6000 because deep research synthesis genuinely needs the headroom.
+MAX_RESPONSE_CHARS_PER_AGENT: dict[str, int] = {
+    "teaching-prep": 6000,
+}
+
+
+def max_response_chars_for(agent_id: str) -> int:
+    """Per-agent response cap, with a default."""
+    return MAX_RESPONSE_CHARS_PER_AGENT.get(agent_id, MAX_RESPONSE_CHARS)
+
+
+# Per-agent extra read directories granted to claude -p via --add-dir. Used when
+# an agent's source-of-truth lives outside the daemon's CWD (e.g., the INFO 310A
+# corpus in the vault for the professor agent).
+#
+# Paths are absolute, expanded at module load. The daemon is responsible for
+# ensuring these paths actually exist; if a directory is missing, claude -p
+# will likely warn but continue.
+INFO_310A_CORPUS = str(
+    Path.home() / "Documents" / "Luna Master" / "Neural Bridge" / "Corpus" / "INFO 310A"
+)
+HUSKYHUB_LABS = str(Path.home() / "Development" / "huskyhub")
+
+ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
+    # Professor: read the corpus + the actual lab repo for end-to-end context.
+    "teaching-prep": [INFO_310A_CORPUS, HUSKYHUB_LABS],
+    # automation-engineer also benefits from huskyhub when reviewing lab code.
+    "automation-engineer": [HUSKYHUB_LABS],
+}
+
+
+def add_dirs_for(agent_id: str) -> list[str] | None:
+    """Per-agent extra `--add-dir` paths for claude -p, or None if none configured."""
+    return ADD_DIRS_PER_AGENT.get(agent_id)
+
+
+def chunk_for_discord(text: str, *, budget: int = DISCORD_CHUNK_BUDGET) -> list[str]:
+    """Split a long response into Discord-postable chunks.
+
+    Splits on natural boundaries in priority order:
+      1. Double-newline (paragraph)
+      2. Single-newline (line)
+      3. Hard cut at budget
+
+    Always returns at least one chunk. Each chunk is <= budget chars.
+    Empty input returns an empty list.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= budget:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > budget:
+        # Prefer paragraph break
+        slice_end = remaining.rfind("\n\n", 0, budget)
+        if slice_end == -1 or slice_end < budget // 2:
+            # Fall back to line break
+            slice_end = remaining.rfind("\n", 0, budget)
+        if slice_end == -1 or slice_end < budget // 2:
+            # Hard cut
+            slice_end = budget
+        chunk = remaining[:slice_end].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[slice_end:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
 
 # Per-agent allowed_tools when responding to a Discord @-mention.
 # PR-P-2: read-only PLUS Write + Edit so agents can take notes, save drafts,
