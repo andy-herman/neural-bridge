@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.compile-nightly</string>
+
+    <!-- Nightly compile pass: reads new daily-logs/<agent>/*.md entries
+         since last_run_at, runs the filing gate per proposed_concept,
+         writes PROMOTE'd articles to knowledge/concepts/, files
+         QUARANTINE'd candidates to knowledge/quarantine/, refreshes
+         knowledge/log.md and knowledge/index.md, writes connection files
+         for shared-source pairs. Per ADR-007.
+
+         Posts a daily run summary to Discord (PROMOTE/QUARANTINE/REJECT
+         counts + run-log link). The flush-Discord flood from spawned
+         claude -p subprocesses is silenced via the NB_NO_DISCORD=1 env
+         in compile.py's _subprocess_env_for_compile_claude() helper. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/compile.py</string>
+        <string>--no-dry-run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 03:00 local time daily. Late enough that any active session is
+         finished, early enough to be done before morning standup. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- One-shot per fire; do not keep alive between runs. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/compile-nightly.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/compile-nightly.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <!-- PATH includes ~/.local/bin so `claude` resolves; Homebrew for `gh`. -->
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <!-- Nightly run can be slow (filing gate + concept writer per candidate
+         + log refresh). Background priority + nice 10 keeps it gentle. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
