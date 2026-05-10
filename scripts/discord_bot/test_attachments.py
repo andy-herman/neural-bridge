@@ -124,13 +124,13 @@ class TestValidatePath(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error, "file_not_found")
 
-    def test_outside_home_rejected(self):
-        # Use /etc/hosts which exists on macOS/Linux and is outside any tmp home
+    def test_outside_allowed_roots_rejected(self):
+        # /etc/hosts exists on macOS/Linux and is outside both $HOME and $TMPDIR
         if not Path("/etc/hosts").exists():
             self.skipTest("no /etc/hosts on this platform")
         result = validate_path("/etc/hosts", home=self.home)
         self.assertFalse(result.ok)
-        self.assertEqual(result.error, "outside_home_directory")
+        self.assertEqual(result.error, "outside_allowed_roots")
 
     def test_directory_rejected(self):
         d = self.home / "Documents"
@@ -213,7 +213,7 @@ class TestValidatePath(unittest.TestCase):
 
     def test_symlink_escape_rejected(self):
         # Create a symlink under home pointing to /etc/hosts. After resolve(),
-        # the target is /etc/hosts which is outside home.
+        # the target is /etc/hosts which is outside both $HOME and $TMPDIR.
         if not Path("/etc/hosts").exists():
             self.skipTest("no /etc/hosts on this platform")
         link = self.home / "Documents" / "sneaky.txt"
@@ -221,7 +221,58 @@ class TestValidatePath(unittest.TestCase):
         os.symlink("/etc/hosts", link)
         result = validate_path(str(link), home=self.home)
         self.assertFalse(result.ok)
-        self.assertEqual(result.error, "outside_home_directory")
+        self.assertEqual(result.error, "outside_allowed_roots")
+
+    def test_tmpdir_path_passes(self):
+        """A file in the system tempdir (outside HOME) is allowed.
+
+        This is the case Luna hits when she downloads a Drive file via
+        download_file_content — tempfile.NamedTemporaryFile lands the
+        file at /var/folders/... on macOS, which is outside $HOME but
+        inside $TMPDIR. The validator must accept it."""
+        import tempfile as _tempfile
+        with _tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"hello" * 200)
+            tmp_path = Path(f.name)
+        try:
+            # Sandbox home to ensure the file matches via TMPDIR root, not home.
+            result = validate_path(str(tmp_path), home=self.home)
+            self.assertTrue(result.ok, result.error)
+        finally:
+            tmp_path.unlink()
+
+    def test_tmpdir_sensitive_basename_still_rejected(self):
+        """Sensitive filenames in TMPDIR are still rejected — the
+        basename denylist applies in every allowed root."""
+        import tempfile as _tempfile
+        import shutil
+        scratch = Path(_tempfile.mkdtemp())
+        try:
+            target = scratch / "id_rsa"
+            target.write_bytes(b"fake key contents" * 10)
+            result = validate_path(str(target), home=self.home)
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                result.error.startswith("sensitive_filename:id_rsa"),
+                f"unexpected error: {result.error}",
+            )
+        finally:
+            shutil.rmtree(scratch)
+
+    def test_tmpdir_dot_env_still_rejected(self):
+        """A .env in TMPDIR is also rejected (regression check on the
+        basename-denylist-applies-universally property)."""
+        import tempfile as _tempfile
+        import shutil
+        scratch = Path(_tempfile.mkdtemp())
+        try:
+            target = scratch / ".env.production"
+            target.write_bytes(b"DATABASE_URL=postgres://foo")
+            result = validate_path(str(target), home=self.home)
+            self.assertFalse(result.ok)
+            self.assertTrue(result.error.startswith("sensitive_filename:"))
+        finally:
+            shutil.rmtree(scratch)
 
     def test_empty_string_rejected(self):
         result = validate_path("", home=self.home)

@@ -11,11 +11,18 @@ Why a separate block (not folded into `actions`):
   that ride along with the agent's reply. Different lanes.
 
 Validation rules:
-- Path must be absolute and resolve under $HOME (after symlink resolution
-  to defeat `~/Documents/foo -> /etc/passwd` style escapes).
-- Path must NOT match the credential denylist (~/.ssh, ~/.aws, ~/.gnupg,
-  ~/.config/gh, ~/.config/git, ~/.kube, ~/.docker, ~/.netrc, ~/.gitconfig,
-  ~/.git/, .env*, id_rsa*, *.pem, *.key, .zsh_history, .bash_history).
+- Path must be absolute and resolve under one of the allowed roots
+  (currently $HOME and $TMPDIR) after symlink resolution. The tmpdir
+  allowance exists because agents that download files from external
+  sources (e.g., Luna fetching from Drive MCP) typically land them in
+  the system tempdir, which on macOS is `/var/folders/...` (resolves
+  to `/private/var/folders/...`) — outside $HOME.
+- Path must NOT match the credential denylist:
+  - Directory prefixes (under $HOME only): ~/.ssh, ~/.aws, ~/.gnupg,
+    ~/.config/gh, ~/.config/git, ~/.kube, ~/.docker, ~/.git/
+  - Basename patterns (universal — apply in any allowed root): .env*,
+    id_rsa*, id_ed25519*, *.pem, *.key, .netrc, .gitconfig,
+    .zsh_history, .bash_history, .python_history
 - File must exist, be a regular file, be non-empty, and be ≤ 24 MB
   (Discord's 25 MB limit minus 1 MB headroom for the message itself).
 
@@ -26,10 +33,15 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 HOME = Path.home()
+# System tempdir (resolved through any symlinks — on macOS this turns
+# /var/folders/... into /private/var/folders/... which is what Path.resolve()
+# returns for files created by tempfile / Drive MCP downloads).
+TMPDIR = Path(tempfile.gettempdir())
 MAX_BYTES = 24 * 1024 * 1024  # 24 MB
 MAX_ATTACHMENTS_PER_MESSAGE = 5
 
@@ -127,8 +139,25 @@ class PathValidationResult:
     error: str | None = None
 
 
-def validate_path(path_str: str, *, home: Path = HOME, max_bytes: int = MAX_BYTES) -> PathValidationResult:
-    """Validate a single attachment path. See module docstring for rules."""
+def validate_path(
+    path_str: str, *,
+    home: Path = HOME,
+    tmpdir: Path | None = None,
+    max_bytes: int = MAX_BYTES,
+) -> PathValidationResult:
+    """Validate a single attachment path. See module docstring for rules.
+
+    Allowed roots (resolved): $HOME and $TMPDIR. The tmpdir allowance
+    exists because agents that download files from external sources
+    (e.g., Luna fetching from Drive MCP) typically land them in the
+    system tempdir, which on macOS is `/var/folders/...` (resolves to
+    `/private/var/folders/...`) — outside $HOME.
+
+    Denylist by directory prefix (~/.ssh, ~/.aws etc.) applies only
+    under $HOME — those conventions don't exist in tmpdir. Denylist by
+    basename (id_rsa, .env, *.pem etc.) applies universally regardless
+    of which allowed root the file lives under.
+    """
     if not isinstance(path_str, str) or not path_str.strip():
         return PathValidationResult(False, "empty_or_non_string_path")
 
@@ -143,29 +172,42 @@ def validate_path(path_str: str, *, home: Path = HOME, max_bytes: int = MAX_BYTE
     except (OSError, RuntimeError):
         return PathValidationResult(False, "path_resolution_failed")
 
-    # Must be under $HOME after resolution (defeats symlink escape).
+    # Build the allowed-root list, resolving each (defeats symlink escape).
     home_resolved = home.resolve()
-    try:
-        relative = resolved.relative_to(home_resolved)
-    except ValueError:
-        return PathValidationResult(False, "outside_home_directory")
+    tmpdir_resolved = (tmpdir if tmpdir is not None else TMPDIR).resolve()
+    allowed_roots = [home_resolved, tmpdir_resolved]
+
+    matched_root: Path | None = None
+    matched_relative: Path | None = None
+    for root in allowed_roots:
+        try:
+            matched_relative = resolved.relative_to(root)
+            matched_root = root
+            break
+        except ValueError:
+            continue
+    if matched_root is None:
+        return PathValidationResult(False, "outside_allowed_roots")
 
     # Must be a regular file (not directory, not socket, not device).
     if not resolved.is_file():
         return PathValidationResult(False, "not_a_regular_file")
 
-    # Denylist by directory prefix.
-    parts = relative.parts
-    for deny_dir in DENY_DIRS:
-        deny_parts = Path(deny_dir).parts
-        # Match either as a path prefix (~/.ssh/key) or as any embedded
-        # segment for the .git case (foo/.git/config).
-        if parts[: len(deny_parts)] == deny_parts:
-            return PathValidationResult(False, f"sensitive_dir:{deny_dir}")
-        if deny_dir == ".git" and ".git" in parts:
-            return PathValidationResult(False, "sensitive_dir:.git")
+    # Denylist by directory prefix — only applies under $HOME (these
+    # conventions are home-relative; tmpdir layouts don't follow them).
+    if matched_root == home_resolved:
+        parts = matched_relative.parts if matched_relative else ()
+        for deny_dir in DENY_DIRS:
+            deny_parts = Path(deny_dir).parts
+            # Match either as a path prefix (~/.ssh/key) or as any embedded
+            # segment for the .git case (foo/.git/config).
+            if parts[: len(deny_parts)] == deny_parts:
+                return PathValidationResult(False, f"sensitive_dir:{deny_dir}")
+            if deny_dir == ".git" and ".git" in parts:
+                return PathValidationResult(False, "sensitive_dir:.git")
 
-    # Denylist by basename pattern.
+    # Denylist by basename pattern — applies universally (sensitive
+    # filenames in tmpdir are just as bad as in $HOME).
     basename = resolved.name
     for pattern in DENY_BASENAME_PATTERNS:
         if pattern.search(basename):
