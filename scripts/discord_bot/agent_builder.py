@@ -34,12 +34,20 @@ SCHEMA_PY = REPO_ROOT / "hooks" / "schema.py"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGIN_JSON = REPO_ROOT / "plugins" / "neural-bridge-core" / ".claude-plugin" / "plugin.json"
 
+AGENTS_JSON = REPO_ROOT / "scripts" / "discord_bot" / "agents.json"
+
 VALID_AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+VALID_CLIENT_ID_RE = re.compile(r"^\d{17,20}$")  # Discord snowflake
 VALID_COLOR = {"red", "orange", "yellow", "green", "blue", "purple", "cyan", "pink", "white", "magenta"}
 VALID_TOOL = {
     "Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch",
     "NotebookEdit",
 }
+
+
+def _is_valid_tool(name: str) -> bool:
+    """Allow built-in Claude Code tools and MCP tool IDs (mcp__<server>__<tool>)."""
+    return name in VALID_TOOL or (isinstance(name, str) and name.startswith("mcp__"))
 
 
 @dataclass
@@ -80,14 +88,21 @@ def validate_create_agent_payload(action: dict) -> tuple[bool, str | None]:
     if not isinstance(tools, list) or not tools:
         return False, "tools must be a non-empty list"
     for t in tools:
-        if t not in VALID_TOOL:
-            return False, f"unknown tool: {t!r} (valid: {sorted(VALID_TOOL)})"
+        if not _is_valid_tool(t):
+            return False, f"unknown tool: {t!r} (valid: {sorted(VALID_TOOL)} or any mcp__* name)"
 
     if not isinstance(action["model"], str) or not action["model"].strip():
         return False, "model must be non-empty string"
 
     if not isinstance(action["body"], str) or len(action["body"].strip()) < 100:
         return False, "body must be a non-trivial markdown string (>= 100 chars)"
+
+    # client_id is OPTIONAL. If present, agent_builder auto-updates agents.json.
+    # If absent, the manual-steps list in the PR body still asks Andy to do it.
+    client_id = action.get("client_id")
+    if client_id is not None:
+        if not isinstance(client_id, str) or not VALID_CLIENT_ID_RE.match(client_id):
+            return False, f"client_id must be a Discord snowflake (17-20 digit string): {client_id!r}"
 
     return True, None
 
@@ -138,6 +153,47 @@ def update_known_agents(file_path: Path, agent_id: str) -> bool:
         new_body = new_body + f',\n    "{agent_id}",'
     new_text = text[: m.start("body")] + new_body + text[m.end("body"):]
     file_path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def update_agents_json(
+    json_path: Path,
+    *,
+    agent_id: str,
+    display_name: str,
+    client_id: str,
+    is_orchestrator: bool = False,
+) -> bool:
+    """Add an entry for `agent_id` to the `agents` array in agents.json.
+
+    Idempotent: if an entry with the same `id` already exists, returns False
+    without modifying the file. Returns True if a new entry was appended.
+
+    The entry shape matches the existing convention:
+        {
+          "id": "<agent_id>",
+          "client_id": "<discord-snowflake>",
+          "token_keychain_service": "neural-bridge-discord-bot-<agent_id>",
+          "is_orchestrator": false,
+          "display_name": "<display_name>"
+        }
+    """
+    text = json_path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    agents = data.get("agents")
+    if not isinstance(agents, list):
+        raise ValueError(f"agents.json missing or malformed `agents` array at {json_path}")
+    for existing in agents:
+        if isinstance(existing, dict) and existing.get("id") == agent_id:
+            return False
+    agents.append({
+        "id": agent_id,
+        "client_id": client_id,
+        "token_keychain_service": f"neural-bridge-discord-bot-{agent_id}",
+        "is_orchestrator": is_orchestrator,
+        "display_name": display_name,
+    })
+    json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return True
 
 
@@ -260,25 +316,54 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
     if not new_version_marketplace or not new_version_plugin:
         skipped.append("version bump failed (non-semver?)")
 
+    # If the action carried a client_id, append the entry to agents.json so the
+    # daemon picks it up on next reload. If client_id wasn't provided, fall back
+    # to the manual instruction in the PR body.
+    client_id = action.get("client_id")
+    agents_json_updated = False
+    if client_id:
+        try:
+            agents_json_updated = update_agents_json(
+                AGENTS_JSON,
+                agent_id=agent_id,
+                display_name=action["display_name"],
+                client_id=client_id,
+            )
+            if not agents_json_updated:
+                skipped.append(f"agents.json: {agent_id} already present")
+        except (ValueError, FileNotFoundError) as exc:
+            skipped.append(f"agents.json update failed: {exc}")
+
     # git add / commit / push.
     ok, msg = _git(["add", "-A"])
     if not ok:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git add failed: {msg}")
+    agents_json_line = (
+        f"agents.json updated automatically (client_id captured at intake).\n"
+        if agents_json_updated else
+        f"agents.json NOT updated (no client_id in action payload — "
+        f"add manually before reload).\n"
+    )
+    manual_step_for_agents_json = (
+        "" if agents_json_updated
+        else f"4. Add the new client_id to scripts/discord_bot/agents.json\n"
+    )
     commit_msg = (
         f"feat(agent): add {agent_id} specialist (created by recruiter)\n\n"
         f"display_name: {action['display_name']}\n"
         f"description: {action['description']}\n\n"
         f"Plugin file at plugins/neural-bridge-core/agents/{agent_id}.md.\n"
         f"KNOWN_AGENTS updated in hooks/session_end.py and hooks/schema.py.\n"
-        f"Plugin version bumped (marketplace.json + plugin.json).\n\n"
-        f"Manual steps remaining for Andy:\n"
+        f"Plugin version bumped (marketplace.json + plugin.json).\n"
+        + agents_json_line +
+        f"\nManual steps remaining for Andy:\n"
         f"1. Create Discord application 'NB {action['display_name']}' in Developer Portal\n"
         f"2. Enable Message Content Intent on its Bot tab\n"
         f"3. Reset Token and store: security add-generic-password "
-        f"-s 'neural-bridge-discord-bot-{agent_id}' -a \"$USER\" -w \"$(pbpaste)\"\n"
-        f"4. Generate invite URL with the new client_id and authorize into the server\n"
-        f"5. Add the new client_id to scripts/discord_bot/agents.json\n"
-        f"6. Reload daemon: ./scripts/launchd/install.sh"
+        f"-s 'neural-bridge-discord-bot-{agent_id}' -a \"$USER\" -w\n"
+        + manual_step_for_agents_json +
+        f"{'4' if agents_json_updated else '5'}. Generate invite URL with the new client_id and authorize\n"
+        f"{'5' if agents_json_updated else '6'}. Reload daemon: ./scripts/launchd/install.sh"
     )
     ok, msg = _git(["commit", "-m", commit_msg])
     if not ok:
@@ -288,6 +373,23 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git push failed: {msg}")
 
     # Open the PR.
+    invite_url = (
+        f"https://discord.com/oauth2/authorize?client_id={client_id}"
+        f"&scope=bot+applications.commands&permissions=380104608832"
+        if client_id else
+        f"https://discord.com/oauth2/authorize?client_id=<NEW>"
+        f"&scope=bot+applications.commands&permissions=380104608832"
+    )
+    automated_lines = (
+        f"- `agents.json` updated automatically with id, client_id, "
+        f"and keychain service name\n"
+        if agents_json_updated else ""
+    )
+    manual_agents_json_step = (
+        "" if agents_json_updated
+        else f"4. **Update agents.json:** Add the new agent's client_id to "
+             f"`scripts/discord_bot/agents.json`.\n"
+    )
     pr_body = (
         f"## Recruiter-driven agent rollout: `{agent_id}`\n\n"
         f"**Display name:** {action['display_name']}\n"
@@ -296,13 +398,14 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
         f"- Plugin file at `plugins/neural-bridge-core/agents/{agent_id}.md`\n"
         f"- `KNOWN_AGENTS` updated in `hooks/session_end.py` and `hooks/schema.py`\n"
         f"- Plugin version bumped (`marketplace.json` and `plugins/neural-bridge-core/.claude-plugin/plugin.json`)\n"
+        f"{automated_lines}"
         f"\n## Manual steps still required (Andy)\n\n"
         f"1. **Discord application:** Developer Portal → New Application → name `NB {action['display_name']}` → Bot tab → enable **Message Content Intent** → Reset Token, copy.\n"
-        f"2. **Store token:** `security add-generic-password -s \"neural-bridge-discord-bot-{agent_id}\" -a \"$USER\" -w \"$(pbpaste)\"`\n"
-        f"3. **Invite bot:** Generate URL with the new client_id at `https://discord.com/oauth2/authorize?client_id=<NEW>&scope=bot+applications.commands&permissions=380104608832` → open → authorize.\n"
-        f"4. **Update agents.json:** Add the new agent's client_id to `scripts/discord_bot/agents.json` (or ask the daemon).\n"
-        f"5. **Reload:** `./scripts/launchd/install.sh`\n"
-        f"6. **Smoke test:** `@{agent_id} ...` in `#neural-bridge`."
+        f"2. **Store token:** `security add-generic-password -s \"neural-bridge-discord-bot-{agent_id}\" -a \"$USER\" -w` (interactive — paste, hit return; token never lands in shell history)\n"
+        f"3. **Invite bot:** open `{invite_url}` → authorize.\n"
+        + manual_agents_json_step +
+        f"{'4' if agents_json_updated else '5'}. **Reload:** `./scripts/launchd/install.sh`\n"
+        f"{'5' if agents_json_updated else '6'}. **Smoke test:** `@{agent_id} ...` in `#neural-bridge`."
     )
     ok, msg = _gh(["pr", "create", "--title", f"feat(agent): add {agent_id} specialist", "--body", pr_body])
     if not ok:
