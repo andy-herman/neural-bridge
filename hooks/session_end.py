@@ -30,6 +30,7 @@ FLUSH_SCRIPT = REPO_ROOT / "hooks" / "flush.py"
 KNOWN_AGENTS = {
     "research", "teaching-prep", "content", "senior-pm", "social",
     "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
+    "luna",
 }
 UNATTRIBUTED = "_unattributed"
 
