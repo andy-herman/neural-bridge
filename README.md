@@ -1,126 +1,107 @@
 # Neural Bridge
 
-A personal AI substrate: multiple specialized agents sharing a markdown wiki memory and a chat-based mobile interface, so your agent work *compounds* instead of fragmenting across point tools.
+A personal AI substrate: nine specialized agents sharing a markdown wiki memory, reachable from a phone via Discord, with a filing gate that defends the shared memory against prompt injection and poisoning.
 
-> 🚧 **V1 scaffold — not yet functional.** This repo contains the directory structure, agent definitions, and wiki skeleton for V1. Hook scripts and the compile pipeline land in subsequent iterations.
+## What this actually is, today
 
-## The problem this solves
+V1 ships and runs. Nine specialists answer @-mentions in Discord. They read each other's notes, hand off to each other, and emit structured GitHub actions (file an issue, comment, label, close, recruit a new agent). Sessions flush to dated daily logs. A filing gate promotes (or rejects) candidate concepts before they reach the shared wiki. A weekly lint pass re-checks the wiki for drift.
 
-Most personal AI workflows fragment into point tools — a chat tab here, a coding session there, a separate research workflow somewhere else. You repeat the same setup, lose context between tools, and start fresh every time.
+The whole thing runs locally on a Mac Mini under `launchd`. There is no cloud infrastructure to manage, no service to pay for beyond a Claude Max subscription.
 
-Spinning up *"yet another AI helper"* project makes it worse — every project is a silo. None of them share memory. None of them compound.
+## The problem
 
-## What it is
+Most personal AI workflows fragment into point tools — a chat tab, a coding session, a research workflow, each with its own short memory. Every project starts fresh. None of them compound.
 
-Neural Bridge is a *substrate*: one place where specialized agents live together, share a markdown wiki memory, and (eventually) reach you on your phone.
+Neural Bridge is the substrate where the work compounds.
 
-- **Specialized agents** — one for research, one for teaching prep, one for content drafting (or whatever roles fit your life)
-- **A shared markdown wiki** — agents read across each other's memory, write into their own subdirectories, and the wiki compounds with every session
-- **An external chat transport** — reach the system from your phone via the messaging app of your choice
-- **Built on a coding-agent CLI** — uses [Claude Code](https://docs.claude.com/en/docs/claude-code) as the runtime, riding your existing subscription
-
-The wiki is **maintained by LLMs, not by hand**. That's the [Karpathy pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), adapted for cross-agent personal use following Cole Medin's [claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler).
-
-## Who this is for
-
-- Knowledge workers and educators running multi-domain lives (research + teach + ship)
-- Power users with [Claude Max](https://www.anthropic.com/pricing) who want their agents to compound across projects
-- Anyone tired of starting fresh every time they open a new AI tool
-
-## Requirements
-
-- [Claude Code](https://docs.claude.com/en/docs/claude-code) — the coding-agent CLI this scaffold is configured for
-- (Optional but recommended) [Obsidian](https://obsidian.md/) for viewing the wiki with graph view + backlinks
-- Mac, Linux, or Windows
-
-## Architecture (six layers)
+## The substrate, in five layers
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  6. Frontend       — V3 (web dashboard, graph)       │
-│  5. Orchestration  — native subagent dispatch        │
-│  4. Shared state   — wiki + daily logs + hive (V2)   │
-│  3. Transport      — mobile chat (external)          │
-│  2. Skills         — inherited from user-level       │
-│  1. Agents         — .claude/agents/*.md             │
-└──────────────────────────────────────────────────────┘
+1. Agents          nine .md plugin files, each a specialist
+2. Skills          inherited from user-level Claude Code settings
+3. Transport       Discord (mention any agent from any device)
+4. Shared state    knowledge/ wiki + daily-logs + filing gate + lint
+5. Orchestration   Discord daemon + senior-pm + cross-agent handoff
 ```
 
-V1 ships layers 1, 2, and the wiki side of 4. The rest lands in V2/V3.
+## The nine agents
 
-## Status
+| Agent | Role |
+|---|---|
+| `research` | Deep reading, citations, threat model write-ups |
+| `teaching-prep` | INFO 310 lecture material, slide outlines, exercises |
+| `content` | Long-form drafts for the blog and LinkedIn |
+| `social` | Short-form posts, X drafts, social copy |
+| `senior-pm` | Issue triage, kanban moves, weekly summaries |
+| `recruiter` | Designs and provisions new specialist agents |
+| `automation-engineer` | Hooks, scripts, daemon work |
+| `security-reviewer` | Audits prompts, flows, and PRs for prompt-injection / data-leak risks |
+| `docs-editor` | Tightens prose, fixes drift in the wiki |
 
-| Layer | V1 (this repo) | V2 (next) | V3 (later) |
-|---|---|---|---|
-| Agents | ✅ 3 definitions in `.claude/agents/` | + per-domain specialists | |
-| Skills | inherits from user-level | | |
-| Transport | external (configured separately) | + custom mobile bridge | + voice war room |
-| Shared state | ✅ wiki skeleton in `knowledge/` | + SQLite hive | |
-| Orchestration | native subagent dispatch | + supervisor process | |
-| Frontend | none — CLI only | + web dashboard | + activity graph |
+`@` any of them in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other.
+
+## Memory pipeline
+
+Daily logs are cheap and per-agent. Concepts are expensive and cross-agent. Promoting a daily log entry into a concept article passes through a filing gate that asks one question: **PROMOTE, QUARANTINE, or REJECT?**
+
+The gate checks for imperative AI-directed language (textbook prompt injection), untraceable claims, self-promotion, concept-worthiness, slug coherence, and adversarial signal in the source. If a candidate concept fails any of those, it never makes the wiki.
+
+Background and threat model: [Memory Poisoning in Personal Agentic AI Substrates](https://neural-bridge.dev/research/memory-poisoning-in-personal-agentic-ai-substrates).
+
+## Discord orchestrator
+
+Nine bot identities, one daemon, one asyncio loop. Each agent has its own Discord application and Message Content Intent. The daemon:
+
+- Routes `@agent` mentions to the right specialist
+- Loads the agent's plugin definition into the prompt
+- Calls `claude -p` with the right tool allowlist (Read / Write / Edit / WebSearch / WebFetch — never Bash)
+- Extracts a single fenced ` ```actions ` block from the reply, validates it, executes via `gh`
+- Posts the response back as the agent's bot
+- Tracks per-channel turn budget so cross-agent chains can't run away
+
+`senior-pm` also exposes slash commands: `/pm-task`, `/pm-summary`, `/triage`, `/squad-discuss`, `/close`.
 
 ## Repo map
 
 ```
-.claude-plugin/marketplace.json    declares this repo as a plugin marketplace
-plugins/neural-bridge-core/        the V1 core plugin (3 specialist agents)
-  .claude-plugin/plugin.json       plugin manifest
-  agents/                          subagent definitions (research, teaching-prep, content)
-.claude/settings.json              project-local hooks + permissions
-knowledge/                         markdown wiki (LLM-maintained)
-  AGENTS.md                        wiki schema doc
+.claude-plugin/marketplace.json    plugin marketplace declaration
+plugins/neural-bridge-core/        the core plugin
+  agents/                          nine specialist .md definitions
+hooks/                             session_end, session_start, flush, schema
+scripts/                           compile (filing gate), lint, discord_bot/
+  discord_bot/                     daemon, mention routing, GitHub actions
+  launchd/                         persistence under launchd
+knowledge/                         the LLM-maintained wiki
+  agents/                          per-agent session notes
+  concepts/                        cross-agent concept articles (filed via gate)
+  quarantine/                      concepts the gate refused (with reason)
   index.md                         always-loaded starting point
-  log.md                           chronological append-only record
-  concepts/                        cross-agent concept articles
-  connections/                     explicit cross-references
-  agents/                          per-agent memory subdirectories
-daily-logs/                        per-agent session summaries (gitignored)
-raw/                               external ingest landing (gitignored)
-hooks/                             hook scripts (V2)
-scripts/                           compile / flush / lint / query (V2)
-decisions/                         architecture decision records (ADRs)
-docs/                              build status, build plans, audits
-AGENTS.md                          project schema for any AI agent in the repo
-ATTRIBUTION.md                     credits and prior art
+daily-logs/                        per-agent session summaries
+decisions/                         ADRs
+docs/                              STATUS.md, lint reports, audits
 ```
-
-## View it in Obsidian
-
-The repo is designed to be opened directly as an [Obsidian](https://obsidian.md/) vault. Open the Neural-Bridge folder in Obsidian to get:
-
-- Graph view across the wiki
-- Wiki-link navigation between concept articles
-- Backlinks panel
-- Search across all markdown content
-
-Open it as a *separate vault* from any personal vault you already keep — Neural Bridge's wiki is intentionally project-scoped.
 
 ## Setup
 
-> V1 is a scaffold — agents don't yet do useful work; V2 wires up the hooks and compile pipeline. Watch [docs/STATUS.md](docs/STATUS.md) for build progress.
+This repo ships as a Claude Code plugin marketplace plus a Discord daemon.
 
-This repo ships as a Claude Code plugin marketplace. To use it:
-
-1. Clone this repo (or skip cloning and just install the marketplace from GitHub).
-2. Install [Claude Code](https://docs.claude.com/en/docs/claude-code).
-3. Add the marketplace and install the core plugin:
+1. Clone the repo and install [Claude Code](https://docs.claude.com/en/docs/claude-code).
+2. Install the plugin:
    ```
    /plugin marketplace add andy-herman/neural-bridge
    /plugin install neural-bridge-core@neural-bridge
    ```
-4. (Optional) Open the cloned repo folder in Obsidian as a vault for graph view + backlinks.
-5. Run `claude` from anywhere — the three agents are now available wherever you invoke Claude Code.
-
-Why a plugin marketplace? It keeps Neural Bridge composable: future domain-specific plugins (per-course teaching, per-platform content) can ship alongside `neural-bridge-core` without a big refactor. See [docs/STATUS.md](docs/STATUS.md) for the V2 roadmap.
-
-## License
-
-MIT — see [LICENSE](LICENSE)
+3. (Optional) Open the repo as an [Obsidian](https://obsidian.md/) vault for graph view + backlinks.
+4. (Optional, for the Discord orchestrator) Create nine Discord applications, enable Message Content Intent on each, store the tokens in macOS keychain (`security add-generic-password ...`), populate `scripts/discord_bot/agents.json` with each application's client ID, then `./scripts/launchd/install.sh` to register the daemon with `launchd`.
 
 ## Build journal
 
-Public progress: see [docs/STATUS.md](docs/STATUS.md).
+[docs/STATUS.md](docs/STATUS.md) for chronological progress. Posts about the build and the threat model live at [neural-bridge.dev](https://neural-bridge.dev).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Attribution
 
-See [ATTRIBUTION.md](ATTRIBUTION.md) for credits and prior art.
+See [ATTRIBUTION.md](ATTRIBUTION.md) for credits and prior art (Karpathy's pattern, Cole Medin's claude-memory-compiler, AgentPoison and PoisonedRAG threat-model research).
