@@ -36,6 +36,7 @@ from .mention import (
     is_mention_for_self,
     load_agent_definition,
     max_response_chars_for,
+    timeout_for,
     truncate_response,
 )
 from .squad_discuss import (
@@ -240,11 +241,14 @@ async def handle_mention(client, message, config: BotConfig) -> None:
 
         tools = allowed_tools_for(agent_id)
         extra_dirs = add_dirs_for(agent_id)
+        agent_timeout = timeout_for(agent_id)
         log(
             f"MENTION calling claude: agent={agent_id} tools={tools or 'none'} "
-            f"add_dirs={len(extra_dirs) if extra_dirs else 0}"
+            f"add_dirs={len(extra_dirs) if extra_dirs else 0} timeout={agent_timeout}s"
         )
-        ok, stdout, err = await call_claude(prompt, allowed_tools=tools, add_dirs=extra_dirs)
+        ok, stdout, err = await call_claude(
+            prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs
+        )
 
     if not ok:
         log(f"MENTION claude FAILED: agent={agent_id} error={err}")
