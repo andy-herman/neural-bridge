@@ -29,10 +29,13 @@ from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
 from .mention import (
     MENTION_PROMPT_PATH,
+    add_dirs_for,
     allowed_tools_for,
     build_mention_prompt,
+    chunk_for_discord,
     is_mention_for_self,
     load_agent_definition,
+    max_response_chars_for,
     truncate_response,
 )
 from .squad_discuss import (
@@ -235,8 +238,12 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         )
 
         tools = allowed_tools_for(agent_id)
-        log(f"MENTION calling claude: agent={agent_id} tools={tools or 'none'}")
-        ok, stdout, err = await call_claude(prompt, allowed_tools=tools)
+        extra_dirs = add_dirs_for(agent_id)
+        log(
+            f"MENTION calling claude: agent={agent_id} tools={tools or 'none'} "
+            f"add_dirs={len(extra_dirs) if extra_dirs else 0}"
+        )
+        ok, stdout, err = await call_claude(prompt, allowed_tools=tools, add_dirs=extra_dirs)
 
     if not ok:
         log(f"MENTION claude FAILED: agent={agent_id} error={err}")
@@ -247,7 +254,8 @@ async def handle_mention(client, message, config: BotConfig) -> None:
 
     # Extract any structured action block before truncating + posting.
     parsed = extract_actions(stdout)
-    response = truncate_response(parsed.visible_response)
+    response_cap = max_response_chars_for(agent_id)
+    response = truncate_response(parsed.visible_response, limit=response_cap)
 
     if not response and not parsed.actions and not parsed.parse_error:
         log(f"MENTION empty response: agent={agent_id}")
@@ -255,7 +263,14 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         return
 
     if response:
-        await message.channel.send(response)
+        # Chunk into multiple messages if the response exceeds Discord's per-message limit.
+        chunks = chunk_for_discord(response)
+        for i, chunk in enumerate(chunks):
+            # Tag continuation messages so the user knows the response is being split,
+            # except when there's only one chunk.
+            if len(chunks) > 1:
+                chunk = f"_(part {i + 1}/{len(chunks)})_\n{chunk}" if i > 0 else chunk
+            await message.channel.send(chunk)
 
     # Action block handling.
     if parsed.parse_error:
