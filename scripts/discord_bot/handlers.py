@@ -305,7 +305,10 @@ async def handle_mention(client, message, config: BotConfig) -> None:
     if response:
         # Chunk into multiple messages if the response exceeds Discord's per-message limit.
         # Files (if any) attach to the last chunk so they appear after the prose context.
-        import discord  # local import — keeps module test-importable on system Python
+        # `discord` comes from the module-level import (line 12) — adding a local
+        # `import discord` here makes Python treat the name as local for the entire
+        # function, breaking the earlier `discord.Thread` reference at line 252
+        # (UnboundLocalError on every mention).
         chunks = chunk_for_discord(response)
         for i, chunk in enumerate(chunks):
             # Tag EVERY chunk when there's a continuation, including part 1 — otherwise users
@@ -320,7 +323,6 @@ async def handle_mention(client, message, config: BotConfig) -> None:
                 await message.channel.send(chunk)
     elif valid_files:
         # No prose response, just files — send them on their own.
-        import discord
         files = [discord.File(str(p)) for p in valid_files]
         await message.channel.send(files=files)
 
