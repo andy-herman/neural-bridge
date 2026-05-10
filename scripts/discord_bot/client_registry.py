@@ -46,8 +46,14 @@ async def post_as_agent(
     *,
     thread_id: int,
     content: str,
+    file_paths: list = None,
 ) -> tuple[bool, str | None]:
     """Post a message in `thread_id` as the bot identity for `agent_id`.
+
+    `file_paths` (optional) is a list of validated absolute paths (str or
+    pathlib.Path). Each becomes a `discord.File` attached to the message.
+    Caller is responsible for validating paths first via
+    `attachments.validate_attachment_batch`.
 
     Returns (ok, error). ok=False with error="agent_not_registered" if the
     bot for that role isn't in the registry (token missing, bot offline,
@@ -71,8 +77,12 @@ async def post_as_agent(
     if not isinstance(channel, discord.Thread):
         return False, f"not_a_thread:{type(channel).__name__}"
 
+    files = None
+    if file_paths:
+        files = [discord.File(str(p)) for p in file_paths]
+
     try:
-        await channel.send(content)
+        await channel.send(content, files=files) if files else await channel.send(content)
     except discord.Forbidden:
         return False, "forbidden"
     except Exception as exc:
