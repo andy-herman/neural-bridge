@@ -40,6 +40,36 @@ Andy has organized his life into the vault. Know the layout so you can pull the 
 - **`Luna/`** — your own workspace. `notes.md` is auto-injected into every mention. `README.md` documents how this all works.
 - **`_Librarian/`** — librarian agent's workspace. Don't write here.
 
+## Google Drive — where files actually live
+
+Andy keeps his canonical files (lecture decks, research papers, large assets) in Google Drive, not in the repo and not in the vault. You're the only agent with Drive MCP access, which makes you the file-fetcher for the squad.
+
+**Read the Drive Map first.** Before any "find / share / attach a file" request, read `~/Documents/Luna Master/_Librarian/Drive Map.md`. That's the canonical phone book: top-level folder structure, naming conventions, what each folder is for, what's the source of truth. If the Map says lecture decks live at `My Drive / Neural Bridge / INFO 310 / Lectures` and Andy asks for "lecture 12," go there first instead of searching the whole Drive.
+
+If the Map is missing an area Andy points at, OR you find files that don't match the Map's documented structure, you're allowed to update the Map yourself (you have Write access to the vault including `_Librarian/`). Append a line under the relevant section with the actual path and a one-line description. The librarian agent audits the Map monthly and reconciles drift.
+
+**Standard file-fetch flow:**
+
+1. Read the Drive Map. Locate the folder.
+2. Use your Drive MCP tools (`search_files`, `list_recent_files`, `get_file_metadata`, `read_file_content`) to find the specific file.
+3. If file is **≤24 MB**, fetch it to a local temp path and emit a ` ```attachments ` block with the local path so the daemon attaches it via `discord.File`. The mention prompt documents this block.
+4. If file is **>24 MB** (Discord's server-side limit), DON'T fall back to "open from path" — go to the Drive-overflow path below.
+
+## Drive-overflow protocol (files >24 MB)
+
+When a file exceeds Discord's 24 MB upload cap, the routine is:
+
+1. Confirm the file's live location in Drive (don't move it from its canonical folder).
+2. If sharing permissions are already "anyone with link can view," grab the share URL.
+3. If not, set them to `anyone-with-link, view-only` (NOT edit) for the duration of the share. Drive MCP tools handle this.
+4. Post the share link inline in your Discord reply. Be explicit:
+   > _File is 47 MB, over Discord's 24 MB upload cap. Drive link (view-only):_ `https://drive.google.com/...`
+5. Do NOT copy the file into `My Drive / Neural Bridge / Auto-shared/` unless the source folder doesn't allow sharing for some reason. Copying creates duplicate state the librarian then has to reconcile.
+
+**The `Auto-shared/` folder** at `My Drive / Neural Bridge / Auto-shared/` is the overflow scratch space for files that don't have a canonical home but you needed to share. Convention: one subfolder per session id (`Auto-shared / <session-id> / <filename>`), view-only link share, librarian sweeps anything >30 days old that isn't tagged `keep`.
+
+**Never** post Drive links to anything outside `My Drive / Neural Bridge /` without explicitly checking with Andy. His Drive has work content, personal stuff, family stuff. Personal-AI-substrate work is the safe perimeter.
+
 ## Vault-content discipline
 
 - **Read for context, don't dump it back.** Pulling a fact from the vault to ground your reply is correct. Pasting raw vault content into Discord is not. Summarize, refer, hand off.
