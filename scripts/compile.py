@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""compile.py — V1 filing gate (issue #9 Phase A, compile component).
+"""compile.py — daily-log → concept article promotion (issue #9).
 
 Reads daily-logs/<agent>/*.md, extracts proposed_concepts from each
-session block, and runs the heavy filing gate (PROMOTE / QUARANTINE /
-REJECT) per the memory-poisoning paper. PROMOTE writes to
-knowledge/concepts/; QUARANTINE writes to knowledge/quarantine/ with
-reason; REJECT logs to the run log only.
+session block, runs the heavy filing gate (PROMOTE / QUARANTINE /
+REJECT) per the memory-poisoning paper, and — for PROMOTE verdicts —
+writes a real concept article via a separate `claude -p` call.
 
-Phase B (later PR) adds: two-pass per-agent then cross-agent compile,
-rich concept article writer, cross-link writer, never-overwrite history,
-log.md / index.md refresh.
+Phase A (shipped): filing gate, dry-run default, provenance frontmatter,
+quarantine path, run-log to docs/compile/.
+
+Phase B core (this file): rich concept article writer (separate claude
+call), never-overwrite history (existing concepts move to
+concepts/.history/<slug>/<timestamp>.md), knowledge/log.md and
+knowledge/index.md refresh after each live run.
+
+Phase B expansion (next PR): two-pass per-agent then cross-agent compile,
+cross-link writer for connections/, --flush flag.
 
 Usage:
   python3 scripts/compile.py                     # dry-run by default
   python3 scripts/compile.py --no-dry-run        # actually write to concepts/
   python3 scripts/compile.py --since 2026-05-08  # only logs modified after
+  python3 scripts/compile.py --no-rich-body      # skip concept writer (cheap)
   python3 scripts/compile.py --verbose
 
-Cron-ready. Runs serial (one filing-gate call at a time) per the build
-plan to avoid concurrent SDK pressure.
+Cron-ready. Runs serial (one filing-gate call at a time, one writer call
+per PROMOTE) to avoid concurrent SDK pressure.
 """
 
 from __future__ import annotations
@@ -38,18 +45,23 @@ HOOKS_DIR = REPO_ROOT / "hooks"
 DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
 KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
+HISTORY_DIR = CONCEPTS_DIR / ".history"
 QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
+WIKI_INDEX = KNOWLEDGE_DIR / "index.md"
+WIKI_LOG = KNOWLEDGE_DIR / "log.md"
 DRY_RUN_DIR = REPO_ROOT / "docs" / "compile"
 COMPILE_STATE_FILE = SCRIPTS_DIR / ".compile_state.json"
 FILING_GATE_PROMPT = SCRIPTS_DIR / "prompts" / "filing_gate_v1.md"
+CONCEPT_WRITER_PROMPT = SCRIPTS_DIR / "prompts" / "concept_writer_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-COMPILER_VERSION = "1.0"
+COMPILER_VERSION = "1.1"  # bumped: Phase B core
 DEFAULT_TIMEOUT = 120
+WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
 
 PROMOTE = "PROMOTE"
 QUARANTINE = "QUARANTINE"
@@ -369,15 +381,16 @@ def _frontmatter(
     )
 
 
-def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> Path:
-    """Write a PROMOTE'd concept. In dry-run, write to docs/compile/<date>.md instead."""
-    body = (
-        f"# {candidate.slug}\n\n"
-        f"{candidate.summary}\n\n"
-        f"_Promoted on {utc_iso()} by `compile.py` v{COMPILER_VERSION}._\n"
-    )
-    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"])
-    text = fm + "\n" + body
+def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool,
+                  rendered_text: str | None = None) -> Path:
+    """Write a PROMOTE'd concept. In dry-run, write to docs/compile/<date>.md instead.
+
+    If `rendered_text` is provided, use it verbatim (Phase B path: rich article
+    body produced by the concept writer). Otherwise fall back to the Phase A
+    stub (slug + summary + footer).
+    """
+    if rendered_text is None:
+        rendered_text = stub_concept_article(candidate, gate)
 
     if dry_run:
         DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -385,7 +398,7 @@ def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> Pat
     else:
         CONCEPTS_DIR.mkdir(parents=True, exist_ok=True)
         target = CONCEPTS_DIR / f"{candidate.slug}.md"
-    target.write_text(text, encoding="utf-8")
+    target.write_text(rendered_text, encoding="utf-8")
     return target
 
 
@@ -411,6 +424,155 @@ def write_quarantine(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> 
         target = QUARANTINE_DIR / f"{candidate.slug}.md"
     target.write_text(text, encoding="utf-8")
     return target
+
+
+# ---------- concept article writer (Phase B core) ----------
+
+def build_concept_writer_prompt(template: str, slug: str, summary: str, agent: str, excerpt: str) -> str:
+    return (
+        template.replace("{slug}", slug)
+        .replace("{summary}", summary)
+        .replace("{agent}", agent)
+        .replace("{session_excerpt}", excerpt)
+    )
+
+
+def call_concept_writer(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
+    """Invoke `claude -p` with the concept writer prompt. Return (ok, body, error).
+
+    Body is the article markdown with no frontmatter and no H1 (per the prompt's
+    output rules). Caller wraps it with frontmatter + title.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "", "timeout"
+    except FileNotFoundError:
+        return False, "", "claude_cli_not_found"
+    if result.returncode != 0:
+        snippet = (result.stderr or "")[:200].replace("\n", " ")
+        return False, "", f"exit_{result.returncode}:{snippet}"
+
+    body = strip_code_fences(result.stdout)
+    # Defensive: strip a leading H1 if the model emitted one despite the rule.
+    if body.startswith("# "):
+        body = body.split("\n", 1)[1].lstrip("\n") if "\n" in body else ""
+    if not body.strip():
+        return False, "", "empty_body"
+    return True, body.rstrip() + "\n", ""
+
+
+def render_concept_article(candidate: ConceptCandidate, gate: dict, body: str) -> str:
+    """Compose frontmatter + H1 + body. Body is already stripped of leading H1."""
+    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"])
+    return f"{fm}\n# {candidate.slug}\n\n{body}"
+
+
+def stub_concept_article(candidate: ConceptCandidate, gate: dict) -> str:
+    """Phase A stub. Used when --no-rich-body is set or the writer call fails."""
+    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"])
+    body = (
+        f"# {candidate.slug}\n\n"
+        f"{candidate.summary}\n\n"
+        f"_Promoted on {utc_iso()} by `compile.py` v{COMPILER_VERSION}._\n"
+    )
+    return fm + "\n" + body
+
+
+# ---------- never-overwrite history (Phase B core) ----------
+
+def archive_existing_concept(slug: str, dry_run: bool) -> Path | None:
+    """If concepts/<slug>.md exists, move it to concepts/.history/<slug>/<timestamp>.md.
+
+    Returns the archived path, or None if there was nothing to archive.
+    In dry-run mode, returns None without touching the filesystem.
+    """
+    if dry_run:
+        return None
+    src = CONCEPTS_DIR / f"{slug}.md"
+    if not src.exists():
+        return None
+    dest_dir = HISTORY_DIR / slug
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    dest = dest_dir / f"{timestamp}.md"
+    src.rename(dest)
+    return dest
+
+
+# ---------- index.md / log.md refresh (Phase B core) ----------
+
+LOG_DATE_HEADING_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+INDEX_CONCEPTS_HEADING_RE = re.compile(r"^## Concepts\s*$", re.MULTILINE)
+
+
+def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> None:
+    """Append a dated section to knowledge/log.md.
+
+    If today's date already has a section, append bullets under it.
+    Otherwise add a new `## YYYY-MM-DD` block at the bottom.
+    Skipped entirely in dry-run.
+    """
+    if dry_run:
+        return
+    if not WIKI_LOG.exists():
+        return  # log.md is hand-curated; respect its absence
+    today = utc_today()
+    text = WIKI_LOG.read_text(encoding="utf-8")
+
+    new_bullets = ["- " + run_summary] + [f"  {line}" for line in action_lines]
+
+    headings = list(LOG_DATE_HEADING_RE.finditer(text))
+    if headings and headings[-1].group(1) == today:
+        # Append under existing today section.
+        body = text.rstrip() + "\n" + "\n".join(new_bullets) + "\n"
+    else:
+        # New dated block.
+        body = text.rstrip() + f"\n\n## {today}\n\n" + "\n".join(new_bullets) + "\n"
+    WIKI_LOG.write_text(body, encoding="utf-8")
+
+
+def refresh_index(promoted_slugs: list[str], dry_run: bool) -> None:
+    """Add new promoted slugs to the `## Concepts` section of knowledge/index.md.
+
+    Idempotent: existing entries are not duplicated. The placeholder
+    `_None yet..._` line is replaced on first promotion. Skipped in dry-run.
+    """
+    if dry_run or not promoted_slugs:
+        return
+    if not WIKI_INDEX.exists():
+        return
+    text = WIKI_INDEX.read_text(encoding="utf-8")
+
+    m = INDEX_CONCEPTS_HEADING_RE.search(text)
+    if not m:
+        return  # Index doesn't have a Concepts section; respect that
+
+    # Find the bounds of the Concepts section: from after the heading to the
+    # next `^## ` heading (or EOF).
+    section_start = m.end()
+    next_heading = re.search(r"^## ", text[section_start:], re.MULTILINE)
+    section_end = section_start + next_heading.start() if next_heading else len(text)
+    section_body = text[section_start:section_end]
+
+    # Existing concept slugs in the section (from `- [[slug]]` lines).
+    existing = set(re.findall(r"^- \[\[([^\]]+)\]\]", section_body, re.MULTILINE))
+
+    new_slugs = [s for s in promoted_slugs if s not in existing]
+    if not new_slugs:
+        return
+
+    new_lines = [f"- [[{s}]]" for s in sorted(set(existing) | set(new_slugs))]
+    rebuilt_section = "\n\n" + "\n".join(new_lines) + "\n\n"
+
+    new_text = text[:section_start] + rebuilt_section + text[section_end:]
+    WIKI_INDEX.write_text(new_text, encoding="utf-8")
 
 
 # ---------- state ----------
@@ -448,10 +610,19 @@ def main() -> int:
         action="store_true",
         help="Skip the Discord outbound push of the run summary.",
     )
+    parser.add_argument(
+        "--no-rich-body",
+        action="store_true",
+        help="Skip the concept-writer claude call; PROMOTE'd concepts get the Phase A stub.",
+    )
     args = parser.parse_args()
 
     if not FILING_GATE_PROMPT.exists():
         print(f"error: filing gate prompt missing at {FILING_GATE_PROMPT}", file=sys.stderr)
+        return 1
+    if not args.no_rich_body and not CONCEPT_WRITER_PROMPT.exists():
+        print(f"error: concept writer prompt missing at {CONCEPT_WRITER_PROMPT} "
+              f"(use --no-rich-body to fall back to Phase A stub)", file=sys.stderr)
         return 1
 
     state = read_compile_state()
@@ -474,8 +645,14 @@ def main() -> int:
         return 0
 
     template = FILING_GATE_PROMPT.read_text(encoding="utf-8")
+    writer_template = (
+        CONCEPT_WRITER_PROMPT.read_text(encoding="utf-8")
+        if not args.no_rich_body else None
+    )
 
-    counts = {PROMOTE: 0, QUARANTINE: 0, REJECT: 0, "errors": 0, "skipped_already_compiled": 0}
+    counts = {PROMOTE: 0, QUARANTINE: 0, REJECT: 0, "errors": 0,
+              "skipped_already_compiled": 0, "writer_failures": 0, "archived": 0}
+    promoted_slugs: list[str] = []
     run_log_lines: list[str] = [f"# Compile run — {utc_iso()}", "", f"Dry run: {args.dry_run}", ""]
 
     for cand in candidates:
@@ -497,9 +674,34 @@ def main() -> int:
         log_line(args.verbose, f"{verdict} {cand.slug}: {gate['reason']}")
 
         if verdict == PROMOTE:
-            target = write_concept(cand, gate, dry_run=args.dry_run)
+            # Phase B: call the concept writer for a real article body. Falls
+            # back to the Phase A stub if --no-rich-body is set or the writer
+            # call fails for any reason.
+            rendered: str | None = None
+            if writer_template is not None:
+                writer_prompt = build_concept_writer_prompt(
+                    writer_template, cand.slug, cand.summary,
+                    cand.sources[0]["agent"], cand.excerpt,
+                )
+                wok, body, werr = call_concept_writer(writer_prompt, args.model, WRITER_TIMEOUT)
+                if wok:
+                    rendered = render_concept_article(cand, gate, body)
+                else:
+                    log_line(args.verbose, f"writer ERROR for {cand.slug}: {werr} (falling back to stub)")
+                    counts["writer_failures"] += 1
+
+            # Phase B: never-overwrite. If a concept already exists, archive
+            # its current version to .history before writing the new one.
+            archived = archive_existing_concept(cand.slug, dry_run=args.dry_run)
+            if archived is not None:
+                counts["archived"] += 1
+                run_log_lines.append(f"- ARCHIVE {cand.slug} -> {archived.relative_to(REPO_ROOT)}")
+
+            target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=rendered)
             counts[PROMOTE] += 1
-            run_log_lines.append(f"- PROMOTE {cand.slug} -> {target.relative_to(REPO_ROOT)}")
+            promoted_slugs.append(cand.slug)
+            tag = "PROMOTE-rich" if rendered else "PROMOTE-stub"
+            run_log_lines.append(f"- {tag} {cand.slug} -> {target.relative_to(REPO_ROOT)}")
             if not args.dry_run:
                 state["compiled_concepts"][cand.slug] = {
                     "compiled_at": utc_iso(),
@@ -525,10 +727,18 @@ def main() -> int:
     if not args.dry_run:
         write_compile_state(state)
 
+    # Phase B: refresh log.md and index.md (live mode only).
     summary = (
         f"compile complete: PROMOTE={counts[PROMOTE]} QUARANTINE={counts[QUARANTINE]} "
         f"REJECT={counts[REJECT]} errors={counts['errors']} skipped={counts['skipped_already_compiled']}"
     )
+    if counts["archived"] or counts["writer_failures"]:
+        summary += f" archived={counts['archived']} writer_failures={counts['writer_failures']}"
+
+    log_action_lines = [line for line in run_log_lines if line.startswith("- ")]
+    append_to_log(summary, log_action_lines, dry_run=args.dry_run)
+    refresh_index(promoted_slugs, dry_run=args.dry_run)
+
     print(summary)
 
     if not args.no_discord:

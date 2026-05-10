@@ -381,5 +381,343 @@ class TestMainWithMockedGate(unittest.TestCase):
         self.assertFalse(cmp.COMPILE_STATE_FILE.exists())
 
 
+# ============================================================================
+# Phase B core: concept writer, archive history, log/index refresh
+# ============================================================================
+
+
+def _writer_response(body: str):
+    class _R:
+        stdout = body
+        stderr = ""
+        returncode = 0
+    return _R()
+
+
+class TestConceptWriter(unittest.TestCase):
+    def test_call_returns_body_and_strips_trailing_whitespace(self):
+        with patch("compile.subprocess.run",
+                   side_effect=lambda *a, **k: _writer_response("Some body text\n\n")):
+            ok, body, err = cmp.call_concept_writer("prompt", "model", 60)
+        self.assertTrue(ok, err)
+        self.assertEqual(body, "Some body text\n")
+
+    def test_strips_fences(self):
+        with patch("compile.subprocess.run",
+                   side_effect=lambda *a, **k: _writer_response("```\nbody\n```")):
+            ok, body, err = cmp.call_concept_writer("prompt", "model", 60)
+        self.assertTrue(ok, err)
+        self.assertEqual(body, "body\n")
+
+    def test_strips_leading_h1(self):
+        with patch("compile.subprocess.run",
+                   side_effect=lambda *a, **k: _writer_response("# title-it-shouldnt-have-emitted\n\nReal body\n")):
+            ok, body, err = cmp.call_concept_writer("prompt", "model", 60)
+        self.assertTrue(ok, err)
+        self.assertEqual(body, "Real body\n")
+
+    def test_empty_body_fails(self):
+        with patch("compile.subprocess.run",
+                   side_effect=lambda *a, **k: _writer_response("   \n")):
+            ok, body, err = cmp.call_concept_writer("prompt", "model", 60)
+        self.assertFalse(ok)
+        self.assertEqual(err, "empty_body")
+
+    def test_subprocess_nonzero_exit_fails(self):
+        class _R:
+            stdout = ""
+            stderr = "boom"
+            returncode = 1
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: _R()):
+            ok, body, err = cmp.call_concept_writer("prompt", "model", 60)
+        self.assertFalse(ok)
+        self.assertTrue(err.startswith("exit_1"))
+
+    def test_render_combines_frontmatter_and_body(self):
+        cand = cmp.ConceptCandidate(
+            slug="my-slug",
+            summary="One-liner summary",
+            sources=[{"agent": "research", "session_id": "s1",
+                      "transcript_sha256": "abc",
+                      "source_log": "daily-logs/research/2026-05-09.md", "session_n": 1}],
+            excerpt="...",
+        )
+        gate = {"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []}
+        rendered = cmp.render_concept_article(cand, gate, "Body paragraph.\n")
+        self.assertTrue(rendered.startswith("---\n"))
+        self.assertIn("slug: my-slug", rendered)
+        self.assertIn("\n# my-slug\n\n", rendered)
+        self.assertIn("Body paragraph.", rendered)
+
+
+class TestArchiveExistingConcept(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = (cmp.CONCEPTS_DIR, cmp.HISTORY_DIR)
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+
+    def tearDown(self):
+        cmp.CONCEPTS_DIR, cmp.HISTORY_DIR = self._saved
+        self.tmp.cleanup()
+
+    def test_archive_moves_existing_to_history(self):
+        existing = cmp.CONCEPTS_DIR / "foo.md"
+        existing.write_text("old version\n", encoding="utf-8")
+        archived = cmp.archive_existing_concept("foo", dry_run=False)
+        self.assertIsNotNone(archived)
+        self.assertFalse(existing.exists())
+        self.assertTrue(archived.exists())
+        self.assertIn(".history/foo/", str(archived))
+        self.assertEqual(archived.read_text(encoding="utf-8"), "old version\n")
+
+    def test_archive_when_no_existing_returns_none(self):
+        archived = cmp.archive_existing_concept("nonexistent", dry_run=False)
+        self.assertIsNone(archived)
+
+    def test_archive_dry_run_does_nothing(self):
+        existing = cmp.CONCEPTS_DIR / "foo.md"
+        existing.write_text("old version\n", encoding="utf-8")
+        archived = cmp.archive_existing_concept("foo", dry_run=True)
+        self.assertIsNone(archived)
+        self.assertTrue(existing.exists())  # untouched
+
+
+class TestAppendToLog(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = cmp.WIKI_LOG
+        cmp.WIKI_LOG = self.tmp_path / "log.md"
+        cmp.WIKI_LOG.write_text(
+            "---\ntype: log\n---\n\n# Log\n\n## 2026-05-08\n\n- old entry\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        cmp.WIKI_LOG = self._saved
+        self.tmp.cleanup()
+
+    def test_creates_new_dated_section(self):
+        # cmp.utc_today() returns today's UTC date; that date is not in setUp's log
+        cmp.append_to_log("ran a thing", ["- detail"], dry_run=False)
+        text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        # Check that a new ## YYYY-MM-DD section was added (not the 2026-05-08 one)
+        date_headings = cmp.LOG_DATE_HEADING_RE.findall(text)
+        self.assertEqual(len(date_headings), 2)  # old + new
+
+    def test_dry_run_does_nothing(self):
+        original = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        cmp.append_to_log("ran a thing", [], dry_run=True)
+        self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original)
+
+    def test_when_log_missing_does_nothing(self):
+        cmp.WIKI_LOG.unlink()
+        # Should not raise
+        cmp.append_to_log("ran", [], dry_run=False)
+        self.assertFalse(cmp.WIKI_LOG.exists())
+
+
+class TestRefreshIndex(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = cmp.WIKI_INDEX
+        cmp.WIKI_INDEX = self.tmp_path / "index.md"
+        cmp.WIKI_INDEX.write_text(
+            "---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n\n"
+            "## Per-agent memory\n\n- something\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        cmp.WIKI_INDEX = self._saved
+        self.tmp.cleanup()
+
+    def test_adds_new_slugs(self):
+        cmp.refresh_index(["filing-gate-quarantine-vs-reject", "memory-poisoning-defense"], dry_run=False)
+        text = cmp.WIKI_INDEX.read_text(encoding="utf-8")
+        self.assertIn("- [[filing-gate-quarantine-vs-reject]]", text)
+        self.assertIn("- [[memory-poisoning-defense]]", text)
+        self.assertIn("## Per-agent memory", text)  # other sections preserved
+
+    def test_idempotent_for_existing(self):
+        cmp.refresh_index(["foo"], dry_run=False)
+        cmp.refresh_index(["foo"], dry_run=False)
+        text = cmp.WIKI_INDEX.read_text(encoding="utf-8")
+        self.assertEqual(text.count("[[foo]]"), 1)
+
+    def test_dry_run_does_nothing(self):
+        original = cmp.WIKI_INDEX.read_text(encoding="utf-8")
+        cmp.refresh_index(["foo"], dry_run=True)
+        self.assertEqual(cmp.WIKI_INDEX.read_text(encoding="utf-8"), original)
+
+    def test_when_index_missing_does_nothing(self):
+        cmp.WIKI_INDEX.unlink()
+        cmp.refresh_index(["foo"], dry_run=False)
+        self.assertFalse(cmp.WIKI_INDEX.exists())
+
+
+class TestMainPhaseB(unittest.TestCase):
+    """Integration tests: writer + archive + log/index refresh wired through main()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = (
+            cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+            cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+            cmp.WIKI_LOG, cmp.WIKI_INDEX,
+        )
+        cmp.REPO_ROOT = self.tmp_path
+        cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
+        cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
+        cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        # Daily log
+        agent_dir = cmp.DAILY_LOGS_DIR / "research"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "2026-05-09.md").write_text(SAMPLE_DAILY_LOG, encoding="utf-8")
+        # Wiki seed
+        cmp.WIKI_LOG.parent.mkdir(parents=True, exist_ok=True)
+        cmp.WIKI_LOG.write_text("---\ntype: log\n---\n\n# Log\n", encoding="utf-8")
+        cmp.WIKI_INDEX.write_text(
+            "---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+         cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+         cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+        self.tmp.cleanup()
+
+    def _run_main(self, argv: list[str]) -> int:
+        with patch.object(sys, "argv", ["compile.py", *argv]):
+            return cmp.main()
+
+    def test_no_rich_body_uses_stub_and_skips_writer(self):
+        """With --no-rich-body, only the filing gate is called, not the writer."""
+        call_count = {"n": 0}
+
+        def gate_only(*args, **kwargs):
+            call_count["n"] += 1
+
+            class _R:
+                stdout = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            rc = self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+        self.assertEqual(rc, 0)
+        # 2 candidates, only filing-gate calls (no writer)
+        self.assertEqual(call_count["n"], 2)
+        # Concepts written with stub format
+        for path in cmp.CONCEPTS_DIR.glob("*.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("_Promoted on", text)  # stub footer signature
+
+    def test_rich_body_calls_writer_per_promote(self):
+        """Default behavior: 1 filing-gate call + 1 writer call per candidate."""
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+        responses = [gate_response, "Rich article body about the concept.\n",
+                     gate_response, "Another rich article body.\n"]
+
+        def alternating(*args, **kwargs):
+            class _R:
+                stdout = responses.pop(0)
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=alternating):
+            rc = self._run_main(["--no-dry-run", "--no-discord"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(responses), 0)  # all consumed
+        # Concepts have rich bodies, no stub footer
+        promoted = list(cmp.CONCEPTS_DIR.glob("*.md"))
+        self.assertEqual(len(promoted), 2)
+        for path in promoted:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("Rich article body", text) if "Rich" in path.read_text() else self.assertIn("Another rich", text)
+            self.assertNotIn("_Promoted on", text)  # no stub footer
+
+    def test_archive_runs_on_re_promote(self):
+        """Re-promoting a concept moves the existing version to .history."""
+        # Pre-seed an existing concept
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+        existing = cmp.CONCEPTS_DIR / "filing-gate-quarantine-vs-reject.md"
+        existing.write_text("OLD VERSION\n", encoding="utf-8")
+
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+
+        # Archived copy exists in .history
+        history_files = list((cmp.HISTORY_DIR / "filing-gate-quarantine-vs-reject").glob("*.md"))
+        self.assertEqual(len(history_files), 1)
+        self.assertEqual(history_files[0].read_text(encoding="utf-8"), "OLD VERSION\n")
+        # Live file replaced with new version (stub format)
+        self.assertNotEqual(existing.read_text(encoding="utf-8"), "OLD VERSION\n")
+        self.assertIn("filing-gate-quarantine-vs-reject", existing.read_text(encoding="utf-8"))
+
+    def test_index_and_log_refreshed_on_live_run(self):
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+
+        index_text = cmp.WIKI_INDEX.read_text(encoding="utf-8")
+        self.assertIn("[[filing-gate-quarantine-vs-reject]]", index_text)
+        self.assertIn("[[dry-run-output-format]]", index_text)
+        self.assertNotIn("_None yet._", index_text)  # placeholder replaced
+
+        log_text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        self.assertIn("PROMOTE=2", log_text)
+        # New dated section was appended
+        self.assertTrue(cmp.LOG_DATE_HEADING_RE.search(log_text) is not None)
+
+    def test_index_and_log_NOT_touched_on_dry_run(self):
+        gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+        original_index = cmp.WIKI_INDEX.read_text(encoding="utf-8")
+        original_log = cmp.WIKI_LOG.read_text(encoding="utf-8")
+
+        def gate_only(*args, **kwargs):
+            class _R:
+                stdout = gate_response
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_only):
+            self._run_main(["--dry-run", "--no-rich-body", "--no-discord"])
+
+        self.assertEqual(cmp.WIKI_INDEX.read_text(encoding="utf-8"), original_index)
+        self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original_log)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
