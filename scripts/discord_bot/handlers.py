@@ -271,10 +271,10 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         # Chunk into multiple messages if the response exceeds Discord's per-message limit.
         chunks = chunk_for_discord(response)
         for i, chunk in enumerate(chunks):
-            # Tag continuation messages so the user knows the response is being split,
-            # except when there's only one chunk.
+            # Tag EVERY chunk when there's a continuation, including part 1 — otherwise users
+            # don't know more is coming and stop reading at the end of the first message.
             if len(chunks) > 1:
-                chunk = f"_(part {i + 1}/{len(chunks)})_\n{chunk}" if i > 0 else chunk
+                chunk = f"_(part {i + 1}/{len(chunks)})_\n{chunk}"
             await message.channel.send(chunk)
 
     # Action block handling.

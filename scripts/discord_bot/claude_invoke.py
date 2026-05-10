@@ -18,7 +18,7 @@ import re
 import subprocess
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
 
 
 def _subprocess_env() -> dict[str, str]:

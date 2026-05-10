@@ -17,7 +17,7 @@ MENTION_PROMPT_PATH = PROMPTS_DIR / "mention_v1.md"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
 
-MAX_RESPONSE_CHARS = 1500
+MAX_RESPONSE_CHARS = 2500
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARS_PER_MESSAGE = 500
 
@@ -27,10 +27,16 @@ DISCORD_CHUNK_BUDGET = 1900
 
 # Per-agent response cap override. Agents not listed fall back to MAX_RESPONSE_CHARS.
 # Long values trigger chunking across multiple Discord messages (DISCORD_CHUNK_BUDGET each).
-# Use sparingly: longer responses cost more tokens and clutter the channel. The professor
-# (teaching-prep) gets 6000 because deep research synthesis genuinely needs the headroom.
+# Agents are still told (via the mention prompt) to target ~1500 chars; these caps are the
+# truncation safety valve when an agent legitimately has more to say. Discord chunker handles
+# the multi-message split. Cap > DISCORD_CHUNK_BUDGET means the response WILL be chunked.
+#
+# - teaching-prep: deep research synthesis genuinely needs 6000.
+# - content / social: produce summaries-of-drafts that routinely run past 2500.
 MAX_RESPONSE_CHARS_PER_AGENT: dict[str, int] = {
     "teaching-prep": 6000,
+    "content": 3500,
+    "social": 3000,
 }
 
 
@@ -44,6 +50,8 @@ def max_response_chars_for(agent_id: str) -> int:
 TIMEOUT_PER_AGENT: dict[str, int] = {
     "teaching-prep": 600,
     "recruiter": 480,  # charter write + create_agent action can exceed 300s default
+    "content": 600,    # long-form drafts + multi-section summaries push past 300s
+    "social": 480,     # voice-matching + multi-platform variants
 }
 
 
