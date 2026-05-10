@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.auto-reload</string>
+
+    <!-- Polls origin/main every 2 minutes. If anything daemon-relevant
+         changed (scripts/discord_bot/, hooks/, plugins/neural-bridge-core/agents/,
+         scripts/launchd/), pulls and re-runs install.sh to reload the daemon.
+         Otherwise quietly exits. See scripts/auto_reload.sh for the logic. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/auto_reload.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- Every 120 seconds. Latency between merge and live = 0–2 minutes. -->
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <!-- Run once at load so the system pulls + reloads at boot. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- This plist is a one-shot poller, NOT a long-running daemon.
+         Don't keep alive — the script does its work and exits. launchd
+         re-runs it every StartInterval. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Append-only log. Logic-level lines go through scripts/auto_reload.sh's
+         own log at ~/Library/Logs/neural-bridge/auto-reload.log. These two paths
+         are for any output from install.sh / git that the script doesn't
+         redirect itself. -->
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/auto-reload.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/auto-reload.stderr.log</string>
+
+    <!-- USER and HOME for git/security to find ssh keys, keychain, etc.
+         PATH includes Homebrew so gh / claude resolve if install.sh ever
+         shells out to them. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Background priority — this poller runs every 2 min and shouldn't
+         compete with the discord-bot daemon for CPU. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
