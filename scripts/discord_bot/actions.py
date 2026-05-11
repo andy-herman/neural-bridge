@@ -28,6 +28,7 @@ ALLOWED_ACTIONS = {
     "create_issue", "comment", "add_label", "remove_label", "close_issue",
     "create_agent",
     "open_pr_with_changes",  # staged action — requires Andy's chat approval before execution
+    "search_conversation_memory",  # semantic search across the agent's own + shared archive
 }
 MAX_ACTIONS_PER_MENTION = 5
 MAX_BODY_CHARS = 8000  # generous; gh accepts large bodies but stay sane
@@ -166,6 +167,23 @@ def validate_action(action: Any) -> ValidationResult:
         if not isinstance(action["files"], list) or not action["files"]:
             return ValidationResult(
                 ok=False, error="open_pr_with_changes: files must be non-empty list",
+                action_type=action_type,
+            )
+        return ValidationResult(ok=True, action_type=action_type)
+
+    if action_type == "search_conversation_memory":
+        # Semantic search across the agent's archive via Ollama embeddings.
+        # Validation is shape-only here; handlers.py runs the query with
+        # agent_id in scope.
+        if not isinstance(action.get("query"), str) or not action["query"].strip():
+            return ValidationResult(
+                ok=False, error="search_conversation_memory: query must be non-empty string",
+                action_type=action_type,
+            )
+        top_n = action.get("top_n", 5)
+        if not isinstance(top_n, int) or top_n < 1 or top_n > 20:
+            return ValidationResult(
+                ok=False, error="search_conversation_memory: top_n must be int in [1, 20]",
                 action_type=action_type,
             )
         return ValidationResult(ok=True, action_type=action_type)

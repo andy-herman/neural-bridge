@@ -219,7 +219,9 @@ def append_turn(agent_id: str, message, author: str, content: str,
             "conv_log per-agent append failed (non-fatal): agent=%s author=%s err=%s: %s",
             agent_id, author, type(exc).__name__, exc,
         )
-        # Don't return — the shared write is independent and should still run.
+        per_agent_path = None
+        # Don't return — the shared write + index calls are independent
+        # and should still run regardless of the per-agent write outcome.
 
     # Shared fan-out for guild channels only. DMs return None from the path
     # helper, which short-circuits this branch.
@@ -242,5 +244,37 @@ def append_turn(agent_id: str, message, author: str, content: str,
                 "conv_log shared append failed (non-fatal): author=%s err=%s: %s",
                 author, type(exc).__name__, exc,
             )
+            shared_path = None  # mark unsuccessful so we don't index it below
+
+    # Best-effort: also embed + index this turn so semantic search picks it
+    # up next query. Index to BOTH the per-agent table AND (if applicable)
+    # the `_shared` pseudo-agent table so agents can semantic-search across
+    # the cross-agent archive for guild-channel threads. Failures (Ollama
+    # down, sqlite-vec missing, etc.) log a warning and don't affect the
+    # writes we just did. Import inline to avoid circular import and to
+    # keep a sqlite_vec import error from killing conversation_log load.
+    try:
+        from .semantic_search import index_turn_from_append
+        if per_agent_path is not None:
+            index_turn_from_append(
+                agent_id=agent_id,
+                file_path=per_agent_path,
+                author=author,
+                content=content,
+                timestamp=timestamp,
+            )
+        if shared_path is not None:
+            index_turn_from_append(
+                agent_id="_shared",
+                file_path=shared_path,
+                author=author,
+                content=content,
+                timestamp=timestamp,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "conv_log index_turn skipped (non-fatal): %s: %s",
+            type(exc).__name__, exc,
+        )
 
     return per_agent_path

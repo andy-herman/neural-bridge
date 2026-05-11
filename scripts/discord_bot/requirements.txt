@@ -1,1 +1,2 @@
 discord.py>=2.3.0,<3.0
+sqlite-vec>=0.1.9
