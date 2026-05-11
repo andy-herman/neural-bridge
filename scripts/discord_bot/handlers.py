@@ -37,6 +37,7 @@ from .pr_proposals import (
     validate_open_pr_action,
 )
 from .session_store import STORE as SESSION_STORE
+from .conversation_log import append_turn as append_conversation_turn, conversation_log_path
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -312,6 +313,10 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         agent_definition = load_agent_definition(agent_id)
         channel_kind = "thread" if isinstance(message.channel, discord.Thread) else "channel"
 
+        # Resolve this turn's conversation-log file so the agent knows where
+        # to look for context older than the recent-history window.
+        conv_log_path = str(conversation_log_path(agent_id, message))
+
         prompt = build_mention_prompt(
             template,
             agent_id=agent_id,
@@ -319,6 +324,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             channel_kind=channel_kind,
             history=history,
             message_content=message.content,
+            conversation_log_path=conv_log_path,
         )
         # Prepend the ingest block so Echo sees the dropped-files section before
         # the standard mention scaffold. Same composition pattern as the Echo
@@ -467,6 +473,19 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             for preview in pr_previews:
                 await message.channel.send(preview[:1900])
             log(f"MENTION actions executed: agent={agent_id} count={len(valid)}")
+
+    # Archive both turns to the per-agent conversation log in the vault.
+    # Best-effort: never raises, never blocks. The archive lets agents (and
+    # Andy) search past conversations long after the claude session TTL
+    # expires. See conversation_log.py for the file layout.
+    try:
+        author_label = getattr(message.author, "display_name", None) or getattr(message.author, "name", "Andy")
+        agent_label = getattr(client.agent, "display_name", None) or agent_id
+        append_conversation_turn(agent_id, message, author_label, message.content)
+        if response:
+            append_conversation_turn(agent_id, message, agent_label, response)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        log(f"conv_log archive error (non-fatal): {type(exc).__name__}: {exc}")
 
     log(f"MENTION done: agent={agent_id} chars={len(response)} actions={len(parsed.actions or [])}")
 

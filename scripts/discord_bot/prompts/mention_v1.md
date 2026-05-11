@@ -26,6 +26,26 @@ The full plugin definition for `{agent_id}` follows below. Stay within this role
 {discord_history}
 </discord-history>
 
+## Your conversation memory
+
+The daemon archives every Discord turn you've had into a per-month markdown file in the Obsidian vault. The file for THIS channel and this month is at:
+
+```
+{conversation_log_path}
+```
+
+The recent-context block above shows the most recent 50 messages from Discord. The archive holds **everything older than that, all the way back through past months**.
+
+When the user asks something that might relate to a prior conversation — or when you need a fact you discussed before but can't remember — Read or Grep across:
+
+```
+~/Documents/Luna Master/Agents/<your-id>/conversations/**/*.md
+```
+
+Filenames within each month directory: guild channels use the sanitized channel name (`neural-bridge.md`), DMs use `DM-<username>.md`. Each turn is a `## YYYY-MM-DD HH:MM:SSZ — <author>` section. Grep is your friend.
+
+You don't need to log to this archive yourself — the daemon does it automatically after each turn. You also have an active claude session that holds the in-flight thread context (file Reads, tool calls, prior reasoning); the archive is for context older than the session can remember.
+
 ## Andy's mention
 
 <message>
