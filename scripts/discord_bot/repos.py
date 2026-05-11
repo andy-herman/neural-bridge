@@ -55,10 +55,12 @@ REPOS: dict[str, Repo] = {
 # this allowlist is the OUTER gate — even with Andy's chat approval an
 # agent that isn't in the allowlist can't ship.
 AGENT_PUSH_REPOS: dict[str, set[str]] = {
-    "luna":         {"neural-bridge-blog"},  # asset/copy fixes, about-page edits
-    "content":      {"neural-bridge-blog"},  # blog posts, frontmatter fixes
-    "ux-designer":  {"neural-bridge-blog"},  # design / template changes
-    "recruiter":    {"neural-bridge"},       # plugin updates (existing flow uses agent_builder, this is parallel)
+    "luna":                {"neural-bridge-blog", "neural-bridge"},  # blog edits + daemon-side fixes Andy asks her to ship
+    "content":             {"neural-bridge-blog"},                   # blog posts, frontmatter fixes
+    "ux-designer":         {"neural-bridge-blog"},                   # design / template changes
+    "recruiter":           {"neural-bridge"},                        # plugin updates (existing flow uses agent_builder, this is parallel)
+    "automation-engineer": {"neural-bridge"},                        # daemon / infra / hook fixes; the natural specialist
+    "senior-pm":           {"neural-bridge"},                        # so PM-shaped infra triage can ship its own fix without bouncing
     # All other agents: no push rights. They surface to Andy or hand off.
 }
 

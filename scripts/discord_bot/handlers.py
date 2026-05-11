@@ -297,7 +297,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         # Fetch recent context. discord.py: history(limit=N).
         history: list[dict] = []
         try:
-            async for h_msg in message.channel.history(limit=20, before=message):
+            async for h_msg in message.channel.history(limit=50, before=message):
                 history.append({
                     "author": getattr(h_msg.author, "display_name", str(h_msg.author)),
                     "content": h_msg.content,
