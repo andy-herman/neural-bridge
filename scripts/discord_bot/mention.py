@@ -278,20 +278,29 @@ def _echo_voice_block() -> str:
 def add_dirs_for(agent_id: str) -> list[str] | None:
     """Per-agent extra `--add-dir` paths for claude -p, or None if none configured.
 
-    Every agent gets read access to their own conversation-log archive at
-    `~/Documents/Luna Master/Agents/<agent_id>/conversations/`, in addition
-    to whatever charter-specific dirs they have. If the agent already has a
-    parent path (e.g., the whole vault root for luna/content/social/echo),
-    we don't add the redundant subdirectory.
+    Two things are always added (each one idempotently, skipped if already
+    covered by an existing parent path):
+
+      1. The agent's own conversation-log archive
+         (`Agents/<agent_id>/conversations/`).
+      2. The shared cross-agent conversation archive
+         (`Agents/_shared/conversations/`) — so when guild-channel threads
+         involve multiple agents, each can see what the others said.
+
+    For agents who already have the full vault root (luna, content, social,
+    echo), both are covered automatically and no new entries are added.
     """
-    from .conversation_log import agent_conversations_dir
+    from .conversation_log import agent_conversations_dir, shared_conversations_dir
 
     base = list(ADD_DIRS_PER_AGENT.get(agent_id, []))
-    conv_dir = str(agent_conversations_dir(agent_id))
+    extras = [
+        str(agent_conversations_dir(agent_id)),
+        str(shared_conversations_dir()),
+    ]
 
-    # Skip if already covered by an existing parent path.
-    if not any(conv_dir.startswith(d.rstrip("/") + "/") or conv_dir == d for d in base):
-        base.append(conv_dir)
+    for extra in extras:
+        if not any(extra.startswith(d.rstrip("/") + "/") or extra == d for d in base):
+            base.append(extra)
 
     return base if base else None
 
