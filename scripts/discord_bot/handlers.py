@@ -317,6 +317,20 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         # to look for context older than the recent-history window.
         conv_log_path = str(conversation_log_path(agent_id, message))
 
+        # Proactive surface-on-relevance: embed Andy's message via Ollama,
+        # retrieve top relevant prior turns from the per-agent archive,
+        # prepend them as a "Possibly relevant" section. Skipped silently
+        # if the embedding index isn't available or nothing crosses the
+        # similarity threshold. Runs in a thread so the async loop doesn't
+        # block on the embed call (~200ms).
+        import asyncio as _asyncio
+        from .semantic_search import build_relevant_archive_block
+        _loop = _asyncio.get_running_loop()
+        relevant_block = await _loop.run_in_executor(
+            None,
+            lambda: build_relevant_archive_block(agent_id, message.content),
+        )
+
         prompt = build_mention_prompt(
             template,
             agent_id=agent_id,
@@ -326,6 +340,11 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             message_content=message.content,
             conversation_log_path=conv_log_path,
         )
+        # Prepend the relevant-archive surface BEFORE the ingest block so
+        # historical context loads first; the ingest block is for files
+        # Andy just dropped in this turn.
+        if relevant_block:
+            prompt = relevant_block + prompt
         # Prepend the ingest block so Echo sees the dropped-files section before
         # the standard mention scaffold. Same composition pattern as the Echo
         # voice and Luna notes blocks (which are prepended inside build_mention_prompt).
