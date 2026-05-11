@@ -32,9 +32,11 @@ DISCORD_CHUNK_BUDGET = 1900
 # the multi-message split. Cap > DISCORD_CHUNK_BUDGET means the response WILL be chunked.
 #
 # - teaching-prep: deep research synthesis genuinely needs 6000.
+# - luna: 1:1 DM conversations need room beyond the 2-chunk default (2500); 11400 gives 6 chunks.
 # - content / social: produce summaries-of-drafts that routinely run past 2500.
 MAX_RESPONSE_CHARS_PER_AGENT: dict[str, int] = {
     "teaching-prep": 6000,
+    "luna": 11400,
     "content": 3500,
     "social": 3000,
 }
