@@ -328,6 +328,156 @@ class TestFormatPreview(unittest.TestCase):
         self.assertIn("cancel abc12345", out)
 
 
+# ---------- porcelain parsing + working-tree collision check ----------
+
+class TestParsePorcelain(unittest.TestCase):
+    def test_empty_output(self):
+        self.assertEqual(pp._parse_porcelain(""), [])
+
+    def test_whitespace_only(self):
+        self.assertEqual(pp._parse_porcelain("   \n\n  \n"), [])
+
+    def test_single_modified(self):
+        out = pp._parse_porcelain(" M src/pages/about.astro")
+        self.assertEqual(out, [(" M", "src/pages/about.astro")])
+
+    def test_single_untracked(self):
+        out = pp._parse_porcelain("?? public/images/andy-profile.jpg")
+        self.assertEqual(out, [("??", "public/images/andy-profile.jpg")])
+
+    def test_mixed_entries(self):
+        raw = " M src/a.txt\n?? src/b.txt\nM  src/c.txt\nA  src/d.txt\nD  src/e.txt\n"
+        out = pp._parse_porcelain(raw)
+        self.assertEqual(out, [
+            (" M", "src/a.txt"),
+            ("??", "src/b.txt"),
+            ("M ", "src/c.txt"),
+            ("A ", "src/d.txt"),
+            ("D ", "src/e.txt"),
+        ])
+
+    def test_rename_emits_both_paths(self):
+        # `R  oldpath -> newpath` — both should appear so either can be
+        # detected as a collision.
+        out = pp._parse_porcelain("R  src/old.txt -> src/new.txt")
+        self.assertEqual(len(out), 2)
+        paths = {p for _, p in out}
+        self.assertEqual(paths, {"src/old.txt", "src/new.txt"})
+
+    def test_quoted_path_with_spaces(self):
+        out = pp._parse_porcelain(' M "path with spaces.txt"')
+        self.assertEqual(out, [(" M", "path with spaces.txt")])
+
+    def test_quoted_rename_paths(self):
+        out = pp._parse_porcelain('R  "old path.txt" -> "new path.txt"')
+        paths = {p for _, p in out}
+        self.assertEqual(paths, {"old path.txt", "new path.txt"})
+
+    def test_malformed_short_lines_skipped(self):
+        # Lines shorter than 4 chars (no path) are dropped rather than
+        # raising.
+        out = pp._parse_porcelain("??\nx\n M src/ok.txt")
+        self.assertEqual(out, [(" M", "src/ok.txt")])
+
+
+class TestWorkingTreeCollisionCheck(unittest.TestCase):
+    def _patch_git(self, return_value):
+        return mock.patch.object(pp, "_git", return_value=return_value)
+
+    def test_clean_tree_is_safe(self):
+        with self._patch_git((True, "")):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertTrue(safe)
+        self.assertIsNone(err)
+        self.assertEqual(non_colliding, [])
+
+    def test_unrelated_dirty_file_is_safe(self):
+        # User edited a file the proposal doesn't touch — proceed.
+        with self._patch_git((True, " M src/other.astro")):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertTrue(safe)
+        self.assertIsNone(err)
+        self.assertEqual(non_colliding, ["src/other.astro"])
+
+    def test_untracked_unrelated_file_is_safe(self):
+        # An untracked asset (e.g. a forgotten profile photo) is not a
+        # collision unless it's a path the proposal wants to write.
+        with self._patch_git((True, "?? public/images/andy-profile.jpg")):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertTrue(safe)
+        self.assertIsNone(err)
+        self.assertEqual(non_colliding, ["public/images/andy-profile.jpg"])
+
+    def test_direct_collision_blocks(self):
+        # User's dirty file is exactly what the proposal wants to write.
+        with self._patch_git((True, " M src/about.astro")):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertFalse(safe)
+        self.assertIsNotNone(err)
+        self.assertIn("src/about.astro", err)
+        self.assertEqual(non_colliding, [])
+
+    def test_collision_among_mixed_dirty_paths(self):
+        # One collision, plus unrelated dirty entries. We refuse, and
+        # the unrelated paths are still returned for logging.
+        raw = " M src/about.astro\n M src/other.astro\n?? public/x.png"
+        with self._patch_git((True, raw)):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertFalse(safe)
+        self.assertIn("src/about.astro", err)
+        self.assertEqual(sorted(non_colliding), ["public/x.png", "src/other.astro"])
+
+    def test_collision_listing_truncates_after_five(self):
+        # Make sure a massive collision set doesn't blow out the error message.
+        raw = "\n".join(f" M src/f{i}.txt" for i in range(10))
+        proposal_paths = {f"src/f{i}.txt" for i in range(10)}
+        with self._patch_git((True, raw)):
+            safe, err, _ = pp._check_working_tree_collision(
+                Path("/fake/repo"), proposal_paths,
+            )
+        self.assertFalse(safe)
+        # First 5 paths plus a "+N more" suffix.
+        self.assertIn("+5 more", err)
+
+    def test_rename_target_collision_blocks(self):
+        # User renamed something to the path the proposal wants — collision.
+        with self._patch_git((True, "R  src/old.astro -> src/about.astro")):
+            safe, err, _ = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertFalse(safe)
+        self.assertIn("src/about.astro", err)
+
+    def test_rename_source_collision_blocks(self):
+        # And renaming AWAY from a path the proposal wants is also a collision
+        # — the user just removed the file the proposal expected to land on.
+        with self._patch_git((True, "R  src/about.astro -> src/renamed.astro")):
+            safe, err, _ = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertFalse(safe)
+        self.assertIn("src/about.astro", err)
+
+    def test_git_status_failure_surfaces_error(self):
+        with self._patch_git((False, "git_exit_128: not a git repo")):
+            safe, err, non_colliding = pp._check_working_tree_collision(
+                Path("/fake/repo"), {"src/about.astro"},
+            )
+        self.assertFalse(safe)
+        self.assertIn("git status failed", err)
+        self.assertEqual(non_colliding, [])
+
+
 # ---------- repos.py basics ----------
 
 class TestRepos(unittest.TestCase):
