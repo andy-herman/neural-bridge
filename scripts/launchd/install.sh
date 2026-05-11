@@ -2,10 +2,11 @@
 # Install Neural Bridge launchd user agents.
 #
 # Currently installs:
-#   - com.andyherman.neural-bridge.discord-bot      (always-on Discord daemon)
-#   - com.andyherman.neural-bridge.publish-prep     (Sunday 18:00 PT publish prep)
-#   - com.andyherman.neural-bridge.compile-nightly  (03:00 daily concept compile)
-#   - com.andyherman.neural-bridge.auto-reload      (every 2 min: pull main + reload daemon if daemon-relevant files changed)
+#   - com.andyherman.neural-bridge.discord-bot        (always-on Discord daemon)
+#   - com.andyherman.neural-bridge.publish-prep       (Sunday 18:00 PT publish prep)
+#   - com.andyherman.neural-bridge.compile-nightly    (03:00 daily concept compile)
+#   - com.andyherman.neural-bridge.auto-reload        (every 2 min: pull main + reload daemon if daemon-relevant files changed)
+#   - com.andyherman.neural-bridge.summarize-weekly   (Monday 04:00: compress prior week of conversation logs into per-agent lessons-learned digests)
 #
 # Idempotent: safe to run multiple times. Re-bootstraps any agent that's
 # already loaded.
@@ -17,6 +18,7 @@ AGENTS=(
     "com.andyherman.neural-bridge.publish-prep"
     "com.andyherman.neural-bridge.compile-nightly"
     "com.andyherman.neural-bridge.auto-reload"
+    "com.andyherman.neural-bridge.summarize-weekly"
 )
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
