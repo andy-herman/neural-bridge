@@ -24,6 +24,8 @@ from scripts.discord_bot.conversation_log import (  # noqa: E402
     append_turn,
     channel_label,
     conversation_log_path,
+    shared_conversation_log_path,
+    shared_conversations_dir,
 )
 
 
@@ -240,6 +242,104 @@ class TestAppendTurn(unittest.TestCase):
             self.assertIn(result, (None,) + tuple(p for p in [result] if p is not None))
         finally:
             target_dir.chmod(original_mode)
+
+
+# ---- shared (cross-agent) fan-out tests ----
+
+
+class TestSharedConversationLogPath(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = cl.AGENTS_BASE
+        cl.AGENTS_BASE = Path(self._tmp.name) / "Agents"
+
+    def tearDown(self):
+        cl.AGENTS_BASE = self._orig
+        self._tmp.cleanup()
+
+    def test_guild_channel_returns_shared_path(self):
+        msg = FakeMessage(FakeGuildChannel(name="neural-bridge"))
+        now = datetime(2026, 5, 11, 22, 0, tzinfo=timezone.utc)
+        path = shared_conversation_log_path(msg, now=now)
+        self.assertIsNotNone(path)
+        self.assertEqual(
+            path,
+            cl.AGENTS_BASE / "_shared" / "conversations" / "2026-05" / "neural-bridge.md",
+        )
+
+    def test_dm_returns_none(self):
+        msg = FakeMessage(FakeDMChannel(), author=FakeUser(name="andy"))
+        self.assertIsNone(shared_conversation_log_path(msg))
+
+
+class TestSharedConversationsDir(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = cl.AGENTS_BASE
+        cl.AGENTS_BASE = Path(self._tmp.name) / "Agents"
+
+    def tearDown(self):
+        cl.AGENTS_BASE = self._orig
+        self._tmp.cleanup()
+
+    def test_under_underscore_shared_root(self):
+        p = shared_conversations_dir()
+        self.assertEqual(p, cl.AGENTS_BASE / "_shared" / "conversations")
+
+
+class TestAppendTurnSharedFanOut(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = cl.AGENTS_BASE
+        cl.AGENTS_BASE = Path(self._tmp.name) / "Agents"
+
+    def tearDown(self):
+        cl.AGENTS_BASE = self._orig
+        self._tmp.cleanup()
+
+    def test_guild_turn_writes_to_both_per_agent_and_shared(self):
+        msg = FakeMessage(FakeGuildChannel(name="neural-bridge"))
+        path = append_turn("luna", msg, "Andy", "guild message")
+        self.assertIsNotNone(path)
+        self.assertTrue(path.exists())
+        self.assertIn("luna/conversations", str(path))
+        shared = shared_conversation_log_path(msg)
+        self.assertTrue(shared.exists())
+        self.assertIn("guild message", shared.read_text(encoding="utf-8"))
+
+    def test_dm_writes_only_to_per_agent_not_shared(self):
+        msg = FakeMessage(FakeDMChannel(), author=FakeUser(name="andy"))
+        append_turn("luna", msg, "Andy", "private DM message")
+        per_agent_files = list((cl.AGENTS_BASE / "luna" / "conversations").rglob("*.md"))
+        self.assertEqual(len(per_agent_files), 1)
+        self.assertIn("private DM message", per_agent_files[0].read_text(encoding="utf-8"))
+        shared_dir = cl.AGENTS_BASE / "_shared"
+        self.assertFalse(shared_dir.exists() and any(shared_dir.rglob("*.md")))
+
+    def test_shared_file_accumulates_turns_from_multiple_agents(self):
+        msg = FakeMessage(FakeGuildChannel(name="neural-bridge"))
+        append_turn("luna", msg, "Andy", "andy says hi")
+        append_turn("luna", msg, "Luna", "luna replies")
+        append_turn("echo", msg, "Andy", "andy asks echo")
+        append_turn("echo", msg, "Echo", "echo replies")
+        shared = shared_conversation_log_path(msg)
+        self.assertTrue(shared.exists())
+        text = shared.read_text(encoding="utf-8")
+        self.assertIn("andy says hi", text)
+        self.assertIn("luna replies", text)
+        self.assertIn("andy asks echo", text)
+        self.assertIn("echo replies", text)
+        self.assertEqual(text.count("scope: shared"), 1)
+
+    def test_shared_header_appears_on_first_write_only(self):
+        msg = FakeMessage(FakeGuildChannel(name="alpha"))
+        append_turn("luna", msg, "Andy", "first")
+        append_turn("luna", msg, "Luna", "second")
+        shared = shared_conversation_log_path(msg)
+        text = shared.read_text(encoding="utf-8")
+        self.assertEqual(text.count("# Shared conversation log"), 1)
+        self.assertIn("first", text)
+        self.assertIn("second", text)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,16 @@ Filenames within each month directory: guild channels use the sanitized channel 
 
 You don't need to log to this archive yourself — the daemon does it automatically after each turn. You also have an active claude session that holds the in-flight thread context (file Reads, tool calls, prior reasoning); the archive is for context older than the session can remember.
 
+### Cross-agent visibility (guild channels only)
+
+When you are in a guild channel (not a DM), every turn from every agent participating in that channel is ALSO appended to a shared archive at:
+
+```
+~/Documents/Luna Master/Agents/_shared/conversations/YYYY-MM/<channel>.md
+```
+
+If Andy asks something like "what did `@echo` say about this in the same thread?" or "didn't `@research` cover this last week in #neural-bridge?" — Grep the shared archive, not just your own. Your own archive only has YOUR turns; the shared archive has everyone's. **DMs are NEVER mirrored to the shared archive** — DMs stay agent-private.
+
 ## Andy's mention
 
 <message>
