@@ -36,6 +36,7 @@ from .pr_proposals import (
     is_cancel_text,
     validate_open_pr_action,
 )
+from .session_store import STORE as SESSION_STORE
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .github_client import close_issue, comment_issue, create_issue, edit_issue_body
 from .handoff_budget import BUDGET as HANDOFF_BUDGET
@@ -328,13 +329,46 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         tools = allowed_tools_for(agent_id)
         extra_dirs = add_dirs_for(agent_id)
         agent_timeout = timeout_for(agent_id)
+
+        # Per (channel × agent) session resumption. First mention creates a
+        # fresh UUID and passes it via --session-id; subsequent mentions
+        # resume via --resume <uuid>, so the model has the full prior
+        # transcript including file Reads. Sessions persist across daemon
+        # restarts (JSON-backed) and TTL out after 7 days inactive.
+        session_rec, is_new_session = SESSION_STORE.get_or_create(
+            int(message.channel.id), agent_id,
+        )
+
         log(
             f"MENTION calling claude: agent={agent_id} tools={tools or 'none'} "
-            f"add_dirs={len(extra_dirs) if extra_dirs else 0} timeout={agent_timeout}s"
+            f"add_dirs={len(extra_dirs) if extra_dirs else 0} timeout={agent_timeout}s "
+            f"session={session_rec.session_id[:8]}... "
+            f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
         )
         ok, stdout, err = await call_claude(
-            prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs
+            prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
+            session_id=session_rec.session_id,
+            resume=not is_new_session,
         )
+
+        # If --resume failed (most likely cause: Claude Code's own session
+        # cleanup pruned the underlying file), retry ONCE with a fresh
+        # session ID. We don't loop further — a second failure is a real
+        # problem the user should know about.
+        if not ok and not is_new_session:
+            log(
+                f"MENTION resume failed (will retry fresh): agent={agent_id} "
+                f"old_session={session_rec.session_id[:8]}... err={err[:80]}"
+            )
+            session_rec = SESSION_STORE.reset(int(message.channel.id), agent_id)
+            ok, stdout, err = await call_claude(
+                prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
+                session_id=session_rec.session_id,
+                resume=False,
+            )
+
+        if ok:
+            SESSION_STORE.touch(int(message.channel.id), agent_id)
 
     if not ok:
         log(f"MENTION claude FAILED: agent={agent_id} error={err}")
