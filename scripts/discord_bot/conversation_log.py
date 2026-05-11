@@ -162,10 +162,32 @@ def append_turn(agent_id: str, message, author: str, content: str,
             "conv_log appended: %s author=%s chars=%d",
             path, author, len(content),
         )
-        return path
     except Exception as exc:  # noqa: BLE001 — best-effort archive
         _logger.warning(
             "conv_log append failed (non-fatal): agent=%s author=%s err=%s: %s",
             agent_id, author, type(exc).__name__, exc,
         )
-        return None
+        path = None
+
+    # Best-effort: also embed + index this turn so semantic search across
+    # the archive picks it up next query. Failures (Ollama down,
+    # sqlite-vec missing, etc.) log a warning and don't affect the write
+    # we just did. Import inline so circular dependency is avoided and
+    # any sqlite_vec import error doesn't kill conversation_log load.
+    if path is not None:
+        try:
+            from .semantic_search import index_turn_from_append
+            index_turn_from_append(
+                agent_id=agent_id,
+                file_path=path,
+                author=author,
+                content=content,
+                timestamp=timestamp,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "conv_log index_turn skipped (non-fatal): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+    return path

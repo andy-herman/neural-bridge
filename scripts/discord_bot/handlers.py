@@ -574,6 +574,44 @@ async def _execute_action_batch(
                         f"`{validated.proposal.repo.gh_slug}` "
                         f"(awaiting `approve {validated.proposal.proposal_id}` in this channel)"
                     )
+            elif atype == "search_conversation_memory":
+                # Semantic search via Ollama bge-m3 embeddings + sqlite-vec.
+                # Run in a thread so we don't block the asyncio loop on the
+                # embedding call (~200ms) + sqlite read.
+                import asyncio as _asyncio
+                from .semantic_search import get_store
+                loop = _asyncio.get_running_loop()
+
+                def _do_search() -> list:
+                    store = get_store()
+                    if store is None:
+                        return []
+                    top_n = int(action.get("top_n", 5))
+                    return store.search(agent_id, action["query"], top_n=top_n)
+
+                hits = await loop.run_in_executor(None, _do_search)
+                if not hits:
+                    results.append(
+                        f"🔎 search_conversation_memory `{action['query'][:60]}…`: no results "
+                        f"(or embedding service unavailable)"
+                    )
+                else:
+                    summary_lines = [
+                        f"🔎 search_conversation_memory `{action['query'][:60]}…`: {len(hits)} hit(s)"
+                    ]
+                    for h in hits[:5]:  # cap shown to 5 even if top_n was bigger
+                        snippet = h.content[:140].replace("\n", " ")
+                        if len(h.content) > 140:
+                            snippet += "…"
+                        # File path relative to vault root if possible for readability.
+                        file_short = h.file_path
+                        if "Luna Master/Agents/" in file_short:
+                            file_short = "…/" + file_short.split("Luna Master/Agents/", 1)[1]
+                        summary_lines.append(
+                            f"  - `{h.timestamp}` ({h.author}, dist={h.distance:.3f}) "
+                            f"in `{file_short}`: {snippet}"
+                        )
+                    results.append("\n".join(summary_lines))
             elif atype == "create_agent":
                 # Run the full agent_builder workflow in a thread (it does
                 # synchronous git/gh subprocess calls).
