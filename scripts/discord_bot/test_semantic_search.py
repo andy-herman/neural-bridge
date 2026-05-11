@@ -225,5 +225,88 @@ class TestParseTurnsFromFile(unittest.TestCase):
         self.assertEqual(list(parse_turns_from_file(Path("/nonexistent.md"))), [])
 
 
+# ---- proactive surface-on-relevance tests ----
+
+
+class TestBuildRelevantArchiveBlock(unittest.TestCase):
+    """Mocks Ollama, uses a real sqlite-vec store seeded with predictable
+    vectors so we can assert on the threshold + budget logic."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._db = Path(self._tmp.name) / "test.db"
+        self._orig_store = ss._STORE
+        # Build a fresh index pointed at our tempdir; install as the
+        # module singleton so build_relevant_archive_block uses it.
+        ss._STORE = ss.EmbeddingIndex(path=self._db)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                _mock_embed_response(_fake_vec(0.10)),  # close
+                _mock_embed_response(_fake_vec(0.20)),  # close
+                _mock_embed_response(_fake_vec(0.90)),  # far
+            ]
+            ss._STORE.index_turn("luna", "/p1.md", "2026-05-11 22:00Z", "Andy", "first close turn")
+            ss._STORE.index_turn("luna", "/p1.md", "2026-05-11 22:05Z", "Luna", "second close turn")
+            ss._STORE.index_turn("luna", "/p1.md", "2026-05-11 22:10Z", "Andy", "third far turn")
+
+    def tearDown(self):
+        try:
+            ss._STORE.close()
+        except Exception:
+            pass
+        ss._STORE = self._orig_store
+        self._tmp.cleanup()
+
+    def test_returns_block_with_close_hits(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_embed_response(_fake_vec(0.10))
+            block = ss.build_relevant_archive_block("luna", "find close turns")
+        self.assertIn("Possibly relevant prior turns", block)
+        self.assertIn("first close turn", block)
+        self.assertIn("`2026-05-11 22:00Z`", block)
+        self.assertIn("---", block)
+
+    def test_returns_empty_when_query_is_empty(self):
+        self.assertEqual(ss.build_relevant_archive_block("luna", ""), "")
+        self.assertEqual(ss.build_relevant_archive_block("luna", "   "), "")
+
+    def test_returns_empty_when_no_hits_under_threshold(self):
+        # Query so far from all seeded vectors that nothing crosses a tight cap.
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_embed_response(_fake_vec(1.5))
+            block = ss.build_relevant_archive_block(
+                "luna", "wildly different query", distance_max=0.1,
+            )
+        self.assertEqual(block, "")
+
+    def test_returns_empty_when_agent_has_no_table(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_embed_response(_fake_vec(0.10))
+            block = ss.build_relevant_archive_block("ghost-agent", "anything")
+        self.assertEqual(block, "")
+
+    def test_returns_empty_when_ollama_unreachable(self):
+        import urllib.error
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("conn refused")):
+            block = ss.build_relevant_archive_block("luna", "anything")
+        self.assertEqual(block, "")
+
+    def test_truncates_to_budget(self):
+        # Seed a giant turn, then build block with a small budget. Snippet
+        # should be truncated, not the whole entry absent.
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_embed_response(_fake_vec(0.10))
+            ss._STORE.index_turn("luna", "/p2.md", "ts", "Andy", "x" * 10_000)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_embed_response(_fake_vec(0.10))
+            block = ss.build_relevant_archive_block(
+                "luna", "find the long one", budget_chars=600,
+            )
+        self.assertIn("Possibly relevant", block)
+        self.assertIn("…", block)  # truncation marker
+        self.assertLess(len(block), 1500)
+
+
 if __name__ == "__main__":
     unittest.main()

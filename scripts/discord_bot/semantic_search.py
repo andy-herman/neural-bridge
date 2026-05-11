@@ -374,3 +374,97 @@ def backfill_shared_archive(agents_base: Path) -> tuple[int, int]:
     """Walk `_shared/conversations/**/*.md` and index every turn under the
     pseudo-agent key `_shared`. Lets agents query cross-agent context."""
     return backfill_agent_archive("_shared", agents_base)
+
+
+# ---- Proactive surface-on-relevance (auto-inject relevant past turns) ----
+
+# Distance threshold. sqlite-vec's vector distance is L2 on normalized
+# vectors (≈ cosine distance); 0.0 = identical, 2.0 = opposite. Empirically
+# bge-m3 returns distances around 0.2-0.5 for semantically close pairs,
+# 0.7-1.0 for loosely related, 1.0+ for unrelated. We set 0.7 as the
+# default ceiling: only inject when there's a real signal.
+DEFAULT_RELEVANCE_DISTANCE_MAX = 0.7
+DEFAULT_RELEVANT_TOP_N = 3
+DEFAULT_RELEVANT_BUDGET_CHARS = 2000
+
+
+def build_relevant_archive_block(
+    agent_id: str,
+    query: str,
+    *,
+    top_n: int = DEFAULT_RELEVANT_TOP_N,
+    distance_max: float = DEFAULT_RELEVANCE_DISTANCE_MAX,
+    budget_chars: int = DEFAULT_RELEVANT_BUDGET_CHARS,
+) -> str:
+    """Return a mention-prompt prefix block with the top semantically
+    relevant prior turns for this `(agent, query)` pair, or empty string
+    if nothing crosses the threshold or the index is unavailable.
+
+    Trade-offs encoded in the defaults:
+    - `top_n=3`: more than 3 starts to look like cherry-picked context
+      and inflates token cost.
+    - `distance_max=0.7`: filters out "loosely related" matches that
+      would dilute signal. Tune up if recall is too thin in practice.
+    - `budget_chars=2000`: cap on the prepended block size. Snippets
+      truncate before the cap is reached.
+
+    Failure mode: any error (Ollama down, sqlite-vec missing, table not
+    yet created) returns "" — the mention proceeds without the auto-
+    surface block. Never raises.
+    """
+    query = (query or "").strip()
+    if not query:
+        return ""
+
+    store = get_store()
+    if store is None:
+        return ""
+
+    try:
+        hits = store.search(agent_id, query, top_n=top_n)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("relevant_block: search failed: %s: %s", type(exc).__name__, exc)
+        return ""
+
+    if not hits:
+        return ""
+
+    # Filter by the relevance threshold. sqlite-vec returns hits sorted
+    # by distance ascending; only keep those under the cap.
+    relevant = [h for h in hits if h.distance <= distance_max]
+    if not relevant:
+        return ""
+
+    # Build the block within the char budget. Cap each snippet at a share
+    # of the budget so one giant turn doesn't crowd out the rest.
+    per_snippet_cap = max(300, budget_chars // max(len(relevant), 1))
+    lines = [
+        "## Possibly relevant prior turns (auto-surfaced from your archive)\n\n",
+        "These passages from your past conversations look semantically "
+        "close to what Andy is asking about NOW. Treat them as memory you "
+        "can reference. Not all will be relevant — use judgment. Cite the "
+        "timestamp + author if you bring one in.\n",
+    ]
+    used = sum(len(s) for s in lines)
+    added = 0
+    for h in relevant:
+        snippet = h.content
+        if len(snippet) > per_snippet_cap:
+            snippet = snippet[:per_snippet_cap].rstrip() + "…"
+        path_short = h.file_path
+        if "Luna Master/Agents/" in path_short:
+            path_short = "…/" + path_short.split("Luna Master/Agents/", 1)[1]
+        entry = (
+            f"\n### `{h.timestamp}` — {h.author} "
+            f"_(distance={h.distance:.3f}, source: {path_short})_\n\n{snippet}\n"
+        )
+        # Always include at least one entry — the whole point of "proactive
+        # surface" is to surface something. Subsequent entries respect the
+        # budget. Header overhead alone shouldn't squeeze out the first hit.
+        if added > 0 and used + len(entry) > budget_chars:
+            break
+        lines.append(entry)
+        used += len(entry)
+        added += 1
+    lines.append("\n---\n\n")
+    return "".join(lines)
