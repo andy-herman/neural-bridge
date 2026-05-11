@@ -324,15 +324,109 @@ class ExecutionResult:
     error: str | None = None
 
 
+def _parse_porcelain(output: str) -> list[tuple[str, str]]:
+    """Parse `git status --porcelain` output into `[(status, path), ...]`.
+
+    Format per line is `XY<space>path` where XY is the two-char status
+    code (`??` for untracked, `M ` for modified-staged, ` M` for modified-
+    unstaged, `R ` for renamed, etc.).
+
+    Renames in porcelain v1 look like `R  old -> new`. We emit one entry
+    per affected path: both the source (since the user's intent treats
+    the source as "moved away") and the destination (where new content
+    lives). Either is a collision for our purposes.
+
+    Paths with shell-unsafe chars are wrapped in double quotes by git;
+    we strip those quotes. Escape sequences (`\\xxx` for non-ASCII) are
+    left literal; collisions involving non-ASCII paths fall back to the
+    surgical `git add` for correctness.
+
+    Empty and malformed lines are skipped.
+    """
+    entries: list[tuple[str, str]] = []
+    for raw_line in output.splitlines():
+        if not raw_line.strip() or len(raw_line) < 4:
+            continue
+        status = raw_line[:2]
+        rest = raw_line[3:]
+        # Rename: `<old> -> <new>`. Emit both paths.
+        if " -> " in rest:
+            old_part, new_part = rest.split(" -> ", 1)
+            for part in (old_part, new_part):
+                part = part.strip()
+                if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+                    part = part[1:-1]
+                entries.append((status, part))
+            continue
+        if rest.startswith('"') and rest.endswith('"') and len(rest) >= 2:
+            rest = rest[1:-1]
+        entries.append((status, rest))
+    return entries
+
+
+def _check_working_tree_collision(
+    cwd: Path,
+    proposal_paths: set[str],
+) -> tuple[bool, str | None, list[str]]:
+    """Decide whether the working tree is safe for a proposal to land on.
+
+    Returns `(safe, error_message, non_colliding_dirty_paths)`:
+      - `safe=True` means no dirty entry's path is in `proposal_paths`.
+        Unrelated dirty files don't block: the surgical `git add` in
+        step 5 only stages the proposal's own paths, so the user's
+        in-flight work stays uncommitted and untouched.
+      - `safe=False` means at least one dirty path collides with a path
+        the proposal wants to write. We refuse rather than clobber.
+        `error_message` lists the colliding paths so Andy can fix.
+      - `non_colliding_dirty_paths` is the rest. Returned so the caller
+        can log them for telemetry — useful when triaging "why did the
+        post-push state look weird?"
+
+    The collision is path-exact (not directory-containment). Two files
+    in the same directory are independent: the daemon writes its own,
+    the user's unrelated edit stays untouched.
+    """
+    ok, raw = _git(cwd, ["status", "--porcelain"])
+    if not ok:
+        return False, f"git status failed: {raw}", []
+
+    if not raw.strip():
+        return True, None, []
+
+    entries = _parse_porcelain(raw)
+    dirty_paths = {path for _, path in entries}
+    collisions = sorted(dirty_paths & proposal_paths)
+    non_colliding = sorted(dirty_paths - proposal_paths)
+
+    if collisions:
+        collision_list = ", ".join(collisions[:5])
+        more = "" if len(collisions) <= 5 else f" (+{len(collisions) - 5} more)"
+        return (
+            False,
+            (
+                f"working tree at {cwd} has uncommitted changes that collide with "
+                f"proposal file(s): {collision_list}{more}. Commit or revert those "
+                f"paths before retrying."
+            ),
+            non_colliding,
+        )
+
+    return True, None, non_colliding
+
+
 def execute_proposal(proposal: PRProposal) -> ExecutionResult:
     """Run the full git/gh workflow. Synchronous — call from a thread.
 
     Steps:
-      1. Verify clean working tree.
+      1. Verify the working tree has no changes that collide with the
+         proposal's file list. Unrelated dirty files are tolerated and
+         logged.
       2. fetch + checkout default branch + pull.
       3. Create the new branch.
       4. Write files (mkdir -p for parent dirs).
-      5. git add + commit + push.
+      5. Surgical git add of just the proposal's paths + commit + push.
+         We do NOT `git add -A`: that would sweep up unrelated dirty
+         files into the agent's commit.
       6. gh pr create.
 
     Idempotency: if the branch already exists locally, error out — we
@@ -340,16 +434,16 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
     delete the branch and retry.
     """
     cwd = proposal.repo.local_path
+    proposal_paths = {p for p, _ in proposal.files}
 
-    # 1. Clean working tree check.
-    ok, msg = _git(cwd, ["status", "--porcelain"])
-    if not ok:
-        return ExecutionResult(ok=False, error=f"git status failed: {msg}")
-    if msg.strip():
-        snippet = msg.strip().splitlines()[0][:120]
-        return ExecutionResult(
-            ok=False,
-            error=f"working tree at {cwd} is dirty; refusing to push. First dirty entry: {snippet}",
+    # 1. Working-tree collision check (intersection-based, not blanket).
+    safe, err, non_colliding = _check_working_tree_collision(cwd, proposal_paths)
+    if not safe:
+        return ExecutionResult(ok=False, error=err)
+    if non_colliding:
+        _logger.info(
+            "proposal %s: working tree at %s has %d unrelated dirty path(s); proceeding. First: %s",
+            proposal.proposal_id, cwd, len(non_colliding), non_colliding[0],
         )
 
     # 2. Sync default branch.
@@ -380,10 +474,13 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    # 5. add + commit + push.
-    ok, msg = _git(cwd, ["add", "-A"])
-    if not ok:
-        return ExecutionResult(ok=False, error=f"git add failed: {msg}")
+    # 5. Surgical add (one path at a time) + commit + push. We avoid
+    # `git add -A` because the collision check now tolerates unrelated
+    # dirty files in the working tree; we don't want those staged.
+    for rel_path in sorted(proposal_paths):
+        ok, msg = _git(cwd, ["add", "--", rel_path])
+        if not ok:
+            return ExecutionResult(ok=False, error=f"git add {rel_path} failed: {msg}")
     ok, msg = _git(cwd, ["commit", "-m", proposal.commit_message])
     if not ok:
         return ExecutionResult(ok=False, error=f"git commit failed: {msg}")
