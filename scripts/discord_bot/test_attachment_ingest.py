@@ -23,6 +23,8 @@ from scripts.discord_bot.attachment_ingest import (  # noqa: E402
     IngestResult,
     extract_docx_text,
     extract_eml_text,
+    extract_pptx_text,
+    extract_xlsx_text,
     format_prompt_block,
     ingest_attachments,
     sanitize_filename,
@@ -97,6 +99,178 @@ class TestExtractDocx(unittest.TestCase):
             p.write_bytes(b"not a zip file at all")
             with self.assertRaises(ValueError):
                 extract_docx_text(p)
+
+
+# --------------- extract_pptx_text ---------------
+
+
+def _make_minimal_pptx(path: Path, slides: list[list[str]]) -> None:
+    """Build a minimal .pptx where each slide is a list of paragraph strings.
+
+    Only writes the `ppt/slides/slide*.xml` files. Real .pptx archives have
+    a content types + relationships scaffolding, but extract_pptx_text only
+    walks the slide files so we can skip the rest.
+    """
+    a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    p_ns = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    with zipfile.ZipFile(path, "w") as zf:
+        for i, paragraphs in enumerate(slides, 1):
+            body = "".join(
+                f'<a:p><a:r><a:t>{p}</a:t></a:r></a:p>' for p in paragraphs
+            )
+            slide_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<p:sld xmlns:p="{p_ns}" xmlns:a="{a_ns}">'
+                f'<p:cSld><p:spTree>{body}</p:spTree></p:cSld>'
+                '</p:sld>'
+            )
+            zf.writestr(f"ppt/slides/slide{i}.xml", slide_xml)
+
+
+class TestExtractPptx(unittest.TestCase):
+    def test_extracts_slides_in_order_with_headers(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "deck.pptx"
+            _make_minimal_pptx(p, [
+                ["Title slide", "Subtitle here"],
+                ["Second slide opener", "More detail on slide two"],
+                ["Closing thoughts"],
+            ])
+            out = extract_pptx_text(p)
+            self.assertIn("## Slide 1", out)
+            self.assertIn("## Slide 2", out)
+            self.assertIn("## Slide 3", out)
+            self.assertIn("Title slide", out)
+            self.assertIn("Subtitle here", out)
+            self.assertIn("More detail on slide two", out)
+            # Slide order preserved.
+            self.assertLess(out.index("Slide 1"), out.index("Slide 2"))
+            self.assertLess(out.index("Slide 2"), out.index("Slide 3"))
+
+    def test_slide_with_no_text_renders_placeholder(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "blank.pptx"
+            _make_minimal_pptx(p, [[]])  # one slide, no text
+            out = extract_pptx_text(p)
+            self.assertIn("## Slide 1", out)
+            self.assertIn("no text content", out)
+
+    def test_no_slides_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "empty.pptx"
+            # Valid zip but with no slide files inside.
+            with zipfile.ZipFile(p, "w") as zf:
+                zf.writestr("ppt/presentation.xml", "<dummy/>")
+            with self.assertRaises(ValueError):
+                extract_pptx_text(p)
+
+    def test_bad_zip_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "notreallypptx.pptx"
+            p.write_bytes(b"not a zip")
+            with self.assertRaises(ValueError):
+                extract_pptx_text(p)
+
+
+# --------------- extract_xlsx_text ---------------
+
+
+def _make_minimal_xlsx(path: Path, sheets: list[list[list[str]]],
+                       *, use_shared_strings: bool = True) -> None:
+    """Build a minimal .xlsx. `sheets` is a list of sheets; each sheet is a
+    list of rows; each row is a list of cell string values.
+
+    If `use_shared_strings`, strings go into xl/sharedStrings.xml and cells
+    reference them by index. Otherwise cells use inlineStr.
+    """
+    s_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    shared: list[str] = []
+
+    def _shared_idx(s: str) -> int:
+        if s not in shared:
+            shared.append(s)
+        return shared.index(s)
+
+    with zipfile.ZipFile(path, "w") as zf:
+        for sheet_i, rows in enumerate(sheets, 1):
+            row_xml_parts: list[str] = []
+            for row_i, row in enumerate(rows, 1):
+                cell_xml_parts: list[str] = []
+                for col_i, val in enumerate(row):
+                    col_letter = chr(ord("A") + col_i)
+                    ref = f'{col_letter}{row_i}'
+                    if use_shared_strings:
+                        idx = _shared_idx(val)
+                        cell_xml_parts.append(
+                            f'<c r="{ref}" t="s"><v>{idx}</v></c>'
+                        )
+                    else:
+                        cell_xml_parts.append(
+                            f'<c r="{ref}" t="inlineStr"><is><t>{val}</t></is></c>'
+                        )
+                row_xml_parts.append(
+                    f'<row r="{row_i}">{"".join(cell_xml_parts)}</row>'
+                )
+            sheet_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<worksheet xmlns="{s_ns}"><sheetData>'
+                f'{"".join(row_xml_parts)}'
+                '</sheetData></worksheet>'
+            )
+            zf.writestr(f"xl/worksheets/sheet{sheet_i}.xml", sheet_xml)
+
+        if use_shared_strings and shared:
+            si_parts = "".join(f"<si><t>{s}</t></si>" for s in shared)
+            sst_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<sst xmlns="{s_ns}" count="{len(shared)}" uniqueCount="{len(shared)}">'
+                f'{si_parts}'
+                '</sst>'
+            )
+            zf.writestr("xl/sharedStrings.xml", sst_xml)
+
+
+class TestExtractXlsx(unittest.TestCase):
+    def test_extracts_sheets_in_order_with_shared_strings(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "data.xlsx"
+            _make_minimal_xlsx(p, [
+                [["Name", "Role"], ["Andy", "Senior Manager"]],
+                [["Team", "Headcount"], ["GRC", "12"]],
+            ])
+            out = extract_xlsx_text(p)
+            self.assertIn("## Sheet 1", out)
+            self.assertIn("## Sheet 2", out)
+            self.assertIn("Andy", out)
+            self.assertIn("Senior Manager", out)
+            self.assertIn("GRC", out)
+            # Tab-separated rows on the same line.
+            self.assertIn("Name\tRole", out)
+            self.assertIn("Andy\tSenior Manager", out)
+
+    def test_inline_strings_work_when_no_shared_table(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "inline.xlsx"
+            _make_minimal_xlsx(p, [[["Inline", "values"]]],
+                               use_shared_strings=False)
+            out = extract_xlsx_text(p)
+            self.assertIn("Inline", out)
+            self.assertIn("values", out)
+
+    def test_no_sheets_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "empty.xlsx"
+            with zipfile.ZipFile(p, "w") as zf:
+                zf.writestr("xl/workbook.xml", "<dummy/>")
+            with self.assertRaises(ValueError):
+                extract_xlsx_text(p)
+
+    def test_bad_zip_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "notreallyxlsx.xlsx"
+            p.write_bytes(b"not a zip")
+            with self.assertRaises(ValueError):
+                extract_xlsx_text(p)
 
 
 # --------------- extract_eml_text ---------------
@@ -218,6 +392,50 @@ class TestIngestAttachments(unittest.TestCase):
         sidecar_text = ing.sidecar_text_path.read_text()
         self.assertIn("Alpha.", sidecar_text)
         self.assertIn("Beta gamma.", sidecar_text)
+
+    def test_pptx_file_creates_sidecar(self):
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir) / "src.pptx"
+            _make_minimal_pptx(src, [["First slide line"], ["Second slide line"]])
+            payload = src.read_bytes()
+
+        att = FakeAttachment("deck.pptx", payload)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="luna"))
+        self.assertEqual(len(result.ingested), 1)
+        ing = result.ingested[0]
+        self.assertIsNotNone(ing.sidecar_text_path)
+        self.assertTrue(ing.sidecar_text_path.exists())
+        sidecar_text = ing.sidecar_text_path.read_text()
+        self.assertIn("Slide 1", sidecar_text)
+        self.assertIn("First slide line", sidecar_text)
+        self.assertIn("Second slide line", sidecar_text)
+
+    def test_xlsx_file_creates_sidecar(self):
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir) / "src.xlsx"
+            _make_minimal_xlsx(src, [[["Header"], ["Value"]]])
+            payload = src.read_bytes()
+
+        att = FakeAttachment("data.xlsx", payload)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="luna"))
+        self.assertEqual(len(result.ingested), 1)
+        ing = result.ingested[0]
+        self.assertIsNotNone(ing.sidecar_text_path)
+        self.assertTrue(ing.sidecar_text_path.exists())
+        sidecar_text = ing.sidecar_text_path.read_text()
+        self.assertIn("Sheet 1", sidecar_text)
+        self.assertIn("Header", sidecar_text)
+        self.assertIn("Value", sidecar_text)
+
+    def test_pptx_accepted_by_echo_too(self):
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir) / "src.pptx"
+            _make_minimal_pptx(src, [["echo slide content"]])
+            payload = src.read_bytes()
+        att = FakeAttachment("deck.pptx", payload)
+        result = _run(ingest_attachments(FakeMessage([att]), agent_id="echo"))
+        self.assertEqual(len(result.ingested), 1)
+        self.assertEqual(len(result.rejected), 0)
 
     def test_eml_file_creates_sidecar(self):
         eml = (

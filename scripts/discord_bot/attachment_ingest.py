@@ -25,7 +25,11 @@ Supported types are per-agent (see `ALLOWED_EXTENSIONS_PER_AGENT`):
     .txt, .md       → saved as-is. Read tool handles natively.
     .pdf            → saved as-is. Read tool handles natively.
     .eml            → saved as-is, PLUS a `.txt` sidecar with extracted text.
-    .docx           → saved as-is, PLUS a `.txt` sidecar with extracted text.
+    .docx           → saved as-is, PLUS a `.txt` sidecar (WordprocessingML walk).
+    .pptx           → saved as-is, PLUS a `.txt` sidecar (one section per slide,
+                      DrawingML text-run extraction).
+    .xlsx           → saved as-is, PLUS a `.txt` sidecar (one section per sheet,
+                      tab-separated cells, shared-string table resolved).
     image formats   → saved as-is. Read tool handles natively (multimodal).
                       .png, .jpg, .jpeg, .gif, .webp, .heic. No sidecar —
                       Claude Code's Read tool loads the image directly.
@@ -57,7 +61,7 @@ _logger = logging.getLogger("nb_discord.ingest")
 # because she's the assistant Andy actually screenshots things to).
 _VAULT_ROOT = Path.home() / "Documents" / "Luna Master"
 
-_DOC_EXTENSIONS = {".txt", ".md", ".pdf", ".eml", ".docx"}
+_DOC_EXTENSIONS = {".txt", ".md", ".pdf", ".eml", ".docx", ".pptx", ".xlsx"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"}
 
 ALLOWED_EXTENSIONS_PER_AGENT: dict[str, set[str]] = {
@@ -198,6 +202,136 @@ def extract_docx_text(docx_path: Path) -> str:
             # Empty paragraph — preserve the blank line so paragraph rhythm stays intact.
             paragraphs.append("")
     return "\n".join(paragraphs).strip()
+
+
+# .pptx XML namespaces. DrawingML carries text runs; PresentationML carries
+# the slide structure but we only need the text content. Same parse strategy
+# as .docx: walk the zip, parse each slide's XML, pull <a:t> runs grouped by
+# <a:p> paragraphs.
+_PPTX_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_PPTX_T_TAG = f"{{{_PPTX_A_NS}}}t"
+_PPTX_P_TAG = f"{{{_PPTX_A_NS}}}p"
+
+
+def extract_pptx_text(pptx_path: Path) -> str:
+    """Pull text out of a .pptx file, one slide per section.
+
+    Walks `ppt/slides/slide*.xml` in slide-number order, pulls `<a:t>` runs
+    grouped by `<a:p>` paragraphs. Each slide gets a `## Slide N` header so
+    the agent can keep slide boundaries straight when reading. Slide notes
+    and master-slide content are intentionally skipped — body content only.
+    """
+    try:
+        with zipfile.ZipFile(pptx_path) as zf:
+            slide_names = sorted(
+                (n for n in zf.namelist()
+                 if n.startswith("ppt/slides/slide") and n.endswith(".xml")),
+                key=lambda n: int(re.search(r"slide(\d+)\.xml", n).group(1)),
+            )
+            if not slide_names:
+                raise ValueError("pptx_no_slides: ppt/slides/ is empty")
+
+            sections: list[str] = []
+            for i, name in enumerate(slide_names, 1):
+                with zf.open(name) as f:
+                    tree = ET.parse(f)
+                root = tree.getroot()
+                paragraphs: list[str] = []
+                for p in root.iter(_PPTX_P_TAG):
+                    runs = [t.text for t in p.iter(_PPTX_T_TAG) if t.text]
+                    if runs:
+                        paragraphs.append("".join(runs))
+                slide_body = "\n".join(paragraphs).strip()
+                if slide_body:
+                    sections.append(f"## Slide {i}\n\n{slide_body}")
+                else:
+                    sections.append(f"## Slide {i}\n\n_(no text content)_")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, AttributeError) as exc:
+        raise ValueError(f"pptx_parse_failed: {type(exc).__name__}: {exc}") from exc
+
+    return "\n\n".join(sections).strip()
+
+
+# .xlsx XML namespaces. SpreadsheetML for the sheet structure + shared strings.
+_XLSX_S_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def extract_xlsx_text(xlsx_path: Path) -> str:
+    """Pull cell content out of a .xlsx file, one sheet per section.
+
+    Resolves shared strings from `xl/sharedStrings.xml`, then walks each
+    sheet in `xl/worksheets/sheet*.xml` and emits cells as tab-separated
+    rows. Cells with `t="s"` are shared-string references; `t="inlineStr"`
+    is inline; everything else (numbers, booleans, formulas) is taken as
+    the raw `<v>` value. Empty cells are preserved as empty fields so
+    column alignment stays readable.
+
+    The output is NOT a faithful spreadsheet render — formulas are shown
+    as their cached values, formatting is dropped, merged cells aren't
+    indicated. The goal is "let the agent read what's in the cells,"
+    not "produce a TSV that round-trips into Excel."
+    """
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            # 1. Load the shared-string table if present (optional file).
+            shared: list[str] = []
+            if "xl/sharedStrings.xml" in zf.namelist():
+                with zf.open("xl/sharedStrings.xml") as f:
+                    sst_root = ET.parse(f).getroot()
+                for si in sst_root.iter(f"{{{_XLSX_S_NS}}}si"):
+                    # Each <si> contains either one <t> or a sequence of <r><t>.
+                    parts = [t.text or "" for t in si.iter(f"{{{_XLSX_S_NS}}}t")]
+                    shared.append("".join(parts))
+
+            # 2. Walk each sheet in numeric order.
+            sheet_names = sorted(
+                (n for n in zf.namelist()
+                 if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")),
+                key=lambda n: int(re.search(r"sheet(\d+)\.xml", n).group(1)),
+            )
+            if not sheet_names:
+                raise ValueError("xlsx_no_sheets: xl/worksheets/ is empty")
+
+            sections: list[str] = []
+            for i, name in enumerate(sheet_names, 1):
+                with zf.open(name) as f:
+                    tree = ET.parse(f)
+                root = tree.getroot()
+
+                # Find sheetData; rows are <row>, cells are <c> with attributes
+                # r (cell ref like A1) and optionally t (type).
+                rows_out: list[str] = []
+                for row in root.iter(f"{{{_XLSX_S_NS}}}row"):
+                    cells: list[str] = []
+                    for c in row.iter(f"{{{_XLSX_S_NS}}}c"):
+                        cell_type = c.get("t", "n")  # default numeric
+                        v_el = c.find(f"{{{_XLSX_S_NS}}}v")
+                        is_el = c.find(f"{{{_XLSX_S_NS}}}is")
+                        if cell_type == "s" and v_el is not None and v_el.text is not None:
+                            try:
+                                idx = int(v_el.text)
+                                cells.append(shared[idx] if idx < len(shared) else "")
+                            except ValueError:
+                                cells.append(v_el.text)
+                        elif cell_type == "inlineStr" and is_el is not None:
+                            parts = [t.text or "" for t in is_el.iter(f"{{{_XLSX_S_NS}}}t")]
+                            cells.append("".join(parts))
+                        elif v_el is not None and v_el.text is not None:
+                            cells.append(v_el.text)
+                        else:
+                            cells.append("")
+                    if any(c for c in cells):
+                        rows_out.append("\t".join(cells))
+
+                sheet_body = "\n".join(rows_out).strip()
+                if sheet_body:
+                    sections.append(f"## Sheet {i}\n\n{sheet_body}")
+                else:
+                    sections.append(f"## Sheet {i}\n\n_(no cell content)_")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, AttributeError) as exc:
+        raise ValueError(f"xlsx_parse_failed: {type(exc).__name__}: {exc}") from exc
+
+    return "\n\n".join(sections).strip()
 
 
 def extract_eml_text(eml_path: Path) -> str:
@@ -351,12 +485,16 @@ async def ingest_attachments(message, *, agent_id: str) -> IngestResult:
 
         sidecar_path: Path | None = None
         extracted_chars: int | None = None
-        if ext in (".docx", ".eml"):
+        if ext in (".docx", ".eml", ".pptx", ".xlsx"):
             try:
                 if ext == ".docx":
                     extracted = await asyncio.to_thread(extract_docx_text, target)
-                else:
+                elif ext == ".eml":
                     extracted = await asyncio.to_thread(extract_eml_text, target)
+                elif ext == ".pptx":
+                    extracted = await asyncio.to_thread(extract_pptx_text, target)
+                else:  # .xlsx
+                    extracted = await asyncio.to_thread(extract_xlsx_text, target)
             except ValueError as exc:
                 # Extraction failed but we still keep the raw file on disk. Echo
                 # won't get text she can read, so surface the failure.
@@ -416,10 +554,10 @@ def format_prompt_block(result: IngestResult) -> str:
     lines = ["## Andy dropped files into this conversation\n"]
     lines.append(
         "He attached the file(s) below for you to study. Read them with the "
-        "`Read` tool. For `.docx` and `.eml` files, the `.txt` sidecar is the "
-        "extracted prose — read that. For images (PNG/JPG/etc.) and plain "
-        "text, read the saved path directly; the Read tool loads images as "
-        "visual input.\n"
+        "`Read` tool. For `.docx` / `.eml` / `.pptx` / `.xlsx`, the `.txt` "
+        "sidecar holds the extracted prose — read that. For images (PNG/JPG/"
+        "etc.) and plain text, read the saved path directly; the Read tool "
+        "loads images as visual input.\n"
     )
     for f in result.ingested:
         readable = f.sidecar_text_path or f.saved_path
