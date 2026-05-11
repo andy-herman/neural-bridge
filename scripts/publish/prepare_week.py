@@ -28,7 +28,10 @@ Manual invocation:
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -296,28 +299,86 @@ def generate_korean_translation(candidate: Candidate, *, dry_run: bool, force: b
     if force:
         args.append("--force")
 
+    # Process tree we're spawning: python -> node -> claude -p. The default
+    # subprocess.run() timeout only kills the direct child (node); claude is
+    # node's child and gets reparented to PID 1 on parent death, where it
+    # keeps burning Max quota headless for the remainder of its work. Fix:
+    # start a new process group and on timeout SIGTERM/SIGKILL the whole
+    # group so claude dies with node. (Bug #110.)
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             args,
             cwd=str(BLOG_REPO),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=TRANSLATE_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return False, "translate timeout"
     except FileNotFoundError:
         return False, "node not in PATH"
-    if result.returncode != 0:
-        snippet = (result.stderr or result.stdout or "")[:300].replace("\n", " ").strip()
-        return False, f"translate exit_{result.returncode}: {snippet}"
+
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=TRANSLATE_TIMEOUT)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc, label="translate")
+            return False, "translate timeout"
+    finally:
+        # Belt-and-suspenders: if we exit this function for any other
+        # reason (KeyboardInterrupt, an exception path I haven't anticipated),
+        # ensure the process group is torn down before we go.
+        if proc.poll() is None:
+            _kill_process_group(proc, label="translate-finalize")
+
+    if returncode != 0:
+        snippet = (stderr or stdout or "")[:300].replace("\n", " ").strip()
+        return False, f"translate exit_{returncode}: {snippet}"
 
     # Verify the output actually landed
     if not ko_target.exists():
         return False, f"translate ran but no file at {ko_target}"
 
     return True, str(ko_target.relative_to(BLOG_REPO))
+
+
+def _kill_process_group(proc: subprocess.Popen, *, label: str) -> None:
+    """Tear down a subprocess and its grandchildren via process-group signal.
+
+    The caller is expected to have spawned `proc` with `start_new_session=True`
+    so the process is its own group leader. SIGTERM first, then SIGKILL after
+    a 5-second grace period. Always drains stdout/stderr to fully reap.
+
+    Idempotent: a ProcessLookupError or OSError (group already gone) is
+    swallowed. The `label` is used only for the log line so callers can tell
+    timeout-kill apart from finalize-kill in the log stream.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass
+
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            # Last resort: leave the zombie for the kernel reaper. The
+            # important thing is that we've sent SIGKILL to the whole group.
+            pass
+
+    print(f"  killed translate process group (label={label}, pgid={pgid})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
