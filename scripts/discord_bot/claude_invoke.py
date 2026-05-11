@@ -80,6 +80,8 @@ def call_claude_sync(
     timeout: int = DEFAULT_TIMEOUT,
     allowed_tools: str | None = None,
     add_dirs: list[str] | None = None,
+    session_id: str | None = None,
+    resume: bool = False,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
@@ -91,6 +93,15 @@ def call_claude_sync(
     daemon's CWD. Used to give per-agent access to vault-only corpora (e.g.,
     the INFO 310A corpus for the professor agent). Paths are not validated
     here — caller is responsible for passing trusted paths.
+
+    Session handling: when `session_id` is set, the call either creates a new
+    session with that ID (`--session-id <uuid>`, the default) or continues
+    an existing one (`--resume <uuid>`, when `resume=True`). Caller decides
+    which based on whether this (channel × agent) pair has been seen before.
+    A failure under `--resume` should prompt the caller to retry once with
+    `resume=False` after `session_store.reset()` — the underlying session
+    file may have been pruned by Claude Code's own cleanup. session_id must
+    be a valid UUID; callers should use `session_store.SessionStore.get_or_create`.
     """
     args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
     if allowed_tools:
@@ -98,6 +109,11 @@ def call_claude_sync(
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
+    if session_id:
+        if resume:
+            args.extend(["--resume", session_id])
+        else:
+            args.extend(["--session-id", session_id])
     try:
         result = subprocess.run(
             args,
@@ -123,10 +139,15 @@ async def call_claude(
     timeout: int = DEFAULT_TIMEOUT,
     allowed_tools: str | None = None,
     add_dirs: list[str] | None = None,
+    session_id: str | None = None,
+    resume: bool = False,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: call_claude_sync(prompt, model, timeout, allowed_tools, add_dirs),
+        lambda: call_claude_sync(
+            prompt, model, timeout, allowed_tools, add_dirs,
+            session_id=session_id, resume=resume,
+        ),
     )
