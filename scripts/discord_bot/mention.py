@@ -224,8 +224,24 @@ def _echo_voice_block() -> str:
 
 
 def add_dirs_for(agent_id: str) -> list[str] | None:
-    """Per-agent extra `--add-dir` paths for claude -p, or None if none configured."""
-    return ADD_DIRS_PER_AGENT.get(agent_id)
+    """Per-agent extra `--add-dir` paths for claude -p, or None if none configured.
+
+    Every agent gets read access to their own conversation-log archive at
+    `~/Documents/Luna Master/Agents/<agent_id>/conversations/`, in addition
+    to whatever charter-specific dirs they have. If the agent already has a
+    parent path (e.g., the whole vault root for luna/content/social/echo),
+    we don't add the redundant subdirectory.
+    """
+    from .conversation_log import agent_conversations_dir
+
+    base = list(ADD_DIRS_PER_AGENT.get(agent_id, []))
+    conv_dir = str(agent_conversations_dir(agent_id))
+
+    # Skip if already covered by an existing parent path.
+    if not any(conv_dir.startswith(d.rstrip("/") + "/") or conv_dir == d for d in base):
+        base.append(conv_dir)
+
+    return base if base else None
 
 
 def chunk_for_discord(text: str, *, budget: int = DISCORD_CHUNK_BUDGET) -> list[str]:
@@ -384,6 +400,7 @@ def build_mention_prompt(
     channel_kind: str,
     history: list[dict],
     message_content: str,
+    conversation_log_path: str = "",
 ) -> str:
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
@@ -395,6 +412,7 @@ def build_mention_prompt(
         .replace("{channel_kind}", channel_kind)
         .replace("{discord_history}", history_block)
         .replace("{message}", sanitized_message)
+        .replace("{conversation_log_path}", conversation_log_path)
     )
     # Echo's voice profile auto-injected for voice-mirroring agents
     # (content, social, luna). Lets them reference Andy's voice without a

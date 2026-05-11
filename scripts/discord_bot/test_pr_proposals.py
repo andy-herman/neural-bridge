@@ -482,8 +482,12 @@ class TestWorkingTreeCollisionCheck(unittest.TestCase):
 
 class TestRepos(unittest.TestCase):
     def test_agent_can_push(self):
+        # Luna gained neural-bridge push rights in #118 (alongside
+        # automation-engineer and senior-pm) so Andy can hand her daemon-side
+        # fixes via DM the same way he hands her blog edits. Per-action chat
+        # approval still gates every push.
         self.assertTrue(repos_mod.agent_can_push_to("luna", "neural-bridge-blog"))
-        self.assertFalse(repos_mod.agent_can_push_to("luna", "neural-bridge"))
+        self.assertTrue(repos_mod.agent_can_push_to("luna", "neural-bridge"))
         self.assertFalse(repos_mod.agent_can_push_to("echo", "neural-bridge-blog"))
         self.assertFalse(repos_mod.agent_can_push_to("nonexistent", "neural-bridge-blog"))
 
