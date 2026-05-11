@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.summarize-weekly</string>
+
+    <!-- Weekly auto-summarization of each agent's prior-7-days conversation
+         logs into a compressed "lessons learned" digest. The output file is
+         auto-injected into every mention prompt for that agent the following
+         week, so the agent walks into next week with compressed memory of
+         the patterns + decisions + corrections from last week.
+
+         Runs every Monday at 04:00 local time. Late enough that any Sunday
+         late-night activity is logged; early enough to be done before the
+         workweek starts. Independent of compile-nightly (which runs at 03:00
+         daily); the two never interleave. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/summarize_weekly.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/summarize-weekly.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/summarize-weekly.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <!-- Same PATH shape as compile-nightly: ~/.local/bin for `claude`,
+             Homebrew for any auxiliary CLIs the summarizer may shell to. -->
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
