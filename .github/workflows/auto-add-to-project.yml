@@ -1,0 +1,52 @@
+name: Auto-add agent-inbox issues to project board
+
+# Adds any issue labeled `agent-inbox` to the "Neural Bridge V1 to V2"
+# project board automatically, so the senior-pm triage flow doesn't depend
+# on someone manually adding each one. Fires both when the issue is created
+# (if the label was applied at creation time) and when the label is added
+# later via the GitHub UI or the daemon's structured action vocabulary.
+#
+# Why a GitHub Action and not the project's built-in auto-add workflow:
+# the built-in "Auto-add to project" workflow type isn't present in this
+# project (it has 6 of the 7 standard built-in slots; the auto-add one
+# was never created via the GitHub web UI and can't be created via the
+# GraphQL API). This workflow file is the version-controlled equivalent.
+#
+# Setup requirement (one-time, manual):
+#   1. Create a fine-grained PAT at github.com/settings/personal-access-tokens
+#      Resource owner: andy-herman
+#      Repository access: andy-herman/neural-bridge
+#      Permissions: Repository → Issues (Read), Projects (Read+Write)
+#   2. In repo Settings → Secrets and variables → Actions → New repository
+#      secret, name it `PROJECT_PAT`, paste the token.
+#   3. Merge this workflow file. First triggering issue will land on the
+#      board within seconds.
+#
+# The `secrets.GITHUB_TOKEN` provided by default does NOT have project
+# write scope (projects v2 are user-scoped, not repo-scoped). The PAT is
+# the only way.
+
+on:
+  issues:
+    types:
+      - opened
+      - labeled
+      - reopened
+
+jobs:
+  add-to-project:
+    name: Add labeled issues to V1→V2 board
+    runs-on: ubuntu-latest
+
+    # Only fire when the `agent-inbox` label is present. For `opened` events
+    # the labels array is whatever was applied at creation time; for
+    # `labeled` events the just-added label is in `github.event.label.name`.
+    if: |
+      contains(github.event.issue.labels.*.name, 'agent-inbox')
+
+    steps:
+      - name: Add issue to project
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/users/andy-herman/projects/2
+          github-token: ${{ secrets.PROJECT_PAT }}
