@@ -17,7 +17,7 @@ MENTION_PROMPT_PATH = PROMPTS_DIR / "mention_v1.md"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
 
-MAX_RESPONSE_CHARS = 2500
+MAX_RESPONSE_CHARS = 5000
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARS_PER_MESSAGE = 500
 
@@ -31,14 +31,18 @@ DISCORD_CHUNK_BUDGET = 1900
 # truncation safety valve when an agent legitimately has more to say. Discord chunker handles
 # the multi-message split. Cap > DISCORD_CHUNK_BUDGET means the response WILL be chunked.
 #
-# - teaching-prep: deep research synthesis genuinely needs 6000.
-# - luna: 1:1 DM conversations need room beyond the 2-chunk default (2500); 11400 gives 6 chunks.
-# - content / social: produce summaries-of-drafts that routinely run past 2500.
+# - research / teaching-prep / senior-pm / security-reviewer: sourced analysis can run long.
+# - luna: 1:1 DM conversations need room; 11400 gives 6 chunks.
+# - content / docs-editor / social: summaries and drafts routinely exceed the global default.
 MAX_RESPONSE_CHARS_PER_AGENT: dict[str, int] = {
-    "teaching-prep": 6000,
+    "teaching-prep": 8000,
+    "research": 8000,
+    "senior-pm": 7000,
+    "security-reviewer": 7000,
     "luna": 11400,
-    "content": 3500,
-    "social": 3000,
+    "content": 5000,
+    "social": 4000,
+    "docs-editor": 5000,
 }
 
 
