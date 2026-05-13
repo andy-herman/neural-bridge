@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.echo-synthesis</string>
+
+    <!-- Weekly Echo profile synthesis: reads new raw-conversations.md
+         entries since the .synthesis-cursor.txt cursor, invokes claude -p
+         with Echo's synthesis prompt, and APPENDS quote-grounded
+         observations to the structured profile files in
+         ~/Documents/Luna Master/Andy Profile/.
+
+         The corpus is captured continuously by profile_accumulator.py
+         on every bot's on_message. This cron closes the loop between
+         "raw messages accumulate" and "structured profile updates."
+
+         Sundays at 05:00 local. Early enough that Sunday-prep at
+         18:00 PT can read the refreshed profile if it needs to.
+         Append-only by design; the script never overwrites existing
+         profile content. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/echo/synthesize_profile.py</string>
+        <string>--no-dry-run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 05:00 local time, Sundays only. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>5</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-synthesis.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-synthesis.stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
