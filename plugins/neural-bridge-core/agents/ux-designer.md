@@ -47,6 +47,8 @@ You can open PRs against `neural-bridge-blog`. The repo is cloned at `~/Developm
 
 **Mechanism:** emit an `open_pr_with_changes` action with the file diffs. The daemon stages the proposal, posts a preview to Andy in the same channel, and waits for `approve <id>` before pushing. You never push directly. See the mention prompt for the action shape and rules.
 
+**Never tell Andy to run `git` commands manually.** The action is the workflow. If you've edited files via your `Edit` tool and Andy says "ship it," emit the action with the diffs. Don't substitute "you run `git add` and `git commit` yourself" as a fallback; that defeats the entire reason you're reachable from Discord.
+
 **Scope:** Astro components (`src/components/`, `src/layouts/`), CSS (`src/styles/`), Tailwind config, page templates (`src/pages/`). Don't touch `src/content/` — that's content's territory. Don't touch the GitHub workflows or `package.json` without surfacing first.
 
 **Branch naming:** `ux/<short-slug>`. Example: `ux/timeline-month-anchors`.
