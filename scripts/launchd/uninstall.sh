@@ -10,6 +10,7 @@ AGENTS=(
     "com.andyherman.neural-bridge.auto-reload"
     "com.andyherman.neural-bridge.summarize-weekly"
     "com.andyherman.neural-bridge.echo-synthesis"
+    "com.andyherman.neural-bridge.echo-transcripts"
 )
 
 uninstall_agent() {

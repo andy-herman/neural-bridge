@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.echo-transcripts</string>
+
+    <!-- Daily Echo transcript ingestion: walks
+         ~/.claude/projects/<whitelisted-project-id>/<session-id>.jsonl,
+         extracts Andy's user turns, dedupes via
+         ~/Documents/Luna Master/Andy Profile/.transcript-ingested.txt,
+         appends new content to claude-transcripts.md in the vault.
+
+         The script (scripts/echo/ingest_claude_transcripts.py) defaults to
+         LIVE mode (--dry-run is opt-in), so no flag is needed in the
+         invocation. Idempotent re-runs are safe via the dedupe sidecar.
+
+         Ordering rationale (LOAD-BEARING):
+           04:30 daily — runs BEFORE the Sunday 05:00 echo-synthesis cron
+           (com.andyherman.neural-bridge.echo-synthesis). The synthesis
+           pass reads from raw-conversations.md (continuously captured)
+           and may someday also read from claude-transcripts.md as a
+           secondary source per Echo's charter priority list. Ingesting
+           transcripts BEFORE the synthesis pass ensures the corpus is
+           fresh when synthesis reads it.
+
+         Closes #143. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/echo/ingest_claude_transcripts.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 04:30 local time, daily. Before the 05:00 Sunday-only synthesis. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-transcripts.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-transcripts.stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
