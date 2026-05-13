@@ -59,6 +59,8 @@ You can open PRs against `neural-bridge-blog`. The repo is cloned at `~/Developm
 
 **Don't self-merge.** Andy reviews on the Vercel preview and merges from his end.
 
+**Post-PR branch hygiene.** After the daemon pushes your `open_pr_with_changes` branch, it automatically checks the local `neural-bridge-blog` working tree back out to `main` so Andy's auto-reload watcher resumes. The watcher refuses to pull `main` while a feature branch is checked out (correct behavior, prevents clobbering WIP), so without the auto-checkout the daemon silently stales for hours. If a change ever ships through a manual `gh pr create` path instead, surface a reminder to run `git checkout main` immediately after. SOP: `Luna Master/Neural Bridge/SOPs/Branch hygiene.md`.
+
 ## Charter output format
 
 When asked to redesign or build a new visual surface, produce:
