@@ -428,8 +428,13 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
          We do NOT `git add -A`: that would sweep up unrelated dirty
          files into the agent's commit.
       6. gh pr create.
+      7. Return the local working tree to the default branch so the
+         auto-reload watcher (PR #84) resumes pulling. Without this,
+         the working tree sits on the feature branch and the watcher
+         silently skips for hours, the failure mode #111 added an
+         alert for and #126 set out to document.
 
-    Idempotency: if the branch already exists locally, error out — we
+    Idempotency: if the branch already exists locally, error out. We
     don't want to silently overwrite a previous push attempt. Andy can
     delete the branch and retry.
     """
@@ -505,6 +510,22 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
         )
 
     pr_url = msg.strip().splitlines()[-1] if msg else None
+
+    # 7. Return working tree to default branch so the auto-reload watcher
+    # resumes. The feature branch stays on the remote and is the head of the
+    # newly-opened PR; only the LOCAL checkout switches back. Soft-failure:
+    # if the checkout doesn't take (rare; would happen if a brand-new file
+    # the agent wrote conflicts with a tracked file on main, which we already
+    # guarded against in step 1's collision check), log a warning but still
+    # return ok=True because the PR itself is real.
+    ok_checkout, msg_checkout = _git(cwd, ["checkout", proposal.repo.default_branch])
+    if not ok_checkout:
+        _logger.warning(
+            "post-push checkout of %s failed (PR opened successfully): %s. "
+            "auto-reload watcher will alert until working tree returns to main",
+            proposal.repo.default_branch, msg_checkout,
+        )
+
     return ExecutionResult(ok=True, pr_url=pr_url, branch=proposal.branch)
 
 

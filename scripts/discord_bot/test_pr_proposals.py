@@ -478,6 +478,111 @@ class TestWorkingTreeCollisionCheck(unittest.TestCase):
         self.assertEqual(non_colliding, [])
 
 
+# ---------- execute_proposal post-push checkout (closes #126) ----------
+
+class TestExecuteProposalPostPushCheckout(unittest.TestCase):
+    """The daemon must check the working tree back out to the default branch
+    after a successful push so the auto-reload watcher resumes pulling. Issue
+    #126 was about documenting this; the implementation lives in this PR."""
+
+    def _make_proposal(self) -> PRProposal:
+        repo = repos_mod.REPOS["neural-bridge-blog"]
+        return PRProposal(
+            proposal_id="abc12345",
+            agent_id="luna",
+            channel_id=1,
+            repo=repo,
+            branch="luna/test-checkout",
+            files=[("src/about.astro", "x")],
+            commit_message="test commit",
+            pr_title="test PR",
+            pr_body="body",
+        )
+
+    def _mock_git_success(self, git_calls: list[list[str]]):
+        """Return a mock_git that succeeds for every step.
+
+        Subtlety: `git show-ref --verify --quiet refs/heads/<branch>` returns
+        exit 0 when the ref exists. The execute_proposal flow uses exit 0 as
+        the signal "branch already exists, refuse to clobber." So for a fresh
+        proposal we need show-ref to FAIL (branch doesn't exist locally yet),
+        which the wrapper reports as ok=False.
+        """
+        def mock_git(_cwd, args, timeout=60):
+            git_calls.append(args)
+            if args[0] == "status":
+                # clean working tree
+                return True, ""
+            if args[0] == "show-ref":
+                # branch does NOT exist locally yet
+                return False, "git_exit_1: no such ref"
+            return True, "ok"
+        return mock_git
+
+    def test_checkout_main_runs_after_successful_push(self):
+        """After gh pr create succeeds, the daemon calls `git checkout <default>`
+        so the auto-reload watcher resumes. Without this step, the working tree
+        stays on the feature branch and the watcher silently skips until Andy
+        checks out main manually."""
+        proposal = self._make_proposal()
+        git_calls: list[list[str]] = []
+        mock_git = self._mock_git_success(git_calls)
+
+        def mock_gh(args, timeout=90):
+            return True, "https://github.com/andy-herman/neural-bridge-blog/pull/999"
+
+        with mock.patch.object(pp, "_git", side_effect=mock_git), \
+             mock.patch.object(pp, "_gh", side_effect=mock_gh):
+            result = pp.execute_proposal(proposal)
+
+        self.assertTrue(result.ok, f"execute_proposal failed: {result.error}")
+        self.assertEqual(result.branch, "luna/test-checkout")
+
+        # The LAST git call must be a checkout to main (not to the feature branch).
+        last_git = git_calls[-1]
+        self.assertEqual(
+            last_git[:2], ["checkout", "main"],
+            f"expected last git call to be `checkout main`; got {last_git!r}",
+        )
+
+    def test_checkout_main_warns_but_returns_ok_when_checkout_fails(self):
+        """If the post-push checkout fails (rare; would require a tracked-file
+        collision that snuck past the dirty-tree check), we still return ok=True
+        because the PR itself was opened successfully. We just log a warning
+        so Andy knows the watcher will alert until he checks out main himself."""
+        proposal = self._make_proposal()
+
+        # Count `checkout main` calls; fail only on the SECOND (the post-push one).
+        # The first is the sync-default step in step 2 of execute_proposal.
+        checkout_main_count = [0]
+
+        def mock_git(_cwd, args, timeout=60):
+            if args[0] == "status":
+                return True, ""
+            if args[0] == "show-ref":
+                return False, "git_exit_1: no such ref"
+            if args[:2] == ["checkout", "main"]:
+                checkout_main_count[0] += 1
+                if checkout_main_count[0] == 2:
+                    return False, "git_exit_1: post-push checkout failed"
+            return True, "ok"
+
+        def mock_gh(args, timeout=90):
+            return True, "https://github.com/andy-herman/neural-bridge-blog/pull/999"
+
+        with mock.patch.object(pp, "_git", side_effect=mock_git), \
+             mock.patch.object(pp, "_gh", side_effect=mock_gh), \
+             mock.patch.object(pp._logger, "warning") as mock_warn:
+            result = pp.execute_proposal(proposal)
+
+        # PR was still opened, so ok=True
+        self.assertTrue(result.ok, f"execute_proposal returned False unexpectedly: {result.error}")
+        # And we logged a warning about the failed checkout
+        self.assertTrue(mock_warn.called, "expected a warning log when post-push checkout fails")
+        warn_msg = mock_warn.call_args[0][0] if mock_warn.call_args else ""
+        self.assertIn("post-push checkout", warn_msg)
+
+
 # ---------- repos.py basics ----------
 
 class TestRepos(unittest.TestCase):
