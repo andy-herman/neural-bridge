@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.echo-mindframe</string>
+
+    <!-- Daily MindFrame conversation ingestion: walks
+         $NB_MINDFRAME_LOGS_DIR (default ~/Development/mindframe/logs/conversations)
+         for YYYY-MM-DD/*.md files written by MindFrame's discord bot, parses
+         `## <ISO timestamp> - <author>` turn headers, filters to Andy-authored
+         turns via an allowlist, dedupes against
+         ~/Documents/Luna Master/Andy Profile/.mindframe-ingested.txt, and
+         appends new content to mindframe-conversations.md in the vault.
+
+         No-op clean exit (return 0) if the source dir doesn't exist on
+         this machine yet. MindFrame runs on Windows; until Andy sets up
+         cross-machine sync of the logs directory to this Mac, the cron
+         will run, log a notice, and exit. This is the right behavior so
+         the cron can be installed immediately rather than waiting for
+         the sync infrastructure.
+
+         Ordering rationale (LOAD-BEARING):
+           04:45 PT daily. Runs AFTER #143's 04:30 transcripts ingestion
+           and BEFORE the Sunday 05:00 echo-synthesis. Both corpus inputs
+           are fresh by the time the synthesis pass reads them.
+
+         Closes #144. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>/Users/andyherman/Development/neural-bridge/scripts/echo/ingest_mindframe.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 04:45 local time, daily. Between #143's transcripts (04:30) and
+         #142's Sunday synthesis (05:00). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>45</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-mindframe.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/echo-mindframe.stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- If you sync MindFrame logs to a non-default location, override
+             here. Default is ~/Development/mindframe/logs/conversations.
+             Example for a Dropbox-synced setup:
+             <key>NB_MINDFRAME_LOGS_DIR</key>
+             <string>/Users/andyherman/Dropbox/mindframe-logs/conversations</string>
+        -->
+    </dict>
+</dict>
+</plist>

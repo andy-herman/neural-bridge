@@ -11,6 +11,7 @@ AGENTS=(
     "com.andyherman.neural-bridge.summarize-weekly"
     "com.andyherman.neural-bridge.echo-synthesis"
     "com.andyherman.neural-bridge.echo-transcripts"
+    "com.andyherman.neural-bridge.echo-mindframe"
 )
 
 uninstall_agent() {
