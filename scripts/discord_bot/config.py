@@ -24,6 +24,10 @@ class BotConfig:
     guild_id: str
     default_repo: str
     agents: list[AgentConfig]
+    # Channel ID where Luna's DM handoffs are posted (handoff_to_squad action).
+    # None means the action is disabled. Set in agents.json as
+    # `squad_handoff_channel_id` (string of the numeric Discord snowflake).
+    squad_handoff_channel_id: int | None = None
 
     def orchestrator(self) -> AgentConfig:
         for a in self.agents:
@@ -77,9 +81,17 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
     if orchestrator_count != 1:
         raise ValueError(f"exactly one agent must have is_orchestrator: true (found {orchestrator_count})")
 
+    squad_handoff_channel_id: int | None = None
+    raw_squad = raw.get("squad_handoff_channel_id")
+    if raw_squad is not None:
+        if not isinstance(raw_squad, str) or not raw_squad.isdigit():
+            raise ValueError("squad_handoff_channel_id must be a numeric string (Discord snowflake)")
+        squad_handoff_channel_id = int(raw_squad)
+
     return BotConfig(
         authorized_user_ids=authorized,
         guild_id=guild_id,
         default_repo=default_repo,
         agents=agents,
+        squad_handoff_channel_id=squad_handoff_channel_id,
     )

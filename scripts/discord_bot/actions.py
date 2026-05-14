@@ -29,6 +29,7 @@ ALLOWED_ACTIONS = {
     "create_agent",
     "open_pr_with_changes",  # staged action — requires Andy's chat approval before execution
     "search_conversation_memory",  # semantic search across the agent's own + shared archive
+    "handoff_to_squad",  # luna-only: post a task summary from a DM into the squad channel
 }
 MAX_ACTIONS_PER_MENTION = 5
 MAX_BODY_CHARS = 8000  # generous; gh accepts large bodies but stay sane
@@ -169,6 +170,32 @@ def validate_action(action: Any) -> ValidationResult:
                 ok=False, error="open_pr_with_changes: files must be non-empty list",
                 action_type=action_type,
             )
+        return ValidationResult(ok=True, action_type=action_type)
+
+    if action_type == "handoff_to_squad":
+        # Shape-only. Caller-identity check (luna), DM-only origin check,
+        # mention-resolution to client_ids, and budget check all live in
+        # handlers.py where the discord message + config are in scope.
+        summary = action.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            return ValidationResult(ok=False, error="handoff_to_squad: summary must be non-empty string", action_type=action_type)
+        if len(summary) > MAX_BODY_CHARS:
+            return ValidationResult(ok=False, error=f"handoff_to_squad: summary exceeds {MAX_BODY_CHARS} chars", action_type=action_type)
+        mentions = action.get("mentions", [])
+        if not isinstance(mentions, list) or not mentions:
+            return ValidationResult(ok=False, error="handoff_to_squad: mentions must be non-empty list[str]", action_type=action_type)
+        if len(mentions) > 3:
+            return ValidationResult(ok=False, error="handoff_to_squad: mentions capped at 3 agents", action_type=action_type)
+        if not all(isinstance(m, str) and m.strip() for m in mentions):
+            return ValidationResult(ok=False, error="handoff_to_squad: each mention must be non-empty string", action_type=action_type)
+        if len(set(mentions)) != len(mentions):
+            return ValidationResult(ok=False, error="handoff_to_squad: mentions must be unique", action_type=action_type)
+        excerpt = action.get("dm_excerpt")
+        if excerpt is not None:
+            if not isinstance(excerpt, str):
+                return ValidationResult(ok=False, error="handoff_to_squad: dm_excerpt must be string if present", action_type=action_type)
+            if len(excerpt) > 2000:
+                return ValidationResult(ok=False, error="handoff_to_squad: dm_excerpt exceeds 2000 chars", action_type=action_type)
         return ValidationResult(ok=True, action_type=action_type)
 
     if action_type == "search_conversation_memory":

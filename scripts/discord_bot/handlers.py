@@ -67,6 +67,13 @@ from .squad_discuss import (
     truncate_turn,
     validate_framing_output,
 )
+from .handoff_to_squad import (
+    build_dm_confirmation,
+    build_handoff_post,
+    resolve_mentions,
+)
+from .handoff_budget import BUDGET as HANDOFF_BUDGET
+from .post_as import post_as
 from .summary import (
     PROMPT_PATH as SUMMARY_PROMPT_PATH,
     build_summary_prompt,
@@ -461,8 +468,11 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             await message.channel.send(f"_(Action batch rejected: `{err}`. No actions taken.)_")
             log(f"MENTION action validation FAILED: agent={agent_id} error={err}")
         else:
+            import discord as _discord_for_dm_check
+            is_dm = isinstance(message.channel, _discord_for_dm_check.DMChannel)
             results, pr_previews = await _execute_action_batch(
                 valid, config, agent_id=agent_id, channel_id=int(message.channel.id),
+                is_dm=is_dm,
             )
             summary_lines = [f"**Actions taken by `{agent_id}`:**"]
             for line in results:
@@ -496,6 +506,7 @@ async def _execute_action_batch(
     *,
     agent_id: str,
     channel_id: int,
+    is_dm: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Execute each validated action via gh wrappers.
 
@@ -630,6 +641,56 @@ async def _execute_action_batch(
                     results.append(line)
                 else:
                     results.append(f"❌ create_agent `{action.get('agent_id')}`: `{r.error}`")
+            elif atype == "handoff_to_squad":
+                # Caller identity check: luna only.
+                if agent_id != "luna":
+                    results.append(f"❌ handoff_to_squad: only `luna` may emit this action (got `{agent_id}`)")
+                    continue
+                # DM-only origin.
+                if not is_dm:
+                    results.append("❌ handoff_to_squad: must originate in a DM (you're already in a channel; just reply there)")
+                    continue
+                # Squad channel must be configured.
+                target_channel_id = config.squad_handoff_channel_id
+                if target_channel_id is None:
+                    results.append("❌ handoff_to_squad: squad_handoff_channel_id is not configured in agents.json")
+                    continue
+                # Resolve mentions to client_ids.
+                agents_by_id = {a.id: a.client_id for a in config.agents}
+                resolved = resolve_mentions(action["mentions"], agents_by_id)
+                if not resolved.ok:
+                    results.append(f"❌ handoff_to_squad: {resolved.error}")
+                    continue
+                # Per-DM-channel rate limit (reuses handoff_budget singleton).
+                if not HANDOFF_BUDGET.consume(str(channel_id)):
+                    results.append(
+                        f"❌ handoff_to_squad: handoff budget exhausted for this DM "
+                        f"(max {HANDOFF_BUDGET.max_turns} per session)"
+                    )
+                    continue
+                # Compose and post via the raw REST primitive (works for channels,
+                # not just threads, unlike client_registry.post_as_agent).
+                body = build_handoff_post(
+                    summary=action["summary"],
+                    mention_client_ids=resolved.client_ids,
+                    dm_excerpt=action.get("dm_excerpt"),
+                )
+                import asyncio as _asyncio
+                loop = _asyncio.get_running_loop()
+                ok_post, err_post = await loop.run_in_executor(
+                    None,
+                    lambda: post_as(agent_id="luna", channel_id=target_channel_id, content=body),
+                )
+                if ok_post:
+                    confirmation = build_dm_confirmation(
+                        mentions=action["mentions"],
+                        squad_channel_id=target_channel_id,
+                    )
+                    results.append(confirmation)
+                    log(f"HANDOFF_TO_SQUAD posted: agent=luna mentions={action['mentions']} channel={target_channel_id}")
+                else:
+                    results.append(f"❌ handoff_to_squad: post failed (`{err_post}`)")
+                    log(f"HANDOFF_TO_SQUAD post FAILED: agent=luna error={err_post}")
             else:
                 # Should be unreachable due to validate_action_batch().
                 results.append(f"❌ unknown action type: `{atype}`")

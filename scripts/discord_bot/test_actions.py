@@ -111,6 +111,70 @@ class TestValidateAction(unittest.TestCase):
         r = validate_action("not a dict")
         self.assertFalse(r.ok)
 
+    # ---------- handoff_to_squad ----------
+
+    def test_handoff_to_squad_valid(self):
+        r = validate_action({
+            "action": "handoff_to_squad",
+            "summary": "Loop in @professor and @editor on lecture 13 review questions.",
+            "mentions": ["professor", "docs-editor"],
+        })
+        self.assertTrue(r.ok, r.error)
+
+    def test_handoff_to_squad_valid_with_excerpt(self):
+        r = validate_action({
+            "action": "handoff_to_squad",
+            "summary": "x",
+            "mentions": ["professor"],
+            "dm_excerpt": "Andy said: please pull lecture 13 questions.",
+        })
+        self.assertTrue(r.ok, r.error)
+
+    def test_handoff_to_squad_missing_summary(self):
+        r = validate_action({"action": "handoff_to_squad", "mentions": ["professor"]})
+        self.assertFalse(r.ok)
+        self.assertIn("summary", r.error)
+
+    def test_handoff_to_squad_empty_summary(self):
+        r = validate_action({"action": "handoff_to_squad", "summary": "  ", "mentions": ["professor"]})
+        self.assertFalse(r.ok)
+
+    def test_handoff_to_squad_empty_mentions(self):
+        r = validate_action({"action": "handoff_to_squad", "summary": "x", "mentions": []})
+        self.assertFalse(r.ok)
+        self.assertIn("mentions", r.error)
+
+    def test_handoff_to_squad_too_many_mentions(self):
+        r = validate_action({
+            "action": "handoff_to_squad", "summary": "x",
+            "mentions": ["a", "b", "c", "d"],
+        })
+        self.assertFalse(r.ok)
+        self.assertIn("capped", r.error)
+
+    def test_handoff_to_squad_duplicate_mentions(self):
+        r = validate_action({
+            "action": "handoff_to_squad", "summary": "x",
+            "mentions": ["professor", "professor"],
+        })
+        self.assertFalse(r.ok)
+        self.assertIn("unique", r.error)
+
+    def test_handoff_to_squad_excerpt_too_long(self):
+        r = validate_action({
+            "action": "handoff_to_squad", "summary": "x",
+            "mentions": ["professor"], "dm_excerpt": "y" * 2001,
+        })
+        self.assertFalse(r.ok)
+        self.assertIn("dm_excerpt", r.error)
+
+    def test_handoff_to_squad_wrong_mentions_type(self):
+        r = validate_action({
+            "action": "handoff_to_squad", "summary": "x",
+            "mentions": "professor",
+        })
+        self.assertFalse(r.ok)
+
 
 class TestValidateBatch(unittest.TestCase):
     def test_empty_batch(self):
