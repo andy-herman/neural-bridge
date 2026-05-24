@@ -17,6 +17,7 @@ import json
 
 from .auth import REFUSAL_MESSAGE, is_authorized
 from .claude_invoke import call_claude
+from . import honcho_client
 from .client_registry import post_as_agent
 from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
@@ -59,13 +60,30 @@ from .mention import (
     truncate_response,
 )
 from .squad_discuss import (
+    ActionItem,
     FRAMING_PROMPT_PATH,
+    LUNA_BRIEF_PROMPT_PATH,
+    MAX_ROUNDS,
+    REACT_PROMPT_PATH,
+    REPORT_PROMPT_PATH,
+    ROUND_DECISION_PROMPT_PATH,
     TURN_PROMPT_PATH,
     build_framing_prompt,
+    build_issue_body_for_action,
+    build_luna_brief_prompt,
+    build_react_prompt,
+    build_report_prompt,
+    build_round_decision_prompt,
     build_turn_prompt,
+    obsidian_link_for,
+    parse_action_items,
+    report_slug,
+    squad_report_path,
     truncate_framing,
     truncate_turn,
     validate_framing_output,
+    validate_round_decision_output,
+    write_squad_report,
 )
 from .handoff_to_squad import (
     build_dm_confirmation,
@@ -437,6 +455,21 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         # No prose response, just files — send them on their own.
         files = [discord.File(str(p)) for p in valid_files]
         await message.channel.send(files=files)
+
+    # Submit this turn to shared Honcho memory so the deriver builds the
+    # andyherman peer card across all agents (and shares it with Yor on the
+    # Hermes side). No-ops if Honcho is unreachable. Uses the session_store
+    # UUID for stable session grouping per (channel × agent).
+    if response:
+        try:
+            honcho_client.submit_turn(
+                agent_id=agent_id,
+                user_message=message.content or "",
+                agent_response=response,
+                session_id=session_rec.session_id,
+            )
+        except Exception:
+            pass  # honcho_client already swallows; this is paranoia
 
     # Attachment validation feedback (rejected paths + over-cap).
     if parsed_attach.parse_error:
@@ -969,42 +1002,218 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
         )
         return
 
-    # 3. Senior-pm posts framing as itself (this client).
-    await thread.send(f"**Squad discussion** · topic: _{topic[:200]}_\n\n{framing}")
+    # 3. Senior-pm posts framing as itself (this client). Split header + framing
+    # so the framing body can be chunked independently when it's long.
+    await thread.send(f"**Squad discussion** · topic: _{topic[:200]}_")
+    framing_chunks = chunk_for_discord(framing)
+    for i, f_chunk in enumerate(framing_chunks):
+        if len(framing_chunks) > 1:
+            f_chunk = f"_(part {i + 1}/{len(framing_chunks)})_\n{f_chunk}"
+        await thread.send(f_chunk)
 
-    # 4. Each selected specialist posts a turn AS itself via the registry.
+    # 4. Multi-round discussion loop. Round 1 uses the opening turn prompt;
+    # rounds 2+ use the react prompt with prior turns + senior-pm's per-round
+    # guidance. After each round, senior-pm decides continue vs close, capped
+    # at MAX_ROUNDS.
     turn_template = TURN_PROMPT_PATH.read_text(encoding="utf-8")
-    turn_outcomes: list[str] = []
-    for agent_id in selected:
-        turn_prompt = build_turn_prompt(turn_template, agent_id=agent_id, topic=topic, framing=framing)
-        ok, stdout, err = await call_claude(turn_prompt)
-        if not ok:
-            log(f"SQUAD_DISCUSS turn FAILED ({agent_id}): {err}")
-            turn_outcomes.append(f"{agent_id}: failed ({err})")
-            continue
-        turn_text = truncate_turn(stdout)
-        ok_post, err_post = await post_as_agent(agent_id, thread_id=thread.id, content=turn_text)
-        if ok_post:
-            turn_outcomes.append(f"{agent_id}: posted")
-            log(f"SQUAD_DISCUSS turn posted ({agent_id})")
-        else:
-            log(f"SQUAD_DISCUSS turn post FAILED ({agent_id}): {err_post}")
-            # Fall back to senior-pm posting it on their behalf
-            await thread.send(f"_(could not post as `{agent_id}` ({err_post}); turn below)_\n\n{turn_text}")
-            turn_outcomes.append(f"{agent_id}: fallback")
+    react_template = REACT_PROMPT_PATH.read_text(encoding="utf-8") if REACT_PROMPT_PATH.exists() else None
+    decision_template = ROUND_DECISION_PROMPT_PATH.read_text(encoding="utf-8") if ROUND_DECISION_PROMPT_PATH.exists() else None
 
-    # 5. Senior-pm closes the round.
-    await thread.send(
-        "_Round 1 complete. Reply in this thread to continue, or use `/triage <issue#>` "
-        "or `/pm-task` to convert this discussion into action._"
-    )
+    rounds_history: list[list[tuple[str, str]]] = []  # each round: [(agent_id, full_turn_text)]
+    current_round_prompt = ""  # set by senior-pm after round 1+
+
+    for round_n in range(1, MAX_ROUNDS + 1):
+        await thread.send(f"_Round {round_n} starting._")
+        round_turns: list[tuple[str, str]] = []
+
+        for agent_id in selected:
+            if round_n == 1:
+                turn_prompt = build_turn_prompt(turn_template, agent_id=agent_id, topic=topic, framing=framing)
+            else:
+                if react_template is None:
+                    # Fall back to opening prompt if react template missing.
+                    turn_prompt = build_turn_prompt(turn_template, agent_id=agent_id, topic=topic, framing=framing)
+                else:
+                    turn_prompt = build_react_prompt(
+                        react_template,
+                        agent_id=agent_id, topic=topic, framing=framing,
+                        round_n=round_n, prior_rounds=rounds_history,
+                        round_prompt=current_round_prompt,
+                    )
+            ok, stdout, err = await call_claude(turn_prompt)
+            if not ok:
+                log(f"SQUAD_DISCUSS turn FAILED (round={round_n} agent={agent_id}): {err}")
+                continue
+            turn_text = truncate_turn(stdout)
+            round_turns.append((agent_id, turn_text))
+            # Post chunked.
+            turn_chunks = chunk_for_discord(turn_text)
+            chunk_ok = True
+            for ci, turn_chunk in enumerate(turn_chunks):
+                if len(turn_chunks) > 1:
+                    turn_chunk = f"_(part {ci + 1}/{len(turn_chunks)})_\n{turn_chunk}"
+                ok_post, err_post = await post_as_agent(agent_id, thread_id=thread.id, content=turn_chunk)
+                if not ok_post:
+                    chunk_ok = False
+                    log(f"SQUAD_DISCUSS turn post FAILED (round={round_n} agent={agent_id}): {err_post}")
+                    break
+            if not chunk_ok:
+                await thread.send(f"_(could not post as `{agent_id}`; turn below)_\n\n{turn_text[:1900]}")
+
+        rounds_history.append(round_turns)
+
+        # Round-decision: senior-pm decides whether to continue.
+        if round_n >= MAX_ROUNDS:
+            await thread.send(f"_Round cap reached ({MAX_ROUNDS}). Closing discussion._")
+            break
+        if decision_template is None:
+            log(f"SQUAD_DISCUSS round_decision SKIPPED (template missing); closing after round {round_n}")
+            break
+        if not round_turns:
+            await thread.send(f"_No turns posted in round {round_n}. Closing._")
+            break
+
+        decision_prompt = build_round_decision_prompt(
+            decision_template, topic=topic, framing=framing,
+            round_n=round_n, turns=round_turns,
+        )
+        ok, stdout, err = await call_claude(decision_prompt)
+        if not ok:
+            log(f"SQUAD_DISCUSS round_decision FAILED (round={round_n}): {err}; closing")
+            await thread.send(f"_Round decision failed ({err}); closing discussion._")
+            break
+        try:
+            decision_data = json.loads(strip_code_fences(stdout))
+        except json.JSONDecodeError as exc:
+            log(f"SQUAD_DISCUSS round_decision parse FAILED (round={round_n}): {exc.msg}; closing")
+            await thread.send("_Round decision JSON was malformed; closing discussion._")
+            break
+        ok_v, schema_err = validate_round_decision_output(decision_data)
+        if not ok_v:
+            log(f"SQUAD_DISCUSS round_decision schema FAILED (round={round_n}): {schema_err}; closing")
+            await thread.send(f"_Round decision schema check failed ({schema_err}); closing._")
+            break
+
+        if not decision_data["continue"]:
+            reason = decision_data.get("reason", "no reason given")
+            await thread.send(f"_Closing after round {round_n}: {reason}_")
+            break
+
+        current_round_prompt = decision_data["next_round_prompt"]
+        # Post the next-round prompt so it shows in the thread.
+        await thread.send(
+            f"_Continuing to round {round_n + 1}._\n\n"
+            f"**Reason:** {decision_data.get('reason', '')}\n\n"
+            f"**Prompt for next round:** {current_round_prompt}"
+        )
+
+    # 5. Senior-pm writes the structured report.
+    report_md = ""
+    report_vault_path: Path | None = None
+    if not REPORT_PROMPT_PATH.exists():
+        log("SQUAD_DISCUSS report SKIPPED (template missing)")
+        await thread.send("_Discussion closed. (Report writer prompt missing; skipping report.)_")
+    else:
+        report_template = REPORT_PROMPT_PATH.read_text(encoding="utf-8")
+        import datetime
+        today = datetime.date.today().isoformat()
+        report_prompt = build_report_prompt(
+            report_template, topic=topic, framing=framing,
+            rounds=rounds_history, thread_url=thread.jump_url, date=today,
+        )
+        ok, stdout, err = await call_claude(report_prompt)
+        if not ok:
+            log(f"SQUAD_DISCUSS report FAILED: {err}")
+            await thread.send(f"_Report generation failed ({err}). Discussion is in this thread._")
+        else:
+            report_md = stdout.strip()
+            slug = report_slug(topic)
+            try:
+                report_vault_path = write_squad_report(report_md, date=today, slug=slug)
+                log(f"SQUAD_DISCUSS report written: {report_vault_path}")
+                await thread.send(
+                    f"_Report written to vault:_ `{report_vault_path.name}` "
+                    f"([open in Obsidian]({obsidian_link_for(report_vault_path)}))"
+                )
+            except Exception as exc:
+                log(f"SQUAD_DISCUSS report write FAILED: {type(exc).__name__}: {exc}")
+                await thread.send(f"_Report write failed: {exc}_")
+
+    # 6. Auto-file GitHub issues for action items.
+    filed_issues: list[tuple[ActionItem, int, str]] = []  # (item, issue_number, issue_url)
+    if report_md and report_vault_path is not None:
+        action_items = parse_action_items(report_md)
+        log(f"SQUAD_DISCUSS parsed {len(action_items)} action item(s) from report")
+        for item in action_items:
+            try:
+                r = await create_issue(
+                    repo=config.default_repo,
+                    title=item.issue_title(),
+                    body=build_issue_body_for_action(
+                        item, topic=topic,
+                        report_vault_path=report_vault_path,
+                        thread_url=thread.jump_url,
+                    ),
+                    labels=["squad-discuss", "agent-driven", f"owner:{item.owner}"],
+                )
+                if r.ok:
+                    filed_issues.append((item, r.issue_number, r.issue_url))
+                    log(f"SQUAD_DISCUSS issue filed #{r.issue_number} ({item.owner}: {item.action[:40]!r})")
+                else:
+                    log(f"SQUAD_DISCUSS issue file FAILED for action ({item.owner}: {item.action[:40]!r}): {r.error}")
+            except Exception as exc:
+                log(f"SQUAD_DISCUSS issue file EXCEPTION ({item.owner}): {type(exc).__name__}: {exc}")
+        if filed_issues:
+            lines = ["_Action items filed:_"]
+            for item, num, url in filed_issues:
+                lines.append(f"- #{num} (@{item.owner}): {item.issue_title()} ({url})")
+            await thread.send("\n".join(lines)[:1900])
+
+    # 7. Luna brief to Andy via DM. Soft-failure: brief failure does NOT
+    # affect the report or the issues; both already shipped.
+    if report_md and LUNA_BRIEF_PROMPT_PATH.exists():
+        try:
+            brief_template = LUNA_BRIEF_PROMPT_PATH.read_text(encoding="utf-8")
+            issue_lines = "\n".join(
+                f"- #{num} (@{item.owner}): {item.issue_title()} — {url}"
+                for item, num, url in filed_issues
+            ) if filed_issues else "_none_"
+            brief_prompt = build_luna_brief_prompt(
+                brief_template, topic=topic, report=report_md,
+                vault_path=str(report_vault_path) if report_vault_path else "(not written)",
+                issue_lines=issue_lines, thread_url=thread.jump_url,
+            )
+            ok, stdout, err = await call_claude(brief_prompt)
+            if not ok:
+                log(f"SQUAD_DISCUSS luna brief FAILED: {err}")
+            else:
+                brief_text = stdout.strip()
+                # Send as DM from Luna's bot client to Andy.
+                luna_client = CLIENT_REGISTRY.get("luna")
+                if luna_client is None:
+                    log("SQUAD_DISCUSS luna brief SKIPPED (luna client not registered)")
+                else:
+                    for andy_user_id in config.authorized_user_ids:
+                        try:
+                            andy_user = await luna_client.fetch_user(int(andy_user_id))
+                            dm_channel = await andy_user.create_dm()
+                            for chunk in chunk_for_discord(brief_text):
+                                await dm_channel.send(chunk)
+                            log(f"SQUAD_DISCUSS luna brief DM sent to user {andy_user_id}")
+                            break  # one Andy is enough
+                        except Exception as exc:
+                            log(f"SQUAD_DISCUSS luna brief DM FAILED for {andy_user_id}: {type(exc).__name__}: {exc}")
+        except Exception as exc:
+            log(f"SQUAD_DISCUSS luna brief EXCEPTION: {type(exc).__name__}: {exc}")
 
     await interaction.followup.send(
-        f"Discussion opened in <#{thread.id}> with `{', '.join(selected)}`. Outcomes: "
-        + "; ".join(turn_outcomes),
+        f"Discussion complete in <#{thread.id}>. Rounds: {len(rounds_history)}. "
+        f"Report: {'yes' if report_md else 'no'}. "
+        f"Issues filed: {len(filed_issues)}.",
         ephemeral=True,
     )
-    log(f"SQUAD_DISCUSS done: thread={thread.id} outcomes={turn_outcomes}")
+    log(f"SQUAD_DISCUSS done: thread={thread.id} rounds={len(rounds_history)} "
+        f"issues_filed={len(filed_issues)}")
 
 
 async def handle_triage(interaction: discord.Interaction, config: BotConfig, issue_number: int) -> None:
