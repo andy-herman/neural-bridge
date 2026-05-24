@@ -21,8 +21,8 @@ VALID_SPECIALISTS = {
     "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
 }
 
-MAX_TURN_CHARS = 1500
-MAX_FRAMING_CHARS = 1500
+MAX_TURN_CHARS = 50000
+MAX_FRAMING_CHARS = 20000
 
 
 def strip_code_fences(text: str) -> str:
