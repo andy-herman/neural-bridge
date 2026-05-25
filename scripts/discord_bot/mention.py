@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .claude_invoke import sanitize_untrusted_text
+from . import honcho_client
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 MENTION_PROMPT_PATH = PROMPTS_DIR / "mention_v1.md"
@@ -504,6 +505,18 @@ def build_mention_prompt(
     lessons_prefix = _lessons_block(agent_id)
     if lessons_prefix:
         rendered = lessons_prefix + rendered
+
+    # Every agent: prepend the Honcho peer card — LLM-extracted persistent
+    # observations about Andy, shared across all agents in this workspace and
+    # with Yor (the Hermes-side thinking-partner agent). Each agent contributes
+    # observations from its own perspective via directional mode; the peer-card
+    # facts compound. Layered ABOVE lessons so it reads as the foundational
+    # "who is this person" context before the more recent reflective digest.
+    # No-ops if Honcho is unreachable (see honcho_client._enabled / _get_client).
+    honcho_prefix = honcho_client.get_peer_card_context(agent_id)
+    if honcho_prefix:
+        rendered = honcho_prefix + rendered
+
     return rendered
 
 
