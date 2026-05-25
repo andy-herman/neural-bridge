@@ -44,6 +44,10 @@ MAX_RESPONSE_CHARS_PER_AGENT: dict[str, int] = {
     "content": 5000,
     "social": 4000,
     "docs-editor": 5000,
+    # Loid: 1:1 Telegram + DM conversations. Coach responses are typically
+    # short (Loid listens more than he speaks), but session summaries and
+    # handoff drafts can run long. Match Luna's ceiling.
+    "loid": 11400,
 }
 
 
@@ -87,6 +91,13 @@ LUNA_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Luna")
 # regulatory research, etc. The Luna/ subpath inside is where she writes
 # her own notes (charter forbids writing anywhere else under the vault).
 OBSIDIAN_VAULT_ROOT = str(Path.home() / "Documents" / "Luna Master")
+
+# Loid (career strategist) needs read/write on the Synapse SQLite DB at
+# ~/Development/Synapse/data/ (he reads via the synapse-journal CLI; he writes
+# journal entries when Andy explicitly asks). He also needs his own vault
+# folder at ~/Documents/Luna Master/Loid/ for Notes/Sessions/Ideas/Handoffs.
+SYNAPSE_DATA_DIR = str(Path.home() / "Development" / "Synapse" / "data")
+LOID_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Loid")
 
 ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # Professor: read the corpus + the actual lab repo for end-to-end context.
@@ -134,6 +145,14 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     "ux-designer": [
         str(Path.home() / "Development" / "neural-bridge-blog" / "src"),
         str(Path.home() / "Development" / "neural-bridge-blog" / "public"),
+        OBSIDIAN_VAULT_ROOT,
+    ],
+    # Loid: his vault folder (write) + Synapse data dir (read/write via the
+    # synapse-journal CLI invoked through Bash). Echo's Andy Profile/ falls
+    # under OBSIDIAN_VAULT_ROOT so he can read it without explicit grant.
+    "loid": [
+        LOID_VAULT,
+        SYNAPSE_DATA_DIR,
         OBSIDIAN_VAULT_ROOT,
     ],
 }
@@ -412,6 +431,12 @@ MENTION_ALLOWED_TOOLS: dict[str, str] = {
     # (typography, palette examples, component patterns). Write/Edit for
     # CSS, Astro template fragments, and design rationale notes.
     "ux-designer":         "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
+    # Loid: career strategist. Read/Write/Edit on his vault folder + Glob/Grep
+    # for navigation. Bash is required for the `synapse-journal` CLI (reads
+    # Synapse SQLite, writes journal entries on Andy's explicit ask). No web
+    # tools (he is a conversational strategist, not a researcher; market /
+    # competitor research goes to @research).
+    "loid":                "Read,Glob,Grep,Write,Edit,Bash",
 }
 
 
