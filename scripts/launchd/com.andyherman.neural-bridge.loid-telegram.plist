@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.loid-telegram</string>
+
+    <!-- caffeinate wraps the daemon to prevent idle sleep, same pattern as
+         the Discord bot and Luna's telegram bridge. Two processes
+         (caffeinate + python) is the healthy state. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>-i</string>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.telegram_bot.loid_bridge</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/loid-telegram.stderr.log</string>
+
+    <!-- USER is required by keychain.py (security CLI keys on it).
+         PATH includes Homebrew bin so claude resolves.
+         LOID_TELEGRAM_ALLOWED_USERS is Andy's Telegram user ID (reused from
+         Luna's plist — same human, same allowlist).
+         LOID_WHISPER_MODEL / LOID_WHISPER_COMPUTE are optional overrides
+         (defaults: base.en / int8). -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>LOID_TELEGRAM_ALLOWED_USERS</key>
+        <string>7956689602</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
