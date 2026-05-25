@@ -34,6 +34,11 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from fleet_heartbeat import set_state as fleet_set_state, log_event as fleet_log_event
+
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .config import AgentConfig, BotConfig, load_config
 from .handlers import (
@@ -148,6 +153,7 @@ class AgentClient(discord.Client):
 
     async def on_ready(self) -> None:
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
+        fleet_log_event(f"{self.agent.id} online")
 
     async def on_message(self, message: discord.Message) -> None:
         # Never respond to messages from ourselves (the bot itself).
@@ -246,6 +252,16 @@ async def run() -> None:
         log("ERROR: no agents have keychain tokens. Cannot start daemon.")
         return
     log(f"client registry: {len(CLIENT_REGISTRY)} agents registered")
+
+    fleet_set_state(
+        metrics={
+            "agents_registered": len(CLIENT_REGISTRY),
+            "specialists": len(config.agents),
+            "guild_id": config.guild_id,
+        },
+        headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
+    )
+    fleet_log_event(f"daemon started with {len(CLIENT_REGISTRY)} agents")
 
     log(f"starting {len(clients_and_tokens)} agents...")
     await asyncio.gather(

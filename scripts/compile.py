@@ -64,8 +64,10 @@ CONCEPT_WRITER_PROMPT = SCRIPTS_DIR / "prompts" / "concept_writer_v1.md"
 FLUSH_SCRIPT = HOOKS_DIR / "flush.py"
 
 sys.path.insert(0, str(HOOKS_DIR))
+sys.path.insert(0, str(SCRIPTS_DIR))
 import discord_post  # noqa: E402
 import schema  # noqa: E402
+from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 COMPILER_VERSION = "1.2"  # bumped: Phase B expansion (connections, --agent, --flush)
@@ -992,6 +994,12 @@ def main() -> int:
     run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
     run_log_path.write_text("\n".join(run_log_lines), encoding="utf-8")
     log_line(args.verbose, f"run log: {run_log_path.relative_to(REPO_ROOT)}")
+
+    mode = "dry-run" if args.dry_run else "live"
+    fleet_log_event(
+        f"compile ({mode}): PROMOTE={counts[PROMOTE]} QUARANTINE={counts[QUARANTINE]} "
+        f"REJECT={counts[REJECT]} errors={counts['errors']}"
+    )
 
     return 0
 
