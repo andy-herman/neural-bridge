@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.honcho-tunnel</string>
+
+    <!-- cloudflared runs the tunnel persistently in foreground mode.
+         Config lives at ~/.cloudflared/config.yml and points the
+         honcho.neural-bridge.dev hostname at http://localhost:8001
+         where the self-hosted Honcho API listens.
+
+         Install via scripts/cloudflared/setup-honcho-tunnel.sh which
+         creates the tunnel, writes the config, routes DNS, and
+         bootstraps this launchd job. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/cloudflared</string>
+        <string>tunnel</string>
+        <string>--config</string>
+        <string>/Users/andyherman/.cloudflared/config.yml</string>
+        <string>run</string>
+    </array>
+
+    <!-- Start at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, but don't tight-loop. cloudflared handles its
+         own reconnect-on-network-blip internally; this only fires if the
+         process actually exits. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/honcho-tunnel.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/honcho-tunnel.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
