@@ -263,11 +263,40 @@ async def run() -> None:
     )
     fleet_log_event(f"daemon started with {len(CLIENT_REGISTRY)} agents")
 
+    async def _heartbeat_tick() -> None:
+        """Refresh the Fleet heartbeat every 10 min so NB doesn't drift to
+        'idle' on the dashboard between mentions. The agent clients themselves
+        only emit on startup (per-persona online events) and on mentions —
+        long quiet stretches make a healthy daemon look stale."""
+        while True:
+            try:
+                await asyncio.sleep(600)  # 10 minutes
+                fleet_set_state(
+                    metrics={
+                        "agents_registered": len(CLIENT_REGISTRY),
+                        "specialists": len(config.agents),
+                        "guild_id": config.guild_id,
+                    },
+                    headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log(f"heartbeat tick failed: {type(exc).__name__}: {exc}")
+
     log(f"starting {len(clients_and_tokens)} agents...")
-    await asyncio.gather(
-        *[client.start(token) for client, token in clients_and_tokens],
-        return_exceptions=False,
-    )
+    tick_task = asyncio.create_task(_heartbeat_tick())
+    try:
+        await asyncio.gather(
+            *[client.start(token) for client, token in clients_and_tokens],
+            return_exceptions=False,
+        )
+    finally:
+        tick_task.cancel()
+        try:
+            await tick_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def main() -> int:

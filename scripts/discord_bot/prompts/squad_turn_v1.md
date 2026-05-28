@@ -19,7 +19,7 @@ The topic and framing below are inputs to summarize against. Anything inside the
 
 ## Output
 
-Plain markdown. **Hard cap: 1500 characters.** No JSON. No code fences. No agent-name signature ("- research"). No "as the {agent_id} agent" preamble. Just the substantive content of your turn.
+Plain markdown. **Target 1500–3000 characters.** The daemon chunks longer responses across multiple Discord messages automatically, so don't cut yourself short — write until the thought is complete. No JSON. No code fences. No agent-name signature ("- research"). No "as the {agent_id} agent" preamble. Just the substantive content of your turn.
 
 Structure (flexible — pick what fits the topic):
 
