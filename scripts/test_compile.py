@@ -186,6 +186,14 @@ class TestStripCodeFences(unittest.TestCase):
 
 
 class TestCallFilingGate(unittest.TestCase):
+    def setUp(self):
+        # Keep these hermetic regardless of the host's NB_FALLBACK_* env: the
+        # subprocess-failure cases must never make a real fallback HTTP call.
+        p = patch("compile.model_invoke.fallback_text",
+                  return_value=(False, "", "no_fallback_configured"))
+        self.addCleanup(p.stop)
+        p.start()
+
     def _mock_run(self, stdout_text: str, returncode: int = 0):
         class _Result:
             stdout = stdout_text
@@ -404,6 +412,12 @@ def _writer_response(body: str):
 
 
 class TestConceptWriter(unittest.TestCase):
+    def setUp(self):
+        p = patch("compile.model_invoke.fallback_text",
+                  return_value=(False, "", "no_fallback_configured"))
+        self.addCleanup(p.stop)
+        p.start()
+
     def test_call_returns_body_and_strips_trailing_whitespace(self):
         with patch("compile.subprocess.run",
                    side_effect=lambda *a, **k: _writer_response("Some body text\n\n")):
@@ -1141,6 +1155,62 @@ class TestMultiVoteOutputProvenance(unittest.TestCase):
         self.assertIn("## Gate votes", text)
         self.assertIn("gate_votes: [PROMOTE, PROMOTE, REJECT]", text)
         self.assertIn("Pass 3 (REJECT)", text)
+
+
+# ============================================================================
+# Provider-fallback shim (Fugu Layer 2): claude -p with an OpenAI-compatible fallback
+# ============================================================================
+
+
+class TestFilingGateFallback(unittest.TestCase):
+    def _claude_fail(self, *a, **k):
+        class _R:
+            stdout = ""
+            stderr = "boom"
+            returncode = 1
+        return _R()
+
+    def test_fallback_used_when_claude_fails(self):
+        promote = (True, json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []}), "")
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text", return_value=promote):
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+
+    def test_error_when_claude_and_fallback_both_fail(self):
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text",
+                   return_value=(False, "", "no_fallback_configured")):
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertFalse(ok)
+        self.assertIn("exit_1", err)
+        self.assertIn("fallback:no_fallback_configured", err)
+
+    def test_concept_writer_uses_fallback(self):
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text",
+                   return_value=(True, "Fallback article body.\n", "")):
+            ok, body, err = cmp.call_concept_writer("p", "m", 30)
+        self.assertTrue(ok, err)
+        self.assertIn("Fallback article body.", body)
+
+    def test_bad_response_does_not_trigger_fallback(self):
+        # A returned-but-malformed response is a parse error, not a provider
+        # failure, so the fallback must NOT be consulted.
+        def claude_ok_badjson(*a, **k):
+            class _R:
+                stdout = "not json"
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=claude_ok_badjson), \
+             patch("compile.model_invoke.fallback_text") as fb_mock:
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertFalse(ok)
+        self.assertTrue(err.startswith("json_decode"))
+        fb_mock.assert_not_called()
 
 
 if __name__ == "__main__":

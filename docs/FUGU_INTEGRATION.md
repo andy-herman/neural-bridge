@@ -114,7 +114,9 @@ Do not put Fugu the product at the center of the substrate. It is a proprietary 
 
 ## Build status
 
-2026-06-24: Recommended step 1 (the multi-vote gate) is implemented. `scripts/compile.py` now runs the filing gate as N independent passes (`--votes`, default 3) under a conservative majority (`call_filing_gate_voted`, `aggregate_verdicts`), records the per-pass tally in concept frontmatter (`gate_votes:`) and the quarantine body, and `scripts/eval_filing_gate.py` is a calibration harness over a labeled case set (`scripts/eval/filing_gate_cases.jsonl`). Still open: a live calibration run, the per-agent trust signal, the NLI write firewall, provider fallback (Layer 2), and the Conductor router (Layer 1).
+2026-06-24: Recommended step 1 (the multi-vote gate) is implemented. `scripts/compile.py` now runs the filing gate as N independent passes (`--votes`, default 3) under a conservative majority (`call_filing_gate_voted`, `aggregate_verdicts`), records the per-pass tally in concept frontmatter (`gate_votes:`) and the quarantine body, and `scripts/eval_filing_gate.py` is a calibration harness over a labeled case set (`scripts/eval/filing_gate_cases.jsonl`).
+
+2026-06-24 (later): Layer 2 (provider fallback) first cut is implemented. `scripts/model_invoke.py` adds an OpenAI-compatible fallback provider (stdlib `urllib`, env-gated by `NB_FALLBACK_BASE_URL` / `NB_FALLBACK_API_KEY` / `NB_FALLBACK_MODEL`), and `compile.py`'s filing gate and concept writer fall back to it when `claude -p` fails at the provider level (timeout, non-zero exit, missing CLI). Off by default (Claude-only) until configured. A returned-but-malformed response does not trigger fallback, only an unavailable primary does. Still open: wiring `lint.py` and `summarize_weekly.py`, a live calibration run, the per-agent trust signal, the NLI write firewall, and the Conductor router (Layer 1). Tool-using agent turns (`scripts/discord_bot/claude_invoke.py`) stay Claude-only by design.
 
 ## Sources
 
