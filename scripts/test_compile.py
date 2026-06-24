@@ -307,6 +307,7 @@ class TestMainWithMockedGate(unittest.TestCase):
         self._saved = (
             cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR,
             cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+            cmp.HISTORY_DIR, cmp.CONNECTIONS_DIR, cmp.WIKI_LOG, cmp.WIKI_INDEX,
         )
         cmp.REPO_ROOT = self.tmp_path
         cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
@@ -314,6 +315,13 @@ class TestMainWithMockedGate(unittest.TestCase):
         cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
         cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
         cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        # Isolate the remaining output paths so main() never writes to the real
+        # knowledge/ tree. WIKI_LOG / WIKI_INDEX point at absent files, so
+        # append_to_log and refresh_index no-op.
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
         # Create a daily log
         agent_dir = cmp.DAILY_LOGS_DIR / "research"
         agent_dir.mkdir(parents=True)
@@ -321,7 +329,8 @@ class TestMainWithMockedGate(unittest.TestCase):
 
     def tearDown(self):
         (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR,
-         cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE) = self._saved
+         cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+         cmp.HISTORY_DIR, cmp.CONNECTIONS_DIR, cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
         self.tmp.cleanup()
 
     def _run_main(self, argv: list[str]) -> int:
@@ -569,7 +578,7 @@ class TestMainPhaseB(unittest.TestCase):
         self._saved = (
             cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
             cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
-            cmp.WIKI_LOG, cmp.WIKI_INDEX,
+            cmp.WIKI_LOG, cmp.WIKI_INDEX, cmp.CONNECTIONS_DIR,
         )
         cmp.REPO_ROOT = self.tmp_path
         cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
@@ -580,6 +589,7 @@ class TestMainPhaseB(unittest.TestCase):
         cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
         cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
         cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
         # Daily log
         agent_dir = cmp.DAILY_LOGS_DIR / "research"
         agent_dir.mkdir(parents=True)
@@ -595,7 +605,7 @@ class TestMainPhaseB(unittest.TestCase):
     def tearDown(self):
         (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
          cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
-         cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+         cmp.WIKI_LOG, cmp.WIKI_INDEX, cmp.CONNECTIONS_DIR) = self._saved
         self.tmp.cleanup()
 
     def _run_main(self, argv: list[str]) -> int:
@@ -616,9 +626,9 @@ class TestMainPhaseB(unittest.TestCase):
             return _R()
 
         with patch("compile.subprocess.run", side_effect=gate_only):
-            rc = self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+            rc = self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord", "--votes", "1"])
         self.assertEqual(rc, 0)
-        # 2 candidates, only filing-gate calls (no writer)
+        # 2 candidates, only filing-gate calls (no writer), single-pass gate
         self.assertEqual(call_count["n"], 2)
         # Concepts written with stub format
         for path in cmp.CONCEPTS_DIR.glob("*.md"):
@@ -639,7 +649,7 @@ class TestMainPhaseB(unittest.TestCase):
             return _R()
 
         with patch("compile.subprocess.run", side_effect=alternating):
-            rc = self._run_main(["--no-dry-run", "--no-discord"])
+            rc = self._run_main(["--no-dry-run", "--no-discord", "--votes", "1"])
         self.assertEqual(rc, 0)
         self.assertEqual(len(responses), 0)  # all consumed
         # Concepts have rich bodies, no stub footer
@@ -987,6 +997,150 @@ hook_event: SessionEnd
         # Only research's candidates: shared-concept + research-only-concept.
         # content-only-concept should NOT be promoted.
         self.assertEqual(promoted, ["research-only-concept", "shared-concept"])
+
+
+# ============================================================================
+# Phase C: multi-vote filing gate (memory-poisoning defense)
+# ============================================================================
+
+
+class TestAggregateVerdicts(unittest.TestCase):
+    def _v(self, verdict, reason="r", checks=None):
+        return {"verdict": verdict, "reason": reason, "checks_triggered": checks or []}
+
+    def test_unanimous_promote(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE")] * 3)
+        self.assertEqual(g["verdict"], "PROMOTE")
+
+    def test_majority_promote_with_quarantine_still_promotes(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("PROMOTE"), self._v("QUARANTINE")])
+        self.assertEqual(g["verdict"], "PROMOTE")
+
+    def test_promote_majority_but_a_reject_downgrades_to_quarantine(self):
+        # 2 PROMOTE + 1 REJECT must NOT promote: a lone reject is a red flag.
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("PROMOTE"), self._v("REJECT")])
+        self.assertEqual(g["verdict"], "QUARANTINE")
+
+    def test_majority_reject(self):
+        g = cmp.aggregate_verdicts([self._v("REJECT"), self._v("REJECT"), self._v("PROMOTE")])
+        self.assertEqual(g["verdict"], "REJECT")
+
+    def test_three_way_split_quarantines(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("QUARANTINE"), self._v("REJECT")])
+        self.assertEqual(g["verdict"], "QUARANTINE")
+
+    def test_single_vote_reduces_to_that_verdict(self):
+        for verdict in ("PROMOTE", "QUARANTINE", "REJECT"):
+            self.assertEqual(cmp.aggregate_verdicts([self._v(verdict)])["verdict"], verdict)
+
+    def test_checks_are_unioned_and_sorted(self):
+        g = cmp.aggregate_verdicts([
+            self._v("QUARANTINE", checks=["untraceable-claims"]),
+            self._v("REJECT", checks=["imperative-ai-directed-language"]),
+            self._v("QUARANTINE", checks=["untraceable-claims", "coherence"]),
+        ])
+        self.assertEqual(
+            g["checks_triggered"],
+            ["coherence", "imperative-ai-directed-language", "untraceable-claims"],
+        )
+
+    def test_audit_votes_kept_and_reason_is_single_line(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("REJECT"), self._v("REJECT")])
+        self.assertEqual(len(g["votes"]), 3)
+        self.assertNotIn("\n", g["reason"])
+        self.assertIn("->", g["reason"])
+
+
+class TestCallFilingGateVoted(unittest.TestCase):
+    def _resp(self, verdict):
+        class _R:
+            stdout = json.dumps({"verdict": verdict, "reason": "r", "checks_triggered": []})
+            stderr = ""
+            returncode = 0
+        return _R()
+
+    def test_three_promotes_promote(self):
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp("PROMOTE")):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+        self.assertEqual([v["verdict"] for v in gate["votes"]], ["PROMOTE", "PROMOTE", "PROMOTE"])
+
+    def test_two_promote_one_reject_quarantines(self):
+        seq = ["PROMOTE", "PROMOTE", "REJECT"]
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp(seq.pop(0))):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "QUARANTINE")
+
+    def test_votes_one_delegates_to_single_gate(self):
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp("PROMOTE")):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=1)
+        self.assertTrue(ok, err)
+        self.assertNotIn("votes", gate)  # single-pass path returns the raw gate dict
+
+    def test_insufficient_successful_votes_is_error_not_promote(self):
+        # Only 1 of 3 passes parses; majority failed -> ok=False, never a silent promote.
+        seq = ["good", "bad", "bad"]
+
+        def run(*a, **k):
+            kind = seq.pop(0)
+            class _R:
+                stdout = (json.dumps({"verdict": "PROMOTE", "reason": "r", "checks_triggered": []})
+                          if kind == "good" else "not json")
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=run):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertFalse(ok)
+        self.assertIsNone(gate)
+        self.assertTrue(err.startswith("insufficient_votes"))
+
+
+class TestMultiVoteOutputProvenance(unittest.TestCase):
+    """The voted gate's per-pass tally surfaces in concept frontmatter and quarantine bodies.
+
+    These exercise the writers directly (not main()), so they never touch the
+    real knowledge/ tree.
+    """
+
+    def _cand(self):
+        return cmp.ConceptCandidate(
+            slug="x-concept", summary="s",
+            sources=[{"agent": "research", "session_id": "s1", "transcript_sha256": "h",
+                      "source_log": "daily-logs/research/2026-05-09.md", "session_n": 1}],
+            excerpt="...",
+        )
+
+    def _voted_gate(self, verdicts):
+        return cmp.aggregate_verdicts(
+            [{"verdict": v, "reason": f"r {v}", "checks_triggered": []} for v in verdicts])
+
+    def test_stub_concept_frontmatter_has_gate_votes(self):
+        text = cmp.stub_concept_article(self._cand(), self._voted_gate(["PROMOTE", "PROMOTE", "PROMOTE"]))
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, PROMOTE]", text)
+
+    def test_rendered_concept_frontmatter_has_gate_votes(self):
+        gate = self._voted_gate(["PROMOTE", "PROMOTE", "QUARANTINE"])
+        text = cmp.render_concept_article(self._cand(), gate, "Body.\n")
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, QUARANTINE]", text)
+
+    def test_quarantine_body_lists_each_pass(self):
+        gate = self._voted_gate(["PROMOTE", "PROMOTE", "REJECT"])
+        self.assertEqual(gate["verdict"], "QUARANTINE")  # a lone reject downgrades
+        with tempfile.TemporaryDirectory() as d:
+            saved = cmp.QUARANTINE_DIR
+            cmp.QUARANTINE_DIR = Path(d) / "quarantine"
+            try:
+                target = cmp.write_quarantine(self._cand(), gate, dry_run=False)
+                text = target.read_text(encoding="utf-8")
+            finally:
+                cmp.QUARANTINE_DIR = saved
+        self.assertIn("## Gate votes", text)
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, REJECT]", text)
+        self.assertIn("Pass 3 (REJECT)", text)
 
 
 if __name__ == "__main__":

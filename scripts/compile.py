@@ -20,6 +20,11 @@ knowledge/connections/<a>--<b>.md file), per-agent containment via
 --agent flag, --flush flag for manual single-session flush (folded
 from issue #10).
 
+Phase C (this change): the filing gate runs as N independent passes
+(--votes, default 3) under a conservative majority. Promote only on
+consensus; downgrade any disagreement to QUARANTINE. This hardens shared
+memory against a single unlucky judgment admitting poisoned content.
+
 Usage:
   python3 scripts/compile.py                     # dry-run by default
   python3 scripts/compile.py --no-dry-run        # actually write to concepts/
@@ -27,6 +32,7 @@ Usage:
   python3 scripts/compile.py --agent research    # per-agent containment
   python3 scripts/compile.py --no-rich-body      # skip concept writer (cheap)
   python3 scripts/compile.py --no-connections    # skip connection writer
+  python3 scripts/compile.py --votes 1           # single-pass gate (default is 3)
   python3 scripts/compile.py --flush /path/to/transcript.jsonl --agent research
   python3 scripts/compile.py --verbose
 
@@ -70,9 +76,10 @@ import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-COMPILER_VERSION = "1.2"  # bumped: Phase B expansion (connections, --agent, --flush)
+COMPILER_VERSION = "1.3"  # bumped: multi-vote filing gate (memory-poisoning defense)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
+DEFAULT_VOTES = 3  # filing-gate passes per candidate; conservative majority (see call_filing_gate_voted)
 
 PROMOTE = "PROMOTE"
 QUARANTINE = "QUARANTINE"
@@ -386,6 +393,126 @@ def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict 
     return True, data, ""
 
 
+# ---------- multi-vote filing gate (memory-poisoning defense) ----------
+# The single-judge gate can swing between blocking everything and admitting
+# confident malice (see docs/IMPROVEMENT_ROADMAP.md, Theme A). We run the gate
+# as several independent passes and take a conservative majority: promote only
+# on consensus, downgrade any disagreement to human review.
+
+def _oneline(text: str, max_len: int) -> str:
+    """Collapse whitespace to a single line and bound the length.
+
+    Frontmatter renders `reason:` on one physical line, so a synthesized reason
+    must never contain a newline.
+    """
+    s = " ".join((text or "").split())
+    if len(s) > max_len:
+        s = s[: max(0, max_len - 3)].rstrip() + "..."
+    return s
+
+
+def _synthesize_reason(final: str, tally: dict, n: int) -> str:
+    """One-line reason summarizing the vote distribution and why `final` won."""
+    dist = f"{tally[PROMOTE]}P/{tally[QUARANTINE]}Q/{tally[REJECT]}R"
+    if final == PROMOTE:
+        why = "majority promote, no reject"
+    elif final == REJECT:
+        why = "majority reject"
+    elif tally[REJECT] and tally[PROMOTE]:
+        why = "split vote with a reject present, held for human review"
+    else:
+        why = "no majority, held for human review"
+    # Semicolon, not colon: a "key: value"-looking colon would break the
+    # one-line YAML `reason:` field this string is rendered into.
+    return f"{n}-vote gate ({dist}) -> {final}; {why}"
+
+
+def aggregate_verdicts(votes: list[dict]) -> dict:
+    """Aggregate per-pass gate dicts into one synthesized gate dict.
+
+    Conservative on the PROMOTE path, because admitting poisoned content is the
+    costly failure direction:
+
+        PROMOTE    iff  #PROMOTE * 2 > n  and  #REJECT == 0
+        REJECT     iff  #REJECT  * 2 > n
+        QUARANTINE otherwise (any disagreement, or a lone reject among promotes,
+                   goes to human review)
+
+    The result is shape-compatible with call_filing_gate's parsed dict
+    (verdict / reason / checks_triggered) and adds a `votes` audit list.
+    Reducing to a single vote reproduces that vote's verdict exactly.
+    """
+    n = len(votes)
+    tally = {PROMOTE: 0, QUARANTINE: 0, REJECT: 0}
+    for v in votes:
+        tally[v["verdict"]] += 1
+
+    if tally[PROMOTE] * 2 > n and tally[REJECT] == 0:
+        final = PROMOTE
+    elif tally[REJECT] * 2 > n:
+        final = REJECT
+    else:
+        final = QUARANTINE
+
+    checks = sorted({c for v in votes for c in (v.get("checks_triggered") or [])})
+    return {
+        "verdict": final,
+        "reason": _synthesize_reason(final, tally, n),
+        "checks_triggered": checks,
+        "votes": [
+            {
+                "verdict": v["verdict"],
+                "reason": _oneline(v.get("reason", ""), 200),
+                "checks_triggered": list(v.get("checks_triggered") or []),
+            }
+            for v in votes
+        ],
+    }
+
+
+def call_filing_gate_voted(
+    prompt: str, model: str, timeout: int, votes: int = DEFAULT_VOTES,
+) -> tuple[bool, dict | None, str]:
+    """Run the filing gate `votes` times and aggregate by aggregate_verdicts().
+
+    Returns (ok, gate, error) exactly like call_filing_gate. `votes <= 1` is the
+    single-pass gate. A strict majority of passes must parse successfully;
+    otherwise the candidate is reported as an error (ok=False) rather than
+    promoted, so an unreliable model degrades to "needs a human", never to
+    "admitted".
+
+    Passes run serially, matching compile.py's one-call-at-a-time posture (the
+    nightly run already serializes to avoid concurrent SDK pressure). Vote
+    independence comes from sampling temperature; a per-pass marker is prepended
+    so the calls are not byte-identical.
+    """
+    if votes <= 1:
+        return call_filing_gate(prompt, model, timeout)
+
+    parsed: list[dict] = []
+    errors: list[str] = []
+    for i in range(votes):
+        pass_prompt = f"<!-- filing-gate vote {i + 1}/{votes}; judge independently -->\n{prompt}"
+        ok, gate, err = call_filing_gate(pass_prompt, model, timeout)
+        if ok and gate is not None:
+            parsed.append(gate)
+        else:
+            errors.append(err)
+
+    if len(parsed) * 2 <= votes:  # no strict majority of passes succeeded
+        return False, None, f"insufficient_votes:{len(parsed)}/{votes}:{';'.join(errors)[:160]}"
+
+    return True, aggregate_verdicts(parsed), ""
+
+
+def _vote_verdicts(gate: dict) -> list[str] | None:
+    """Per-pass verdict list for frontmatter provenance, or None for single-pass."""
+    votes = gate.get("votes")
+    if not votes:
+        return None
+    return [v["verdict"] for v in votes]
+
+
 # ---------- output writing ----------
 
 def _frontmatter(
@@ -393,6 +520,7 @@ def _frontmatter(
     verdict: str,
     reason: str,
     checks_triggered: list[str],
+    gate_votes: list[str] | None = None,
 ) -> str:
     sources_yaml = "\n".join(
         f"  - agent: {s['agent']}\n"
@@ -406,12 +534,16 @@ def _frontmatter(
         "[]" if not checks_triggered
         else "[" + ", ".join(c for c in checks_triggered) + "]"
     )
+    votes_line = ""
+    if gate_votes:
+        votes_line = "gate_votes: [" + ", ".join(gate_votes) + "]\n"
     return (
         "---\n"
         f"slug: {candidate.slug}\n"
         f"verdict: {verdict}\n"
         f"reason: {reason}\n"
         f"checks_triggered: {checks_yaml}\n"
+        f"{votes_line}"
         f"compiled_at: {utc_iso()}\n"
         f'compiler_version: "{COMPILER_VERSION}"\n'
         "sources:\n"
@@ -443,16 +575,26 @@ def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool,
 
 def write_quarantine(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> Path:
     """Write a QUARANTINE'd concept for human review."""
+    votes_section = ""
+    votes = gate.get("votes")
+    if votes:
+        rows = "\n".join(
+            f"- Pass {i + 1} ({v['verdict']}): {v['reason'] or 'no reason given'}"
+            for i, v in enumerate(votes)
+        )
+        votes_section = f"## Gate votes\n\n{rows}\n\n"
     body = (
         f"# {candidate.slug}\n\n"
         f"**Quarantined** for human review.\n\n"
         f"**Reason:** {gate['reason']}\n\n"
         f"**Checks triggered:** {', '.join(gate['checks_triggered']) or 'none'}\n\n"
+        f"{votes_section}"
         f"## Proposed summary\n\n"
         f"{candidate.summary}\n\n"
         f"_Quarantined on {utc_iso()} by `compile.py` v{COMPILER_VERSION}._\n"
     )
-    fm = _frontmatter(candidate, QUARANTINE, gate["reason"], gate["checks_triggered"])
+    fm = _frontmatter(candidate, QUARANTINE, gate["reason"], gate["checks_triggered"],
+                      gate_votes=_vote_verdicts(gate))
     text = fm + "\n" + body
 
     if dry_run:
@@ -510,13 +652,15 @@ def call_concept_writer(prompt: str, model: str, timeout: int) -> tuple[bool, st
 
 def render_concept_article(candidate: ConceptCandidate, gate: dict, body: str) -> str:
     """Compose frontmatter + H1 + body. Body is already stripped of leading H1."""
-    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"])
+    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"],
+                      gate_votes=_vote_verdicts(gate))
     return f"{fm}\n# {candidate.slug}\n\n{body}"
 
 
 def stub_concept_article(candidate: ConceptCandidate, gate: dict) -> str:
     """Phase A stub. Used when --no-rich-body is set or the writer call fails."""
-    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"])
+    fm = _frontmatter(candidate, PROMOTE, gate["reason"], gate["checks_triggered"],
+                      gate_votes=_vote_verdicts(gate))
     body = (
         f"# {candidate.slug}\n\n"
         f"{candidate.summary}\n\n"
@@ -772,6 +916,12 @@ def main() -> int:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument(
+        "--votes", type=int, default=DEFAULT_VOTES,
+        help="Independent filing-gate passes per candidate (conservative majority). "
+        "Default 3 hardens the gate against a single unlucky judgment admitting "
+        "poisoned memory. Use --votes 1 to restore the single-pass gate.",
+    )
+    parser.add_argument(
         "--since",
         help="Only process daily-log files modified at/after this UTC date (YYYY-MM-DD). "
         "If omitted, uses last_run_at from .compile_state.json, or all logs if first run.",
@@ -868,7 +1018,7 @@ def main() -> int:
             continue
 
         prompt = build_filing_gate_prompt(template, cand.slug, cand.summary, cand.sources[0]["agent"], cand.excerpt)
-        ok, gate, err = call_filing_gate(prompt, args.model, args.timeout)
+        ok, gate, err = call_filing_gate_voted(prompt, args.model, args.timeout, votes=args.votes)
         if not ok:
             log_line(args.verbose, f"filing gate ERROR for {cand.slug}: {err}")
             counts["errors"] += 1
