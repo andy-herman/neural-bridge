@@ -1213,5 +1213,138 @@ class TestFilingGateFallback(unittest.TestCase):
         fb_mock.assert_not_called()
 
 
+# ============================================================================
+# Regression: >10 promoted candidates with Discord enabled (run_log_path ordering)
+# ============================================================================
+
+
+def _daily_log_with_n_concepts(n: int) -> str:
+    """Build a daily log with `n` sessions, each proposing one unique concept.
+
+    Distinct session_ids per session so the shared-session connection writer
+    finds no pairs (keeps the fixture to exactly `n` PROMOTE action lines).
+    The `## Session N -- ...` heading uses the em dash the parser's
+    SESSION_HEADING_RE matches, same as SAMPLE_DAILY_LOG.
+    """
+    head = (
+        "---\n"
+        "type: daily-log\n"
+        "agent: research\n"
+        "date: 2026-05-09\n"
+        'schema_version: "1.0"\n'
+        f"session_count: {n}\n"
+        "last_flushed_at: 2026-05-09T08:01:23Z\n"
+        "---\n\n"
+    )
+    blocks = []
+    for i in range(1, n + 1):
+        blocks.append(
+            f"## Session {i} — 08:{i:02d} UTC\n\n"
+            "```yaml\n"
+            f"session_id: sess-{i:04d}\n"
+            "transcript_path: /tmp/transcript.jsonl\n"
+            f"transcript_sha256: {i:064x}\n"
+            "started_at: 2026-05-09T08:01:17Z\n"
+            "ended_at: 2026-05-09T08:01:23Z\n"
+            'flush_version: "1.0"\n'
+            "hook_event: SessionEnd\n"
+            "```\n\n"
+            "### Decisions\n\n"
+            f"- decision number {i}\n\n"
+            "### Findings\n\n"
+            "- (none)\n\n"
+            "### Open questions\n\n"
+            "- (none)\n\n"
+            "### Proposed concepts\n\n"
+            f"- concept-{i:02d}: A unique concept number {i}\n"
+        )
+    return head + "\n".join(blocks)
+
+
+class TestMainDiscordManyCandidates(unittest.TestCase):
+    """Regression for the run_log_path ordering bug.
+
+    The Discord summary references the run-log path when there are more than 10
+    action lines. That path used to be computed AFTER the Discord block, so a
+    nightly run with >10 PROMOTEs and Discord enabled (the default) raised
+    NameError after the concepts were written but before the run log was saved
+    or the fleet heartbeat emitted. main() must return 0, send the summary, and
+    still write the run log.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = (
+            cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+            cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+            cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX,
+        )
+        cmp.REPO_ROOT = self.tmp_path
+        cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
+        cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        agent_dir = cmp.DAILY_LOGS_DIR / "research"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "2026-05-09.md").write_text(
+            _daily_log_with_n_concepts(12), encoding="utf-8")
+        cmp.WIKI_LOG.parent.mkdir(parents=True, exist_ok=True)
+        cmp.WIKI_LOG.write_text("---\ntype: log\n---\n\n# Log\n", encoding="utf-8")
+        cmp.WIKI_INDEX.write_text(
+            "---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+         cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+         cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+        self.tmp.cleanup()
+
+    def _run_main(self, argv: list[str]) -> int:
+        with patch.object(sys, "argv", ["compile.py", *argv]):
+            return cmp.main()
+
+    def test_many_candidates_with_discord_enabled_returns_zero(self):
+        sent: list[str] = []
+
+        def fake_send(content, *args, **kwargs):
+            sent.append(content)
+            return True
+
+        def gate_promote(*args, **kwargs):
+            class _R:
+                stdout = json.dumps(
+                    {"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        # Discord enabled (no --no-discord); live run with >10 promoted candidates.
+        # --no-rich-body keeps every mocked call a gate call (no writer calls).
+        with patch("compile.subprocess.run", side_effect=gate_promote), \
+             patch("compile.discord_post.send", side_effect=fake_send):
+            rc = self._run_main(["--no-dry-run", "--no-rich-body"])
+
+        self.assertEqual(rc, 0)
+        # All 12 unique concepts promoted -> the ">10 actions" Discord branch ran.
+        promoted = sorted(p.stem for p in cmp.CONCEPTS_DIR.glob("*.md"))
+        self.assertEqual(len(promoted), 12)
+        # The summary was sent, using the ASCII ellipsis (not U+2026).
+        self.assertEqual(len(sent), 1)
+        self.assertIn("...and more.", sent[0])
+        self.assertNotIn("…and more", sent[0])
+        # The run log was written AFTER the Discord block -- the crash used to
+        # abort main() here, before this file (and the fleet heartbeat) existed.
+        run_log = cmp.DRY_RUN_DIR / f"{cmp.utc_today()}-compile-run.md"
+        self.assertTrue(run_log.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

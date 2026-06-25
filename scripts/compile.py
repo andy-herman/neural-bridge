@@ -1129,6 +1129,13 @@ def main() -> int:
 
     print(summary)
 
+    # Compute the run-log path before the Discord block: the summary references
+    # it when there are more than 10 action lines, and the file itself is written
+    # further down. Defining it here keeps both uses in agreement and avoids a
+    # NameError on runs with >10 candidates and Discord enabled (the default).
+    suffix = "-dry-run" if args.dry_run else ""
+    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
+
     if not args.no_discord:
         mode = "dry-run" if args.dry_run else "live"
         header = f"**Compile run** | {utc_today()} | {mode}"
@@ -1144,16 +1151,14 @@ def main() -> int:
             body_lines.append("")
             body_lines.extend(action_lines)
         if len([line for line in run_log_lines if line.startswith("- ")]) > 10:
-            body_lines.append(f"_…and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
+            body_lines.append(f"_...and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
         message = discord_post.truncate_for_discord("\n".join(body_lines))
         discord_post.send(message)
 
-    # Always write a run log to docs/compile/
+    # Always write a run log to docs/compile/ (run_log_path computed above).
     DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
     run_log_lines.append("")
     run_log_lines.append(f"## Summary\n\n{summary}\n")
-    suffix = "-dry-run" if args.dry_run else ""
-    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
     run_log_path.write_text("\n".join(run_log_lines), encoding="utf-8")
     log_line(args.verbose, f"run log: {run_log_path.relative_to(REPO_ROOT)}")
 
