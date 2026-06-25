@@ -482,7 +482,8 @@ def call_filing_gate_voted(
     "admitted".
 
     Passes run serially, matching compile.py's one-call-at-a-time posture (the
-    nightly run already serializes to avoid concurrent SDK pressure). Vote
+    nightly run already serializes to avoid concurrent SDK pressure). Each
+    failed pass is retried once to absorb transient CLI or parse failures. Vote
     independence comes from sampling temperature; a per-pass marker is prepended
     so the calls are not byte-identical.
     """
@@ -494,6 +495,11 @@ def call_filing_gate_voted(
     for i in range(votes):
         pass_prompt = f"<!-- filing-gate vote {i + 1}/{votes}; judge independently -->\n{prompt}"
         ok, gate, err = call_filing_gate(pass_prompt, model, timeout)
+        if not (ok and gate is not None):
+            # One retry. Passes are independent samples and most failures here
+            # are transient (a flaky CLI call or a non-JSON blip), so a single
+            # retry absorbs them without inflating cost on the happy path.
+            ok, gate, err = call_filing_gate(pass_prompt, model, timeout)
         if ok and gate is not None:
             parsed.append(gate)
         else:

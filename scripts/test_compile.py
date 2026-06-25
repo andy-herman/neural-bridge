@@ -1080,8 +1080,9 @@ class TestCallFilingGateVoted(unittest.TestCase):
         self.assertNotIn("votes", gate)  # single-pass path returns the raw gate dict
 
     def test_insufficient_successful_votes_is_error_not_promote(self):
-        # Only 1 of 3 passes parses; majority failed -> ok=False, never a silent promote.
-        seq = ["good", "bad", "bad"]
+        # With one retry per pass, a pass is dropped only after failing twice.
+        # p1 succeeds; p2 and p3 each fail twice -> only 1 of 3 parses.
+        seq = ["good", "bad", "bad", "bad", "bad"]
 
         def run(*a, **k):
             kind = seq.pop(0)
@@ -1097,6 +1098,25 @@ class TestCallFilingGateVoted(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(gate)
         self.assertTrue(err.startswith("insufficient_votes"))
+
+    def test_transient_pass_failure_is_retried(self):
+        # Second pass fails once then succeeds on retry; all three passes count.
+        seq = ["good", "bad", "good", "good"]  # p1 ok; p2 bad->retry ok; p3 ok
+
+        def run(*a, **k):
+            kind = seq.pop(0)
+            class _R:
+                stdout = (json.dumps({"verdict": "PROMOTE", "reason": "r", "checks_triggered": []})
+                          if kind == "good" else "not json")
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=run):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+        self.assertEqual(len(gate["votes"]), 3)
 
 
 class TestMultiVoteOutputProvenance(unittest.TestCase):
