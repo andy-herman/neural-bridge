@@ -37,7 +37,7 @@ sys.path.insert(0, str(HOOKS_DIR))
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
 

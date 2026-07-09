@@ -38,7 +38,7 @@ from scripts.discord_bot.conversation_log import AGENTS_BASE  # noqa: E402
 
 LOGS_DIR = Path.home() / "Library" / "Logs" / "neural-bridge"
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "summarize_lessons_v1.md"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 CLAUDE_TIMEOUT_S = 600  # generous; per-agent summarization is bounded but model can be slow
 
 # Cap on how much raw conversation text we send to claude. The model can handle
