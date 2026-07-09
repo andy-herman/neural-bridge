@@ -217,5 +217,74 @@ class TestMainNoConcepts(_BaseTmp):
         self.assertIn("No `knowledge/concepts/` directory yet", report.read_text(encoding="utf-8"))
 
 
+class TestCheckAgentsRoster(_BaseTmp):
+    ROSTER = (
+        "# Schema\n\n"
+        "<!-- AGENTS-ROSTER:BEGIN checked by lint -->\n"
+        "| Agent | Role |\n"
+        "|---|---|\n"
+        "| `research` | reads things |\n"
+        "| `content` | writes things |\n"
+        "<!-- AGENTS-ROSTER:END -->\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self._saved_roster = (L.AGENTS_MD_FILE, L.PLUGIN_AGENTS_DIR)
+        L.AGENTS_MD_FILE = self.tmp_path / "AGENTS.md"
+        L.PLUGIN_AGENTS_DIR = self.tmp_path / "plugins" / "neural-bridge-core" / "agents"
+        L.PLUGIN_AGENTS_DIR.mkdir(parents=True)
+
+    def tearDown(self):
+        (L.AGENTS_MD_FILE, L.PLUGIN_AGENTS_DIR) = self._saved_roster
+        super().tearDown()
+
+    def _agent(self, name: str):
+        (L.PLUGIN_AGENTS_DIR / f"{name}.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
+
+    def test_in_sync_no_findings(self):
+        self._agent("research")
+        self._agent("content")
+        L.AGENTS_MD_FILE.write_text(self.ROSTER, encoding="utf-8")
+        self.assertEqual(L.check_agents_roster(), [])
+
+    def test_agent_missing_from_roster(self):
+        self._agent("research")
+        self._agent("content")
+        self._agent("loid")
+        L.AGENTS_MD_FILE.write_text(self.ROSTER, encoding="utf-8")
+        findings = L.check_agents_roster()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "HIGH")
+        self.assertIn("`loid`", findings[0].evidence)
+        self.assertIn("missing from the AGENTS.md roster", findings[0].evidence)
+
+    def test_roster_lists_ghost_agent(self):
+        self._agent("research")
+        L.AGENTS_MD_FILE.write_text(self.ROSTER, encoding="utf-8")
+        findings = L.check_agents_roster()
+        self.assertEqual(len(findings), 1)
+        self.assertIn("`content`", findings[0].evidence)
+        self.assertIn("does not exist", findings[0].evidence)
+
+    def test_missing_roster_block(self):
+        self._agent("research")
+        L.AGENTS_MD_FILE.write_text("# Schema, no markers\n", encoding="utf-8")
+        findings = L.check_agents_roster()
+        self.assertEqual(len(findings), 1)
+        self.assertIn("no AGENTS-ROSTER", findings[0].evidence)
+
+    def test_missing_agents_md(self):
+        self._agent("research")
+        findings = L.check_agents_roster()
+        self.assertEqual(len(findings), 1)
+        self.assertIn("missing entirely", findings[0].evidence)
+
+    def test_no_plugin_dir_skips(self):
+        import shutil
+        shutil.rmtree(L.PLUGIN_AGENTS_DIR)
+        self.assertEqual(L.check_agents_roster(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,10 +1,10 @@
 # Neural Bridge
 
-A personal AI substrate: nine specialized agents sharing a markdown wiki memory, reachable from a phone via Discord, with a filing gate that defends the shared memory against prompt injection and poisoning.
+A personal AI substrate: fourteen specialized agents sharing a markdown wiki memory, reachable from a phone via Discord and Telegram, with a filing gate that defends the shared memory against prompt injection and poisoning.
 
 ## What this actually is, today
 
-V1 ships and runs. Nine specialists answer @-mentions in Discord. They read each other's notes, hand off to each other, and emit structured GitHub actions (file an issue, comment, label, close, recruit a new agent). Sessions flush to dated daily logs. A filing gate promotes (or rejects) candidate concepts before they reach the shared wiki. A weekly lint pass re-checks the wiki for drift.
+V1 ships and runs. Fourteen specialists (thirteen registered on the Discord daemon) answer @-mentions in Discord; Luna and Loid are also reachable on Telegram. They read each other's notes, hand off to each other, and emit structured GitHub actions (file an issue, comment, label, close, recruit a new agent). Sessions flush to dated daily logs. A filing gate promotes (or rejects) candidate concepts before they reach the shared wiki. A weekly lint pass re-checks the wiki for drift.
 
 The whole thing runs locally on a Mac Mini under `launchd`. There is no cloud infrastructure to manage, no service to pay for beyond a Claude Max subscription.
 
@@ -24,10 +24,11 @@ Neural Bridge is the substrate where the work compounds.
 5. Orchestration   Discord daemon + senior-pm + cross-agent handoff
 ```
 
-## The nine agents
+## The fourteen agents
 
 | Agent | Role |
 |---|---|
+| `luna` | Executive assistant: calendar and Gmail via MCP, proactive scheduling, handoffs |
 | `research` | Deep reading, citations, threat model write-ups |
 | `teaching-prep` | INFO 310 lecture material, slide outlines, exercises |
 | `content` | Long-form drafts for the blog and LinkedIn |
@@ -37,8 +38,12 @@ Neural Bridge is the substrate where the work compounds.
 | `automation-engineer` | Hooks, scripts, daemon work |
 | `security-reviewer` | Audits prompts, flows, and PRs for prompt-injection / data-leak risks |
 | `docs-editor` | Tightens prose, fixes drift in the wiki |
+| `librarian` | Maintains the Luna Master Obsidian vault: INDEX, audits, structure |
+| `echo` | Voice-double: keeps Andy's voice profile, flags AI-sounding drafts |
+| `loid` | Career strategist on Telegram and Discord, backed by the Synapse DB |
+| `ux-designer` | Look and feel for neural-bridge-blog and other web surfaces |
 
-`@` any of them in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other.
+`@` any of them in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other (including multi-round `/squad-discuss` sessions).
 
 ## Memory pipeline
 
@@ -50,7 +55,7 @@ Background and threat model: [Memory Poisoning in Personal Agentic AI Substrates
 
 ## Discord orchestrator
 
-Nine bot identities, one daemon, one asyncio loop. Each agent has its own Discord application and Message Content Intent. The daemon:
+Thirteen bot identities, one daemon, one asyncio loop. Each agent has its own Discord application and Message Content Intent. A separate Telegram bridge carries Luna DMs and Loid (voice and text); Honcho supplies a shared peer-memory card of Andy across all agents. The daemon:
 
 - Routes `@agent` mentions to the right specialist
 - Loads the agent's plugin definition into the prompt
@@ -92,7 +97,7 @@ This repo ships as a Claude Code plugin marketplace plus a Discord daemon.
    /plugin install neural-bridge-core@neural-bridge
    ```
 3. (Optional) Open the repo as an [Obsidian](https://obsidian.md/) vault for graph view + backlinks.
-4. (Optional, for the Discord orchestrator) Create nine Discord applications, enable Message Content Intent on each, store the tokens in macOS keychain (`security add-generic-password ...`), populate `scripts/discord_bot/agents.json` with each application's client ID, then `./scripts/launchd/install.sh` to register the daemon with `launchd`.
+4. (Optional, for the Discord orchestrator) Create one Discord application per agent (thirteen today), enable Message Content Intent on each, store the tokens in macOS keychain (`security add-generic-password ...`), populate `scripts/discord_bot/agents.json` with each application's client ID, then `./scripts/launchd/install.sh` to register the daemon with `launchd`.
 
 ## Build journal
 
