@@ -12,14 +12,35 @@ The runtime is [Claude Code](https://docs.claude.com/en/docs/claude-code); subag
 
 Six layers, built bottom-up:
 
-| Layer | V1 status | Lives in |
+| Layer | Status (2026-07) | Lives in |
 |---|---|---|
-| 1. Agents | ✅ 3 active | `plugins/neural-bridge-core/agents/*.md` |
-| 2. Skills | inherits from user-level skills | (user-level; plugin-level skills land in V2) |
-| 3. Transport | configured externally | (out of repo) |
-| 4. Shared state | ✅ wiki skeleton, ⏳ daily logs, ⏳ hive.db | `knowledge/`, `daily-logs/` |
-| 5. Orchestration | native subagent dispatch | (the agent CLI) |
-| 6. Frontend | none in V1 (CLI only) | — |
+| 1. Agents | ✅ 14 defined (13 registered on Discord) | `plugins/neural-bridge-core/agents/*.md` |
+| 2. Skills | inherits from user-level skills; plugin-level skills still pending | (user-level) |
+| 3. Transport | ✅ Discord daemon + Telegram bridge (Luna, Loid) | `scripts/discord_bot/`, `scripts/telegram_bot/` |
+| 4. Shared state | ✅ wiki + daily logs + filing gate + Honcho peer memory | `knowledge/`, `daily-logs/`, `scripts/discord_bot/honcho_client.py` |
+| 5. Orchestration | ✅ Discord daemon, senior-pm, cross-agent handoff, squad-discuss | `scripts/discord_bot/` |
+| 6. Frontend | dashboard generator + fleet heartbeats into the Obsidian vault | `scripts/dashboard.py`, `scripts/fleet_heartbeat.py` |
+
+## Agent roster
+
+<!-- AGENTS-ROSTER:BEGIN — kept in sync with plugins/neural-bridge-core/agents/*.md; checked by `scripts/lint.py --check agents-roster` -->
+| Agent | Role |
+|---|---|
+| `automation-engineer` | launchd agents, shell scripts, GitHub Actions, daemon and cron work |
+| `content` | Long-form build-in-public drafts (blog, video scripts) |
+| `docs-editor` | Internal docs: SOPs, ADRs, runbooks, READMEs, repo wiki drift |
+| `echo` | Andy's voice-double: voice profile upkeep and AI-tell review of drafts |
+| `librarian` | Maintains the Luna Master Obsidian vault: INDEX, audits, structure |
+| `loid` | Career strategist; Synapse DB via CLI; Telegram and Discord |
+| `luna` | Executive assistant: calendar and Gmail via MCP, proactive scheduling, handoffs |
+| `recruiter` | Designs and provisions new specialist agents |
+| `research` | Multi-source synthesis, citations, threat-model write-ups |
+| `security-reviewer` | Audits prompts, flows, auth gates, and PRs for injection and leak risk |
+| `senior-pm` | Issue and PR triage, board hygiene, weekly summaries |
+| `social` | X growth: tweets, threads, cadence (drafts only, never publishes) |
+| `teaching-prep` | INFO 310 virtual peer: slide stress-tests, lab alignment, examples |
+| `ux-designer` | Look and feel for neural-bridge-blog and other web surfaces |
+<!-- AGENTS-ROSTER:END -->
 
 ## Directory layout
 
@@ -42,10 +63,10 @@ knowledge/             The wiki - LLM-maintained, never hand-edited
   agents/              Per-agent memory subdirectories
 raw/                   External ingest (Web Clipper, papers) - gitignored
 daily-logs/            Per-agent session summaries - gitignored
-hooks/                 Hook scripts (V2)
-scripts/               Utility scripts: compile, flush, lint, query (V2)
+hooks/                 Lifecycle hooks: session_start, session_end, flush, discord_post (shipped, tested)
+scripts/               compile.py, lint.py, dashboard.py, fleet_heartbeat.py, discord_bot/, telegram_bot/, launchd/
 decisions/             Architecture decision records (ADRs)
-docs/                  Build status, build plans, audits
+docs/                  Build status, build plans, audits, lint reports, Honcho integration docs
 ```
 
 ## Conventions
@@ -64,7 +85,7 @@ docs/                  Build status, build plans, audits
 
 ## Build status
 
-V1 scaffold — created 2026-05-08. See [docs/STATUS.md](docs/STATUS.md) for the running build status.
+V1 shipped and running (Discord daemon, memory pipeline, filing gate, Telegram bridges, Honcho peer memory). Scaffold created 2026-05-08; docs truth pass 2026-07-09. See [docs/STATUS.md](docs/STATUS.md) for the running build status.
 
 ## For AI agents reading this
 
