@@ -69,7 +69,7 @@ import discord_post  # noqa: E402
 import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 COMPILER_VERSION = "1.2"  # bumped: Phase B expansion (connections, --agent, --flush)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time

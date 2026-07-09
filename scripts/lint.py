@@ -41,7 +41,7 @@ IMPERATIVE_PROMPT = SCRIPTS_DIR / "prompts" / "lint_imperative_language_v1.md"
 AGENTS_MD_FILE = REPO_ROOT / "AGENTS.md"
 PLUGIN_AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 LINT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 60
 
