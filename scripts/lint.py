@@ -38,17 +38,22 @@ QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
 LINT_DIR = REPO_ROOT / "docs" / "lint"
 IMPERATIVE_PROMPT = SCRIPTS_DIR / "prompts" / "lint_imperative_language_v1.md"
+AGENTS_MD_FILE = REPO_ROOT / "AGENTS.md"
+PLUGIN_AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 LINT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 60
 
-ALL_CHECKS = ("broken-links", "orphans", "frontmatter", "imperative-language")
-DETERMINISTIC_CHECKS = ("broken-links", "orphans", "frontmatter")
+ALL_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster", "imperative-language")
+DETERMINISTIC_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster")
 LLM_CHECKS = ("imperative-language",)
 
 # Wiki link: [[slug]] or [[slug|display]]
 WIKI_LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9\-_/]*)(\|[^\]]+)?\]\]")
+# AGENTS.md roster block and its table rows (agent name in backticks, first column)
+ROSTER_BLOCK_RE = re.compile(r"<!-- AGENTS-ROSTER:BEGIN.*?-->(.*?)<!-- AGENTS-ROSTER:END -->", re.DOTALL)
+ROSTER_ROW_RE = re.compile(r"^\|\s*`([a-z0-9\-]+)`\s*\|", re.MULTILINE)
 # YAML frontmatter block at start of file
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -187,6 +192,63 @@ def check_orphans(verbose: bool = False) -> list[Finding]:
                 suggestion=f"Add a `[[{slug}]]` reference from a related concept or `knowledge/index.md`, or close-out and quarantine",
             ))
     log_line(verbose, f"orphans: {len(findings)} findings")
+    return findings
+
+
+# ---------- check: AGENTS.md roster drift ----------
+
+def check_agents_roster(verbose: bool = False) -> list[Finding]:
+    """AGENTS.md roster table must match plugins/neural-bridge-core/agents/*.md.
+
+    The schema doc drifted badly once (2026-05 through 2026-07: claimed 3 agents
+    while 14 were defined). This check makes that class of rot impossible to miss.
+    """
+    findings: list[Finding] = []
+    if not PLUGIN_AGENTS_DIR.exists():
+        log_line(verbose, "agents-roster: no plugin agents dir, skipping")
+        return findings
+
+    on_disk = {p.stem for p in PLUGIN_AGENTS_DIR.glob("*.md") if not p.name.startswith(".")}
+
+    if not AGENTS_MD_FILE.exists():
+        findings.append(Finding(
+            check="agents-roster",
+            severity="HIGH",
+            file="AGENTS.md",
+            evidence="AGENTS.md is missing entirely",
+            suggestion="Restore AGENTS.md with an AGENTS-ROSTER block listing every plugin agent",
+        ))
+        return findings
+
+    block = ROSTER_BLOCK_RE.search(AGENTS_MD_FILE.read_text(encoding="utf-8"))
+    if not block:
+        findings.append(Finding(
+            check="agents-roster",
+            severity="HIGH",
+            file="AGENTS.md",
+            evidence="no AGENTS-ROSTER:BEGIN/END block found",
+            suggestion="Add the roster block markers around the agent table in AGENTS.md",
+        ))
+        return findings
+
+    in_roster = set(ROSTER_ROW_RE.findall(block.group(1)))
+    for name in sorted(on_disk - in_roster):
+        findings.append(Finding(
+            check="agents-roster",
+            severity="HIGH",
+            file="AGENTS.md",
+            evidence=f"agent `{name}` is defined in plugins/ but missing from the AGENTS.md roster",
+            suggestion=f"Add a `{name}` row to the roster table in AGENTS.md",
+        ))
+    for name in sorted(in_roster - on_disk):
+        findings.append(Finding(
+            check="agents-roster",
+            severity="HIGH",
+            file="AGENTS.md",
+            evidence=f"roster lists agent `{name}` but plugins/neural-bridge-core/agents/{name}.md does not exist",
+            suggestion=f"Remove the `{name}` row or restore the agent definition file",
+        ))
+    log_line(verbose, f"agents-roster: {len(findings)} findings")
     return findings
 
 
@@ -414,6 +476,8 @@ def main() -> int:
         findings.extend(check_orphans(verbose=args.verbose))
     if "frontmatter" in checks:
         findings.extend(check_frontmatter(verbose=args.verbose))
+    if "agents-roster" in checks:
+        findings.extend(check_agents_roster(verbose=args.verbose))
     if "imperative-language" in checks:
         findings.extend(check_imperative_language(since, args.model, args.timeout, verbose=args.verbose))
 

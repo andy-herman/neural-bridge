@@ -1,5 +1,23 @@
 # Build Status
 
+## 2026-07-09 — Docs truth pass
+
+STATUS.md, AGENTS.md, and README had drifted badly behind the code (still describing the 2026-05-08 scaffold). Reconciled all three with reality and added a `agents-roster` drift check to `scripts/lint.py` so the AGENTS.md roster can never silently rot again. Added a root CLAUDE.md that imports AGENTS.md, since Claude Code auto-loads CLAUDE.md only.
+
+## V1.x — What actually shipped (2026-05-08 through 2026-05-27)
+
+Reconstructed from the git log during the 2026-07-09 truth pass; 131 commits on main.
+
+- **Agents:** roster grew from 3 to 14 definitions (added luna, librarian, echo, loid, ux-designer, plus the six specialists from the V1 audit). 13 registered with the Discord daemon.
+- **Discord orchestrator:** full daemon in `scripts/discord_bot/` with mention routing, actions blocks executed via `gh`, per-channel handoff budgets, session resumption, attachment ingest (pptx/xlsx), `/pm-*` and `/triage` slash commands, and multi-round `/squad-discuss` with reports and auto-issues.
+- **Memory pipeline:** `hooks/` (session_start, session_end, flush) plus `scripts/compile.py` filing gate and `scripts/lint.py` weekly checks, all with pytest coverage.
+- **Telegram:** Luna DM bridge and Loid (career strategist, voice and text) via `scripts/telegram_bot/`.
+- **Honcho peer memory:** shared `andyherman` peer card across all agents and Hermes-side Yor (`honcho_client.py`; see docs/HONCHO_INTEGRATION.md and docs/HONCHO_COPILOT_PLAYBOOK.md).
+- **Echo ingester:** Synapse DB and MindFrame Discord logs into the vault voice corpus.
+- **Ops:** fleet heartbeats into the Obsidian vault Fleet dashboard, launchd persistence, auto-reload, Cloudflare tunnel scripts.
+
+Known gaps as of 2026-07-09: fleet heartbeats stopped 2026-05-29 (daemon status unknown); ~15 feature branches unmerged on origin; plugin-level skills still not shipped; marketplace plugin at v0.8.0.
+
 ## V1 — Scaffold
 
 **Date:** 2026-05-08

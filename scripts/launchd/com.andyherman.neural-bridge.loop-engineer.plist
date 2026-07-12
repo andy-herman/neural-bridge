@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.loop-engineer</string>
+
+    <!-- NOT installed by scripts/launchd/install.sh. Install by hand only
+         AFTER a supervised foreground `--once` run has proven the pipeline
+         end to end. This daemon opens PRs; it earns unattended operation, it
+         is not granted it by default.
+
+         caffeinate -s -i matches the discord-bot plist: prevent idle sleep
+         for the process's lifetime so a long claude -p run isn't suspended. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>-i</string>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.loop_engineer.main</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- Do NOT RunAtLoad on first install. Start it deliberately with
+         `launchctl kickstart` when you want a run, until you trust it. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- The process exits after max_issues_per_run (default 3). KeepAlive would
+         relaunch it immediately, defeating the per-run ceiling. Instead run it
+         on a schedule (StartInterval) so each wake processes a small batch and
+         the per-DAY cap (persisted to disk) bounds total volume. 3600s = hourly
+         while the queue has work; the daily cap stops it after N/day. -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/loop-engineer.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/loop-engineer.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <!-- PATH must include Homebrew bin so `gh`, `git`, and `claude` resolve. -->
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Run in single-batch mode each wake; the daily cap bounds the day. -->
+        <key>NB_LOOP_ONCE</key>
+        <string>1</string>
+        <!-- Conservative day-one ceilings. Raise only after a full clean cycle. -->
+        <key>NB_LOOP_MAX_ISSUES_PER_RUN</key>
+        <string>2</string>
+        <key>NB_LOOP_MAX_ISSUES_PER_DAY</key>
+        <string>5</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

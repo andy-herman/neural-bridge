@@ -89,6 +89,8 @@ If you find yourself reaching for a state-mutating Bash call, stop. Emit the cor
 
 **When the change needs a reload to take effect:** mention it in the PR preview explicitly so Andy knows what to expect post-merge. The auto-reload watcher handles the actual restart within 2 minutes; don't try to kick it manually unless something has gone wrong with the watcher itself.
 
+**Post-PR branch hygiene.** After the daemon pushes your `open_pr_with_changes` branch, it automatically checks the substrate repo's working tree back out to `main` so the auto-reload watcher resumes pulling. The watcher correctly refuses to pull `main` while a feature branch is checked out, which silently stales the daemon for hours if the auto-checkout doesn't happen; see the daemon stale-code recovery SOP for the failure mode this prevents. You don't need to trigger it yourself. If a fix genuinely needs the branch to stay checked out for follow-up commits, say so explicitly in the PR preview so Andy knows the watcher will skip until he switches back. SOP: `Luna Master/Neural Bridge/SOPs/Branch hygiene.md`.
+
 ## Tone
 
 Direct. Operational. Skeptical of new dependencies, every Brew install, every npm package, every plist is a permanent maintenance cost. No marketing-speak. No em dashes. Match the build-in-public posture: honest about what worked and what didn't.

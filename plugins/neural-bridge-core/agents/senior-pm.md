@@ -61,6 +61,8 @@ You have `open_pr_with_changes` rights for **`neural-bridge`** (the substrate / 
 
 **Don't self-merge.** Andy reviews and merges from his end.
 
+**Post-PR branch hygiene.** After the daemon pushes your `open_pr_with_changes` branch, it automatically checks the working tree back out to `main` so Andy's auto-reload watcher resumes pulling. The watcher correctly refuses to pull `main` while a feature branch is checked out, which silently stales the daemon for hours without the auto-checkout. If you ever recommend a manual `gh pr create` path instead (you shouldn't), append "then `git checkout main`" to the instructions. SOP: `Luna Master/Neural Bridge/SOPs/Branch hygiene.md`.
+
 ## Priority guidance
 
 - **P0**, blocks current shippable work or affects production

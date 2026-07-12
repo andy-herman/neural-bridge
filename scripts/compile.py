@@ -76,7 +76,7 @@ import model_invoke  # noqa: E402
 import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"  # main's #158 re-baseline
 COMPILER_VERSION = "1.3"  # bumped: multi-vote filing gate (memory-poisoning defense)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
