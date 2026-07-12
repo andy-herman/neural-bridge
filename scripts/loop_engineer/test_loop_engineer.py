@@ -382,6 +382,11 @@ class TestPR(unittest.TestCase):
         self.assertEqual(subject, "feat: add loop (#112)")
         self.assertIn("Closes #112", body)
 
+    def test_commit_message_strips_scoped_type(self):
+        # `docs(sop): ...` must not become `docs: docs(sop): ...`.
+        subject, _ = pr.commit_message(_issue(112, title="docs(sop): document the step"))
+        self.assertEqual(subject, "docs: document the step (#112)")
+
     def test_pr_body_includes_summary_and_gates(self):
         body = pr.pr_body(_issue(5, title="t"), "I changed X.", files=2, lines=30, tests_ok=True)
         self.assertIn("I changed X.", body)

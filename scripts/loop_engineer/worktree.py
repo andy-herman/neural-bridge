@@ -133,15 +133,17 @@ def diff_line_count(cfg: LoopConfig, wt: WorktreeHandle) -> tuple[bool, int, int
 
 
 def remove(cfg: LoopConfig, clone: Path, wt: WorktreeHandle, *, keep_for_inspection: bool) -> str:
-    """Tear down. On success remove cleanly; on failure keep + rename so Andy
-    can inspect. Returns a short human status string.
+    """Tear down the on-disk worktree (the branch is always preserved).
+
+    `git worktree remove` can leave gitignored content (e.g. daily-logs/) behind,
+    so follow it with a filesystem rmtree to guarantee the .trees/ dir is clean —
+    otherwise a stale dir would trip the next run's create() idempotency. On the
+    failure path the branch is kept so Andy can inspect via `git checkout`.
     """
-    if keep_for_inspection:
-        failed_path = worktree_path(cfg, clone, wt.number).parent / f"failed-{cfg.branch_prefix}-{wt.number}"
-        # Detach the worktree registration but leave files on disk for inspection.
-        git(clone, ["worktree", "remove", "--force", str(wt.path)])
-        git(clone, ["worktree", "prune"])
-        return f"branch {wt.branch} kept; worktree removed (inspect via `git checkout {wt.branch}`)"
     git(clone, ["worktree", "remove", "--force", str(wt.path)])
+    if wt.path.exists():
+        shutil.rmtree(wt.path, ignore_errors=True)
     git(clone, ["worktree", "prune"])
+    if keep_for_inspection:
+        return f"branch {wt.branch} kept; worktree removed (inspect via `git checkout {wt.branch}`)"
     return f"worktree {wt.path.name} removed"

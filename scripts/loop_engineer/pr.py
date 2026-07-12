@@ -44,8 +44,9 @@ def infer_commit_type(title: str) -> str:
 
 
 def _strip_leading_type(title: str) -> str:
-    """Drop a leading `fix:`/`feat:` if the issue title already has one."""
-    return re.sub(r"^\s*(fix|feat|docs|refactor|test|chore|perf|build|ci)\s*:\s*",
+    """Drop a leading conventional-commit prefix (`fix:`, `docs(sop):`, ...) if
+    the issue title already has one, so we don't double-stamp it."""
+    return re.sub(r"^\s*(fix|feat|docs|refactor|test|chore|perf|build|ci)(\([^)]*\))?\s*:\s*",
                   "", title or "", flags=re.IGNORECASE).strip()
 
 
