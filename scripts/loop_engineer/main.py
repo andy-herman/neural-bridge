@@ -105,6 +105,17 @@ class LoopEngineer:
                                  remove=[cfg.running_label], add=[cfg.ready_label])
                 raise SystemExit("claude CLI not found on PATH — aborting run")
 
+            # An infra-class invocation failure (timeout, API/auth error, CLI
+            # crash) is distinct from a successful-but-empty agent run. Escalate
+            # with the accurate reason instead of misreporting it downstream as
+            # "no change". `max_turns` is excluded: the agent made real partial
+            # progress and is worth committing + gating.
+            if not result.ok and result.error_reason != "max_turns":
+                keep_worktree = True
+                self._to_failed(issue, f"claude invocation failed ({result.error_reason})",
+                                result.summary[:400])
+                return
+
             # Commit the agent's work NOW, before any test run can pollute the
             # tree. Every gate below is then a clean commit-to-commit diff.
             committed, reason = worktree.commit_work(wt, subject, cbody, amend=False)
