@@ -20,6 +20,7 @@ sys.path.insert(0, str(PKG_DIR.parent.parent))
 from scripts.loop_engineer import (  # noqa: E402
     executor,
     gitutil,
+    main as loop_main,
     notify,
     pr,
     queue,
@@ -431,6 +432,27 @@ class TestNotify(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+
+# ---------- --status report rendering ----------
+
+class TestStatusReport(unittest.TestCase):
+    def test_format_status_report_one_line_per_label(self):
+        counts = {"agent-ready": 3, "agent-running": 1, "agent-review": 0,
+                  "agent-blocked": 2, "agent-failed": 0}
+        report = loop_main.format_status_report(counts)
+        self.assertEqual(
+            report,
+            "agent-ready: 3\nagent-running: 1\nagent-review: 0\n"
+            "agent-blocked: 2\nagent-failed: 0",
+        )
+
+    def test_format_status_report_empty(self):
+        self.assertEqual(loop_main.format_status_report({}), "")
+
+    def test_format_status_report_preserves_input_order(self):
+        counts = {"z-label": 5, "a-label": 9}
+        self.assertEqual(loop_main.format_status_report(counts), "z-label: 5\na-label: 9")
 
 
 # ---------- daily-count state ----------
