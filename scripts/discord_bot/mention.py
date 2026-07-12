@@ -83,21 +83,21 @@ INFO_310A_CORPUS = str(
     Path.home() / "Documents" / "Luna Master" / "Neural Bridge" / "Corpus" / "INFO 310A"
 )
 HUSKYHUB_LABS = str(Path.home() / "Development" / "huskyhub")
-LUNA_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Luna")
+LUNA_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Agents" / "Luna")
 # Full Obsidian vault root — Luna gets read access to everything Andy has
 # in his vault so she can stay current on his life: Seoul E-Land FC fan
 # content (Sports/Seoul_E-Land), INFO 310 teaching schedule and lesson-plan
 # corpus (Neural Bridge/Corpus/INFO 310A), Neural Bridge build journal,
-# regulatory research, etc. The Luna/ subpath inside is where she writes
+# regulatory research, etc. The Agents/Luna/ subpath inside is where she writes
 # her own notes (charter forbids writing anywhere else under the vault).
 OBSIDIAN_VAULT_ROOT = str(Path.home() / "Documents" / "Luna Master")
 
 # Loid (career strategist) needs read/write on the Synapse SQLite DB at
 # ~/Development/Synapse/data/ (he reads via the synapse-journal CLI; he writes
 # journal entries when Andy explicitly asks). He also needs his own vault
-# folder at ~/Documents/Luna Master/Loid/ for Notes/Sessions/Ideas/Handoffs.
+# folder at ~/Documents/Luna Master/Agents/Loid/ for Notes/Sessions/Ideas/Handoffs.
 SYNAPSE_DATA_DIR = str(Path.home() / "Development" / "Synapse" / "data")
-LOID_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Loid")
+LOID_VAULT = str(Path.home() / "Documents" / "Luna Master" / "Agents" / "Loid")
 
 ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
     # Professor: read the corpus + the actual lab repo for end-to-end context.
@@ -166,7 +166,7 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
 # conversation. She doesn't have to read it as a tool call — it's already in
 # her context window when claude -p starts.
 
-LUNA_NOTES_PATH = Path.home() / "Documents" / "Luna Master" / "Luna" / "notes.md"
+LUNA_NOTES_PATH = Path.home() / "Documents" / "Luna Master" / "Agents" / "Luna" / "notes.md"
 LUNA_NOTES_MAX_CHARS = 8000  # bound prompt size; truncate-with-ellipsis otherwise
 
 # Weekly lessons-learned digest (produced by scripts/summarize_weekly.py). Same
@@ -241,7 +241,7 @@ def _luna_notes_block() -> str:
     sanitized = sanitize_untrusted_text(notes, "luna-notes")
     return (
         "## Your prior notes (auto-injected from "
-        "~/Documents/Luna Master/Luna/notes.md)\n\n"
+        "~/Documents/Luna Master/Agents/Luna/notes.md)\n\n"
         "These are notes you wrote in past sessions about Andy's preferences, "
         "voice, recurring commitments, open conversation threads, and decisions "
         "he's made. Read them as your own working memory; they're already in "
