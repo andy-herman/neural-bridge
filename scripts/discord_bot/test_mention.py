@@ -147,10 +147,17 @@ class TestAllowedTools(unittest.TestCase):
         self.assertNotIn("WebSearch", tools)
 
     def test_no_bash_anywhere(self):
-        # Agents must NEVER have Bash in mention mode. Autonomous gh /
-        # shell access ships via a structured tool-use protocol later.
+        # Agents must NOT have Bash in mention mode, with ONE documented
+        # exception: loid runs the synapse-journal CLI (its whole purpose, over
+        # Telegram + Discord) and genuinely needs Bash. Deliberate, scoped
+        # capability grant — see loid.md's tool frontmatter and mention.py's
+        # loid allowlist. Everyone else stays shell-free until autonomous access
+        # ships via a structured tool-use protocol.
         from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
+        BASH_EXEMPT = {"loid"}
         for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
+            if agent_id in BASH_EXEMPT:
+                continue
             self.assertNotIn("Bash", tools, f"{agent_id} should not have Bash in mention mode")
 
     def test_security_reviewer_is_read_only(self):
