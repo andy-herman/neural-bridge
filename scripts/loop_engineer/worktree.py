@@ -18,6 +18,7 @@ Teardown removes the worktree on success; on failure it is *kept* (renamed to
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,9 +55,14 @@ def create(cfg: LoopConfig, clone: Path, number: int) -> tuple[bool, WorktreeHan
     if not ok:
         return False, None, f"fetch failed: {err}"
 
-    # Idempotency: clear a stale worktree dir and branch from a previous run.
+    # Idempotency: clear anything a previous (possibly crashed) run left behind.
+    # `git worktree remove` only works on a REGISTERED worktree; an orphaned
+    # directory (registration gone but dir on disk) makes it fail, and then
+    # `worktree add` fails because the path already exists. So after the git
+    # remove attempt, force-delete the directory at the filesystem level.
+    git(clone, ["worktree", "remove", "--force", str(path)])
     if path.exists():
-        git(clone, ["worktree", "remove", "--force", str(path)])
+        shutil.rmtree(path, ignore_errors=True)
     git(clone, ["worktree", "prune"])
     # Delete the branch if it lingers (only safe because eng/* is loop-owned).
     git(clone, ["branch", "-D", branch])
