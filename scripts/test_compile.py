@@ -186,6 +186,14 @@ class TestStripCodeFences(unittest.TestCase):
 
 
 class TestCallFilingGate(unittest.TestCase):
+    def setUp(self):
+        # Keep these hermetic regardless of the host's NB_FALLBACK_* env: the
+        # subprocess-failure cases must never make a real fallback HTTP call.
+        p = patch("compile.model_invoke.fallback_text",
+                  return_value=(False, "", "no_fallback_configured"))
+        self.addCleanup(p.stop)
+        p.start()
+
     def _mock_run(self, stdout_text: str, returncode: int = 0):
         class _Result:
             stdout = stdout_text
@@ -307,6 +315,7 @@ class TestMainWithMockedGate(unittest.TestCase):
         self._saved = (
             cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR,
             cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+            cmp.HISTORY_DIR, cmp.CONNECTIONS_DIR, cmp.WIKI_LOG, cmp.WIKI_INDEX,
         )
         cmp.REPO_ROOT = self.tmp_path
         cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
@@ -314,6 +323,13 @@ class TestMainWithMockedGate(unittest.TestCase):
         cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
         cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
         cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        # Isolate the remaining output paths so main() never writes to the real
+        # knowledge/ tree. WIKI_LOG / WIKI_INDEX point at absent files, so
+        # append_to_log and refresh_index no-op.
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
         # Create a daily log
         agent_dir = cmp.DAILY_LOGS_DIR / "research"
         agent_dir.mkdir(parents=True)
@@ -321,7 +337,8 @@ class TestMainWithMockedGate(unittest.TestCase):
 
     def tearDown(self):
         (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR,
-         cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE) = self._saved
+         cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
+         cmp.HISTORY_DIR, cmp.CONNECTIONS_DIR, cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
         self.tmp.cleanup()
 
     def _run_main(self, argv: list[str]) -> int:
@@ -395,6 +412,12 @@ def _writer_response(body: str):
 
 
 class TestConceptWriter(unittest.TestCase):
+    def setUp(self):
+        p = patch("compile.model_invoke.fallback_text",
+                  return_value=(False, "", "no_fallback_configured"))
+        self.addCleanup(p.stop)
+        p.start()
+
     def test_call_returns_body_and_strips_trailing_whitespace(self):
         with patch("compile.subprocess.run",
                    side_effect=lambda *a, **k: _writer_response("Some body text\n\n")):
@@ -569,7 +592,7 @@ class TestMainPhaseB(unittest.TestCase):
         self._saved = (
             cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
             cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
-            cmp.WIKI_LOG, cmp.WIKI_INDEX,
+            cmp.WIKI_LOG, cmp.WIKI_INDEX, cmp.CONNECTIONS_DIR,
         )
         cmp.REPO_ROOT = self.tmp_path
         cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
@@ -580,6 +603,7 @@ class TestMainPhaseB(unittest.TestCase):
         cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
         cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
         cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
         # Daily log
         agent_dir = cmp.DAILY_LOGS_DIR / "research"
         agent_dir.mkdir(parents=True)
@@ -595,7 +619,7 @@ class TestMainPhaseB(unittest.TestCase):
     def tearDown(self):
         (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
          cmp.QUARANTINE_DIR, cmp.DRY_RUN_DIR, cmp.COMPILE_STATE_FILE,
-         cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+         cmp.WIKI_LOG, cmp.WIKI_INDEX, cmp.CONNECTIONS_DIR) = self._saved
         self.tmp.cleanup()
 
     def _run_main(self, argv: list[str]) -> int:
@@ -616,9 +640,9 @@ class TestMainPhaseB(unittest.TestCase):
             return _R()
 
         with patch("compile.subprocess.run", side_effect=gate_only):
-            rc = self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
+            rc = self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord", "--votes", "1"])
         self.assertEqual(rc, 0)
-        # 2 candidates, only filing-gate calls (no writer)
+        # 2 candidates, only filing-gate calls (no writer), single-pass gate
         self.assertEqual(call_count["n"], 2)
         # Concepts written with stub format
         for path in cmp.CONCEPTS_DIR.glob("*.md"):
@@ -639,7 +663,7 @@ class TestMainPhaseB(unittest.TestCase):
             return _R()
 
         with patch("compile.subprocess.run", side_effect=alternating):
-            rc = self._run_main(["--no-dry-run", "--no-discord"])
+            rc = self._run_main(["--no-dry-run", "--no-discord", "--votes", "1"])
         self.assertEqual(rc, 0)
         self.assertEqual(len(responses), 0)  # all consumed
         # Concepts have rich bodies, no stub footer
@@ -987,6 +1011,359 @@ hook_event: SessionEnd
         # Only research's candidates: shared-concept + research-only-concept.
         # content-only-concept should NOT be promoted.
         self.assertEqual(promoted, ["research-only-concept", "shared-concept"])
+
+
+# ============================================================================
+# Phase C: multi-vote filing gate (memory-poisoning defense)
+# ============================================================================
+
+
+class TestAggregateVerdicts(unittest.TestCase):
+    def _v(self, verdict, reason="r", checks=None):
+        return {"verdict": verdict, "reason": reason, "checks_triggered": checks or []}
+
+    def test_unanimous_promote(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE")] * 3)
+        self.assertEqual(g["verdict"], "PROMOTE")
+
+    def test_majority_promote_with_quarantine_still_promotes(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("PROMOTE"), self._v("QUARANTINE")])
+        self.assertEqual(g["verdict"], "PROMOTE")
+
+    def test_promote_majority_but_a_reject_downgrades_to_quarantine(self):
+        # 2 PROMOTE + 1 REJECT must NOT promote: a lone reject is a red flag.
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("PROMOTE"), self._v("REJECT")])
+        self.assertEqual(g["verdict"], "QUARANTINE")
+
+    def test_majority_reject(self):
+        g = cmp.aggregate_verdicts([self._v("REJECT"), self._v("REJECT"), self._v("PROMOTE")])
+        self.assertEqual(g["verdict"], "REJECT")
+
+    def test_three_way_split_quarantines(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("QUARANTINE"), self._v("REJECT")])
+        self.assertEqual(g["verdict"], "QUARANTINE")
+
+    def test_single_vote_reduces_to_that_verdict(self):
+        for verdict in ("PROMOTE", "QUARANTINE", "REJECT"):
+            self.assertEqual(cmp.aggregate_verdicts([self._v(verdict)])["verdict"], verdict)
+
+    def test_checks_are_unioned_and_sorted(self):
+        g = cmp.aggregate_verdicts([
+            self._v("QUARANTINE", checks=["untraceable-claims"]),
+            self._v("REJECT", checks=["imperative-ai-directed-language"]),
+            self._v("QUARANTINE", checks=["untraceable-claims", "coherence"]),
+        ])
+        self.assertEqual(
+            g["checks_triggered"],
+            ["coherence", "imperative-ai-directed-language", "untraceable-claims"],
+        )
+
+    def test_audit_votes_kept_and_reason_is_single_line(self):
+        g = cmp.aggregate_verdicts([self._v("PROMOTE"), self._v("REJECT"), self._v("REJECT")])
+        self.assertEqual(len(g["votes"]), 3)
+        self.assertNotIn("\n", g["reason"])
+        self.assertIn("->", g["reason"])
+
+
+class TestCallFilingGateVoted(unittest.TestCase):
+    def _resp(self, verdict):
+        class _R:
+            stdout = json.dumps({"verdict": verdict, "reason": "r", "checks_triggered": []})
+            stderr = ""
+            returncode = 0
+        return _R()
+
+    def test_three_promotes_promote(self):
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp("PROMOTE")):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+        self.assertEqual([v["verdict"] for v in gate["votes"]], ["PROMOTE", "PROMOTE", "PROMOTE"])
+
+    def test_two_promote_one_reject_quarantines(self):
+        seq = ["PROMOTE", "PROMOTE", "REJECT"]
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp(seq.pop(0))):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "QUARANTINE")
+
+    def test_votes_one_delegates_to_single_gate(self):
+        with patch("compile.subprocess.run", side_effect=lambda *a, **k: self._resp("PROMOTE")):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=1)
+        self.assertTrue(ok, err)
+        self.assertNotIn("votes", gate)  # single-pass path returns the raw gate dict
+
+    def test_insufficient_successful_votes_is_error_not_promote(self):
+        # With one retry per pass, a pass is dropped only after failing twice.
+        # p1 succeeds; p2 and p3 each fail twice -> only 1 of 3 parses.
+        seq = ["good", "bad", "bad", "bad", "bad"]
+
+        def run(*a, **k):
+            kind = seq.pop(0)
+            class _R:
+                stdout = (json.dumps({"verdict": "PROMOTE", "reason": "r", "checks_triggered": []})
+                          if kind == "good" else "not json")
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=run):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertFalse(ok)
+        self.assertIsNone(gate)
+        self.assertTrue(err.startswith("insufficient_votes"))
+
+    def test_transient_pass_failure_is_retried(self):
+        # Second pass fails once then succeeds on retry; all three passes count.
+        seq = ["good", "bad", "good", "good"]  # p1 ok; p2 bad->retry ok; p3 ok
+
+        def run(*a, **k):
+            kind = seq.pop(0)
+            class _R:
+                stdout = (json.dumps({"verdict": "PROMOTE", "reason": "r", "checks_triggered": []})
+                          if kind == "good" else "not json")
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=run):
+            ok, gate, err = cmp.call_filing_gate_voted("p", "m", 30, votes=3)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+        self.assertEqual(len(gate["votes"]), 3)
+
+
+class TestMultiVoteOutputProvenance(unittest.TestCase):
+    """The voted gate's per-pass tally surfaces in concept frontmatter and quarantine bodies.
+
+    These exercise the writers directly (not main()), so they never touch the
+    real knowledge/ tree.
+    """
+
+    def _cand(self):
+        return cmp.ConceptCandidate(
+            slug="x-concept", summary="s",
+            sources=[{"agent": "research", "session_id": "s1", "transcript_sha256": "h",
+                      "source_log": "daily-logs/research/2026-05-09.md", "session_n": 1}],
+            excerpt="...",
+        )
+
+    def _voted_gate(self, verdicts):
+        return cmp.aggregate_verdicts(
+            [{"verdict": v, "reason": f"r {v}", "checks_triggered": []} for v in verdicts])
+
+    def test_stub_concept_frontmatter_has_gate_votes(self):
+        text = cmp.stub_concept_article(self._cand(), self._voted_gate(["PROMOTE", "PROMOTE", "PROMOTE"]))
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, PROMOTE]", text)
+
+    def test_rendered_concept_frontmatter_has_gate_votes(self):
+        gate = self._voted_gate(["PROMOTE", "PROMOTE", "QUARANTINE"])
+        text = cmp.render_concept_article(self._cand(), gate, "Body.\n")
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, QUARANTINE]", text)
+
+    def test_quarantine_body_lists_each_pass(self):
+        gate = self._voted_gate(["PROMOTE", "PROMOTE", "REJECT"])
+        self.assertEqual(gate["verdict"], "QUARANTINE")  # a lone reject downgrades
+        with tempfile.TemporaryDirectory() as d:
+            saved = cmp.QUARANTINE_DIR
+            cmp.QUARANTINE_DIR = Path(d) / "quarantine"
+            try:
+                target = cmp.write_quarantine(self._cand(), gate, dry_run=False)
+                text = target.read_text(encoding="utf-8")
+            finally:
+                cmp.QUARANTINE_DIR = saved
+        self.assertIn("## Gate votes", text)
+        self.assertIn("gate_votes: [PROMOTE, PROMOTE, REJECT]", text)
+        self.assertIn("Pass 3 (REJECT)", text)
+
+
+# ============================================================================
+# Provider-fallback shim (Fugu Layer 2): claude -p with an OpenAI-compatible fallback
+# ============================================================================
+
+
+class TestFilingGateFallback(unittest.TestCase):
+    def _claude_fail(self, *a, **k):
+        class _R:
+            stdout = ""
+            stderr = "boom"
+            returncode = 1
+        return _R()
+
+    def test_fallback_used_when_claude_fails(self):
+        promote = (True, json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []}), "")
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text", return_value=promote):
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertTrue(ok, err)
+        self.assertEqual(gate["verdict"], "PROMOTE")
+
+    def test_error_when_claude_and_fallback_both_fail(self):
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text",
+                   return_value=(False, "", "no_fallback_configured")):
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertFalse(ok)
+        self.assertIn("exit_1", err)
+        self.assertIn("fallback:no_fallback_configured", err)
+
+    def test_concept_writer_uses_fallback(self):
+        with patch("compile.subprocess.run", side_effect=self._claude_fail), \
+             patch("compile.model_invoke.fallback_text",
+                   return_value=(True, "Fallback article body.\n", "")):
+            ok, body, err = cmp.call_concept_writer("p", "m", 30)
+        self.assertTrue(ok, err)
+        self.assertIn("Fallback article body.", body)
+
+    def test_bad_response_does_not_trigger_fallback(self):
+        # A returned-but-malformed response is a parse error, not a provider
+        # failure, so the fallback must NOT be consulted.
+        def claude_ok_badjson(*a, **k):
+            class _R:
+                stdout = "not json"
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=claude_ok_badjson), \
+             patch("compile.model_invoke.fallback_text") as fb_mock:
+            ok, gate, err = cmp.call_filing_gate("p", "m", 30)
+        self.assertFalse(ok)
+        self.assertTrue(err.startswith("json_decode"))
+        fb_mock.assert_not_called()
+
+
+# ============================================================================
+# Regression: >10 promoted candidates with Discord enabled (run_log_path ordering)
+# ============================================================================
+
+
+def _daily_log_with_n_concepts(n: int) -> str:
+    """Build a daily log with `n` sessions, each proposing one unique concept.
+
+    Distinct session_ids per session so the shared-session connection writer
+    finds no pairs (keeps the fixture to exactly `n` PROMOTE action lines).
+    The `## Session N -- ...` heading uses the em dash the parser's
+    SESSION_HEADING_RE matches, same as SAMPLE_DAILY_LOG.
+    """
+    head = (
+        "---\n"
+        "type: daily-log\n"
+        "agent: research\n"
+        "date: 2026-05-09\n"
+        'schema_version: "1.0"\n'
+        f"session_count: {n}\n"
+        "last_flushed_at: 2026-05-09T08:01:23Z\n"
+        "---\n\n"
+    )
+    blocks = []
+    for i in range(1, n + 1):
+        blocks.append(
+            f"## Session {i} — 08:{i:02d} UTC\n\n"
+            "```yaml\n"
+            f"session_id: sess-{i:04d}\n"
+            "transcript_path: /tmp/transcript.jsonl\n"
+            f"transcript_sha256: {i:064x}\n"
+            "started_at: 2026-05-09T08:01:17Z\n"
+            "ended_at: 2026-05-09T08:01:23Z\n"
+            'flush_version: "1.0"\n'
+            "hook_event: SessionEnd\n"
+            "```\n\n"
+            "### Decisions\n\n"
+            f"- decision number {i}\n\n"
+            "### Findings\n\n"
+            "- (none)\n\n"
+            "### Open questions\n\n"
+            "- (none)\n\n"
+            "### Proposed concepts\n\n"
+            f"- concept-{i:02d}: A unique concept number {i}\n"
+        )
+    return head + "\n".join(blocks)
+
+
+class TestMainDiscordManyCandidates(unittest.TestCase):
+    """Regression for the run_log_path ordering bug.
+
+    The Discord summary references the run-log path when there are more than 10
+    action lines. That path used to be computed AFTER the Discord block, so a
+    nightly run with >10 PROMOTEs and Discord enabled (the default) raised
+    NameError after the concepts were written but before the run log was saved
+    or the fleet heartbeat emitted. main() must return 0, send the summary, and
+    still write the run log.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = (
+            cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+            cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+            cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX,
+        )
+        cmp.REPO_ROOT = self.tmp_path
+        cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
+        cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        agent_dir = cmp.DAILY_LOGS_DIR / "research"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "2026-05-09.md").write_text(
+            _daily_log_with_n_concepts(12), encoding="utf-8")
+        cmp.WIKI_LOG.parent.mkdir(parents=True, exist_ok=True)
+        cmp.WIKI_LOG.write_text("---\ntype: log\n---\n\n# Log\n", encoding="utf-8")
+        cmp.WIKI_INDEX.write_text(
+            "---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        (cmp.REPO_ROOT, cmp.DAILY_LOGS_DIR, cmp.CONCEPTS_DIR, cmp.HISTORY_DIR,
+         cmp.QUARANTINE_DIR, cmp.CONNECTIONS_DIR, cmp.DRY_RUN_DIR,
+         cmp.COMPILE_STATE_FILE, cmp.WIKI_LOG, cmp.WIKI_INDEX) = self._saved
+        self.tmp.cleanup()
+
+    def _run_main(self, argv: list[str]) -> int:
+        with patch.object(sys, "argv", ["compile.py", *argv]):
+            return cmp.main()
+
+    def test_many_candidates_with_discord_enabled_returns_zero(self):
+        sent: list[str] = []
+
+        def fake_send(content, *args, **kwargs):
+            sent.append(content)
+            return True
+
+        def gate_promote(*args, **kwargs):
+            class _R:
+                stdout = json.dumps(
+                    {"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        # Discord enabled (no --no-discord); live run with >10 promoted candidates.
+        # --no-rich-body keeps every mocked call a gate call (no writer calls).
+        with patch("compile.subprocess.run", side_effect=gate_promote), \
+             patch("compile.discord_post.send", side_effect=fake_send):
+            rc = self._run_main(["--no-dry-run", "--no-rich-body"])
+
+        self.assertEqual(rc, 0)
+        # All 12 unique concepts promoted -> the ">10 actions" Discord branch ran.
+        promoted = sorted(p.stem for p in cmp.CONCEPTS_DIR.glob("*.md"))
+        self.assertEqual(len(promoted), 12)
+        # The summary was sent, using the ASCII ellipsis (not U+2026).
+        self.assertEqual(len(sent), 1)
+        self.assertIn("...and more.", sent[0])
+        self.assertNotIn("…and more", sent[0])
+        # The run log was written AFTER the Discord block -- the crash used to
+        # abort main() here, before this file (and the fleet heartbeat) existed.
+        run_log = cmp.DRY_RUN_DIR / f"{cmp.utc_today()}-compile-run.md"
+        self.assertTrue(run_log.exists())
 
 
 if __name__ == "__main__":
