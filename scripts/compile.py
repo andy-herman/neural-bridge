@@ -72,6 +72,7 @@ FLUSH_SCRIPT = HOOKS_DIR / "flush.py"
 sys.path.insert(0, str(HOOKS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 import discord_post  # noqa: E402
+import model_invoke  # noqa: E402
 import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 
@@ -358,8 +359,17 @@ def _subprocess_env_for_compile_claude() -> dict[str, str]:
     return env
 
 
-def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
-    """Invoke `claude -p` with the filing gate prompt. Return (ok, parsed, error)."""
+def _claude_or_fallback(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
+    """Run `claude -p`; on a provider-level failure, try the configured fallback.
+
+    Returns (ok, raw_text, error). A provider-level failure is a timeout, a
+    non-zero exit, or a missing CLI: the primary is unavailable, not that it
+    produced a bad answer. Output validation (JSON, emptiness) stays with the
+    caller, so a malformed-but-returned response does NOT trigger fallback.
+
+    The fallback is off unless NB_FALLBACK_BASE_URL is set, so by default this
+    is exactly the previous Claude-only behavior. See model_invoke.py.
+    """
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "text", "--model", model],
@@ -370,14 +380,29 @@ def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict 
             env=_subprocess_env_for_compile_claude(),
         )
     except subprocess.TimeoutExpired:
-        return False, None, "timeout"
+        primary_err = "timeout"
     except FileNotFoundError:
-        return False, None, "claude_cli_not_found"
-    if result.returncode != 0:
+        primary_err = "claude_cli_not_found"
+    else:
+        if result.returncode == 0:
+            return True, result.stdout, ""
         snippet = (result.stderr or "")[:200].replace("\n", " ")
-        return False, None, f"exit_{result.returncode}:{snippet}"
+        primary_err = f"exit_{result.returncode}:{snippet}"
 
-    text = strip_code_fences(result.stdout)
+    # Primary (Claude) is unavailable. Try the configured fallback provider.
+    ok, text, fb_err = model_invoke.fallback_text(prompt, timeout)
+    if ok:
+        return True, text, ""
+    return False, "", f"{primary_err}; fallback:{fb_err}"
+
+
+def call_filing_gate(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
+    """Run the filing gate prompt (Claude, with fallback). Return (ok, parsed, error)."""
+    ok, raw, err = _claude_or_fallback(prompt, model, timeout)
+    if not ok:
+        return False, None, err
+
+    text = strip_code_fences(raw)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -625,29 +650,16 @@ def build_concept_writer_prompt(template: str, slug: str, summary: str, agent: s
 
 
 def call_concept_writer(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
-    """Invoke `claude -p` with the concept writer prompt. Return (ok, body, error).
+    """Run the concept writer prompt (Claude, with fallback). Return (ok, body, error).
 
     Body is the article markdown with no frontmatter and no H1 (per the prompt's
     output rules). Caller wraps it with frontmatter + title.
     """
-    try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=_subprocess_env_for_compile_claude(),
-        )
-    except subprocess.TimeoutExpired:
-        return False, "", "timeout"
-    except FileNotFoundError:
-        return False, "", "claude_cli_not_found"
-    if result.returncode != 0:
-        snippet = (result.stderr or "")[:200].replace("\n", " ")
-        return False, "", f"exit_{result.returncode}:{snippet}"
+    ok, raw, err = _claude_or_fallback(prompt, model, timeout)
+    if not ok:
+        return False, "", err
 
-    body = strip_code_fences(result.stdout)
+    body = strip_code_fences(raw)
     # Defensive: strip a leading H1 if the model emitted one despite the rule.
     if body.startswith("# "):
         body = body.split("\n", 1)[1].lstrip("\n") if "\n" in body else ""
@@ -1123,6 +1135,13 @@ def main() -> int:
 
     print(summary)
 
+    # Compute the run-log path before the Discord block: the summary references
+    # it when there are more than 10 action lines, and the file itself is written
+    # further down. Defining it here keeps both uses in agreement and avoids a
+    # NameError on runs with >10 candidates and Discord enabled (the default).
+    suffix = "-dry-run" if args.dry_run else ""
+    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
+
     if not args.no_discord:
         mode = "dry-run" if args.dry_run else "live"
         header = f"**Compile run** | {utc_today()} | {mode}"
@@ -1138,16 +1157,14 @@ def main() -> int:
             body_lines.append("")
             body_lines.extend(action_lines)
         if len([line for line in run_log_lines if line.startswith("- ")]) > 10:
-            body_lines.append(f"_…and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
+            body_lines.append(f"_...and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
         message = discord_post.truncate_for_discord("\n".join(body_lines))
         discord_post.send(message)
 
-    # Always write a run log to docs/compile/
+    # Always write a run log to docs/compile/ (run_log_path computed above).
     DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
     run_log_lines.append("")
     run_log_lines.append(f"## Summary\n\n{summary}\n")
-    suffix = "-dry-run" if args.dry_run else ""
-    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
     run_log_path.write_text("\n".join(run_log_lines), encoding="utf-8")
     log_line(args.verbose, f"run log: {run_log_path.relative_to(REPO_ROOT)}")
 
