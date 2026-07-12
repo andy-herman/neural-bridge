@@ -19,8 +19,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Model default matches the rest of the daemon (claude_invoke.DEFAULT_MODEL).
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Sonnet 5, matching the code-generating pipeline (compile.py / lint.py) after
+# the #158 re-baseline — the loop writes code, so it tracks that tier rather
+# than the lighter conversational default in claude_invoke.py.
+DEFAULT_MODEL = "claude-sonnet-5"
 
 # Narrow allowlist. WebSearch/WebFetch are denied separately so an automated
 # run has no outbound-data path. Bash is included so the agent can run the

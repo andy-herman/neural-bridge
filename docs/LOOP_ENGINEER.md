@@ -106,7 +106,7 @@ discussion's action items flow straight into the queue.
 | `NB_LOOP_MAX_STRIKES` | 3 | consecutive failed gates before escalation |
 | `NB_LOOP_MAX_DIFF_LINES` | 500 | over this → agent-blocked |
 | `NB_LOOP_PER_ISSUE_TIMEOUT` | 1800 | seconds per claude -p attempt |
-| `NB_LOOP_MODEL` | claude-sonnet-4-6 | model for the coding agent |
+| `NB_LOOP_MODEL` | claude-sonnet-5 | model for the coding agent |
 | `NB_LOOP_TEST_COMMAND` | unittest discovery over `scripts/` | the gate command |
 | `NB_LOOP_ONCE` | false | process a batch then exit (set by the plist) |
 | `NB_LOOP_DRY_RUN` | false | gates only, no PR |
