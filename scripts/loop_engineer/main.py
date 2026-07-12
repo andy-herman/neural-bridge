@@ -292,20 +292,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="run all gates but do not push, open PRs, or advance labels past running")
     p.add_argument("--owner", metavar="LABEL", default=None,
                    help="only claim issues also carrying this owner label, e.g. owner:automation-engineer")
+    p.add_argument("--status", action="store_true",
+                   help="print open-issue counts per label state and exit (read-only, no claiming)")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return p.parse_args(argv)
+
+
+def format_status_report(counts: dict[str, int]) -> str:
+    """Pure: label -> open-issue count => one '<label>: <count>' line per entry."""
+    return "\n".join(f"{label}: {count}" for label, count in counts.items())
+
+
+def run_status(cfg: LoopConfig) -> int:
+    """Print queue depth per label state and exit. Read-only `gh` queries only."""
+    repo = repo_for(cfg.repo_id)
+    if repo is None:
+        raise SystemExit(f"unknown repo_id {cfg.repo_id!r} (see discord_bot/repos.py)")
+    owner_filter = [cfg.owner_label] if cfg.owner_label else []
+    labels = [cfg.ready_label, cfg.running_label, cfg.review_label,
+              cfg.blocked_label, cfg.failed_label]
+    counts = {label: len(queue.list_ready(repo.gh_slug, [label] + owner_filter)) for label in labels}
+    print(format_status_report(counts))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     _configure_logging(args.verbose)
     cfg = LoopConfig.from_env()
+    if args.owner:
+        cfg.owner_label = args.owner
+    if args.status:
+        return run_status(cfg)
     if args.once:
         cfg.once = True
     if args.dry_run:
         cfg.dry_run = True
-    if args.owner:
-        cfg.owner_label = args.owner
     _install_signal_traps()
     _log.info("loop engineer starting: repo=%s once=%s dry_run=%s owner=%s "
               "caps[run=%s day=%s turns=%s strikes=%s diff=%s]",
