@@ -58,7 +58,7 @@ Added `honcho-ai` to the NB venv via direct `pip install`. NB has no `pyproject.
 
 Right now Honcho's deriver runs on `qwen2.5:14b` (local Ollama, slow, frequent timeouts). When Andy adds an Anthropic key and we swap Honcho to Haiku 4.5:
 
-1. Restart the Honcho stack (`docker compose restart` in `~/Code/honcho`).
+1. Restart the Honcho stack (`docker compose restart` in `~/Development/honcho` — consolidated there 2026-08-02; the old `~/Code/honcho` clone is retired).
 2. Send Luna a substantive Discord message about Andy's preferences. Wait ~30s.
 3. Check the deriver activity: `docker logs -f honcho-deriver-1`. Should see Anthropic calls completing in 1-3s instead of timing out.
 4. Wait ~10-30s for the deriver to process.
