@@ -83,6 +83,50 @@ Health check: `https://mcp.neural-bridge.dev/` returns **401** (auth required)
 when healthy; `https://honcho.neural-bridge.dev/` returns **404** (FastAPI has
 no root route) when the tunnel + API are up.
 
+## Deriver: flush mode is required at our traffic volume
+
+Honcho's deriver uses forced batching: `representation` work units are only
+claimed once they accumulate `REPRESENTATION_BATCH_MAX_TOKENS` worth of
+messages. At personal-use volume (short messages spread across many
+sessions/work units) batches never fill, so queue items pile up unprocessed
+forever and peer cards stay empty — this is why cards were empty from May
+through August 2026 (214 items stuck, zero errors logged; the deriver was
+healthy and the Anthropic key fine the whole time).
+
+Fix (set in `.env`, then `docker compose up -d deriver`):
+
+```
+DERIVER_FLUSH_ENABLED=true
+```
+
+Trade-off: more, smaller LLM calls to the deriver model (Haiku) instead of a
+few big batched ones — negligible at this volume. If this line is ever lost
+(re-clone, .env rebuild), the symptom is `SELECT count(*) FROM queue WHERE
+processed=false` growing while `docker logs honcho-deriver-1` shows no errors.
+
+Note the deriver/dialectic/summary models were switched from local qwen2.5:14b
+to `claude-haiku-4-5` (Anthropic API) at some point after the May integration
+doc — `docs/HONCHO_INTEGRATION.md`'s "when Andy adds an Anthropic key" section
+is stale; the key is wired and only embeddings still run locally (Ollama bge-m3).
+
+## Peer cards come from dreams, not the deriver
+
+Two-stage pipeline: the **deriver** turns queue items into observation
+`documents` (facts); the **dreamer** ("dream consolidation") later distills
+documents into the peer card that `get_card()` returns, stored in
+`peers.internal_metadata`. Dream triggers (all defaults): peer accumulates
+≥50 new documents AND is idle ≥60 min, max one dream per 8h, `DREAM_ENABLED`
+default true. So cards lag the conversation by an hour or more by design —
+an empty card with thousands of documents just means no dream has run yet.
+
+Debug queries:
+
+```
+docker exec honcho-database-1 psql -U postgres -c "SELECT count(*) FROM queue WHERE processed=false;"
+docker exec honcho-database-1 psql -U postgres -c "SELECT observer, observed, count(*) FROM documents GROUP BY 1,2 ORDER BY 3 DESC;"
+docker exec honcho-database-1 psql -U postgres -c "SELECT name FROM peers WHERE internal_metadata != '{}'::jsonb;"
+```
+
 ## Version pinning
 
 The clone sits at upstream `85239a6` (2026-05-27). Upstream moves fast and the
