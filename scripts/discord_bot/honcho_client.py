@@ -34,6 +34,7 @@ _logger = logging.getLogger("nb_discord.honcho")
 _client_cache = None
 _warned_unavailable = False
 _warned_disabled = False
+_logged_first_submit = False
 
 
 def _enabled() -> bool:
@@ -122,7 +123,9 @@ def get_peer_card_context(agent_id: str, max_chars: int = 2000) -> str:
             f"{body}\n"
         )
     except Exception as exc:
-        _logger.debug("Honcho peer card fetch failed for agent %s: %s", agent_id, exc)
+        # warning, not debug: a silent failure here hid a dead capture path for
+        # two months (May-Aug 2026) — visibility is worth the occasional noise.
+        _logger.warning("Honcho peer card fetch failed for agent %s: %s", agent_id, exc)
         return ""
 
 
@@ -156,8 +159,14 @@ def submit_turn(
                 {"peer_id": agent_id, "content": agent_response},
             ]
         )
+        global _logged_first_submit
+        if not _logged_first_submit:
+            _logger.info("Honcho first turn submitted OK (agent=%s, session=%s)", agent_id, sid[:8])
+            _logged_first_submit = True
     except Exception as exc:
-        _logger.debug("Honcho turn submit failed for agent %s: %s", agent_id, exc)
+        # warning, not debug: a silent failure here hid a dead capture path for
+        # two months (May-Aug 2026) — visibility is worth the occasional noise.
+        _logger.warning("Honcho turn submit failed for agent %s: %s", agent_id, exc)
 
 
 def ensure_peer(agent_id: str) -> None:
