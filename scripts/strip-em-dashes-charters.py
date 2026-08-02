@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Em-dash sweep adapted from /tmp/strip-em-dashes-v2.py for the agent
-charter directory. Same six rules in the same specificity order; only
-the target path changes.
+"""Em-dash sweep for agent-governing markdown. Six rules in specificity order:
 
 1. `[Link](url) — desc` after a markdown link, colon
 2. Bullet-list / YAML-scalar first-dash that introduces explanation, colon
@@ -9,11 +7,25 @@ the target path changes.
 4. Body dash + uppercase continuation, period
 5. Body dash + lowercase continuation, comma
 6. Numeric range N–M between digits, hyphen
+
+Usage:
+    strip-em-dashes-charters.py [ROOT] [--recursive] [--exclude NAME ...]
+
+ROOT defaults to the Neural Bridge agent charters. Pass a different root to
+sweep another agent's governing files, e.g. Yor's brain at
+`~/Documents/Luna Master/Agents/Hermes`.
+
+Why this matters beyond style: Andy's no-em-dash rule applies to what these
+agents WRITE, and the rule is stated inside the very documents they read. A
+charter that bans em-dashes while using nine of them is a context that
+contradicts its own instruction. `--exclude` exists for the one legitimate
+case: the line that states the rule has to be able to show the character.
 """
 from pathlib import Path
+import argparse
 import re
 
-ROOT = Path("/Users/andyherman/Development/neural-bridge/plugins/neural-bridge-core/agents")
+DEFAULT_ROOT = Path("/Users/andyherman/Development/neural-bridge/plugins/neural-bridge-core/agents")
 
 LINK_DASH = re.compile(r"\) [—–] ")
 
@@ -49,9 +61,27 @@ def process(text: str) -> tuple[str, int]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Strip em-dashes from agent markdown.")
+    parser.add_argument("root", nargs="?", default=str(DEFAULT_ROOT),
+                        help="directory to sweep (default: NB agent charters)")
+    parser.add_argument("--recursive", action="store_true",
+                        help="include markdown in subdirectories")
+    parser.add_argument("--exclude", nargs="*", default=[],
+                        help="file names to skip (e.g. the file that states the rule)")
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser()
+    if not root.is_dir():
+        raise SystemExit(f"not a directory: {root}")
+    excluded = set(args.exclude)
+
     total = 0
     files_touched = 0
-    for path in sorted(ROOT.glob("*.md")):
+    paths = sorted(root.rglob("*.md") if args.recursive else root.glob("*.md"))
+    for path in paths:
+        if path.name in excluded:
+            print(f"  (skipped {path.name})")
+            continue
         text = path.read_text(encoding="utf-8")
         if "—" not in text and "–" not in text:
             continue
@@ -59,12 +89,12 @@ def main() -> None:
         leftover_em = new_text.count("—")
         leftover_en = new_text.count("–")
         if leftover_em or leftover_en:
-            print(f"  ! {path.name}: {leftover_em} em + {leftover_en} en remain after sweep")
+            print(f"  ! {path.relative_to(root)}: {leftover_em} em + {leftover_en} en remain after sweep")
         if n > 0:
             path.write_text(new_text, encoding="utf-8")
             files_touched += 1
             total += n
-            print(f"  {path.name}: {n}")
+            print(f"  {path.relative_to(root)}: {n}")
     print(f"\nDone. {total} replacement(s) across {files_touched} file(s).")
 
 
