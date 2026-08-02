@@ -34,6 +34,9 @@ knowledge/agents/*/*
 .claude/local/
 *.session.json
 
+# recall.py local vector DB — machine-local, never synced or committed
+data/recall/
+
 # compile.py / lint.py outputs — run-time, not tracked
 docs/compile/*
 !docs/compile/.gitkeep
