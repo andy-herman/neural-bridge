@@ -35,4 +35,6 @@ The teaching-prep agent flagged this pattern during a calibration pass that prod
 
 ## Related concepts
 
-`[[subnetting-fundamentals]]` · `[[vpc-security-group-model]]` · `[[cloud-network-primitives]]`
+[[subnet-math-cheat-sheet-for-midterm]]
+
+_Candidates awaiting the filing gate: VPC security group model, cloud network primitives._

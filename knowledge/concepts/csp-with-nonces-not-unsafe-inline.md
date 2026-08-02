@@ -32,4 +32,4 @@ This concept surfaced from INFO 310A lecture and lab corpus during a Stage 2/3 c
 
 ## Related concepts
 
-`[[content-security-policy]]` · `[[xss-prevention]]` · `[[http-security-headers]]`
+_None promoted yet. Candidates awaiting the filing gate: XSS prevention, HTTP security headers. (A standalone content-security-policy concept was dropped as a self-reference — this note is the CSP concept.)_

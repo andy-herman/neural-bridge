@@ -37,6 +37,4 @@ The `teaching-prep` agent surfaced this concept while reviewing INFO 310A lectur
 
 ## Related concepts
 
-`[[pedagogical-divergence-from-production]]`  
-`[[owasp-recommendation-lag-in-curriculum]]`  
-`[[lab-vs-lecture-split]]`
+_None promoted yet. Candidates awaiting the filing gate: pedagogical divergence from production, OWASP recommendation lag in curriculum, lab-vs-lecture split._

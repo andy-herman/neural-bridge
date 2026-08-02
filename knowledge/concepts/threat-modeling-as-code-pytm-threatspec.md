@@ -36,4 +36,6 @@ This concept was extracted during a Stage 2/3 calibration pass over INFO 310A co
 
 ## Related concepts
 
-[[devSecOps-shift-left]] · [[stride-threat-modeling]] · [[secure-design-principles]]
+[[devSecOps-shift-left]] · [[secure-design-principles-with-violation-examples]]
+
+_Candidate awaiting the filing gate: STRIDE threat modeling._

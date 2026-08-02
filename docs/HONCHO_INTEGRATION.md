@@ -1,8 +1,13 @@
 # Honcho Integration — Shared Peer Memory Across NB Agents
 
-**Status:** Wired but unmerged. Review before committing.
-**Date:** 2026-05-24
+**Status:** Merged and live (updated 2026-08-02; originally "wired but unmerged" 2026-05-24).
 **Scope:** Shared `andyherman` peer card across all NB agents + Hermes-side Yor.
+
+> **2026-08-02 update:** ops details now live in `docs/HONCHO_MCP_DEPLOY.md`
+> (stack location `~/Development/honcho`, deriver flush mode, dream/card
+> pipeline). The deriver runs on Anthropic Haiku 4.5 — the qwen2.5:14b notes
+> below are historical. Known incident: bot-side submits silently failed
+> May 27–Aug 2 (fixed: failures now log at warning, first success at info).
 
 ## What this does
 
