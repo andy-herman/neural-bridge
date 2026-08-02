@@ -55,6 +55,12 @@ from .handlers import (
 from .auth import is_authorized
 from .mention import is_mention_for_self
 from .keychain import get_token
+from . import inflight
+
+# Mentions a previous process left in-flight (killed by restart/crash).
+# Populated once in run(); each agent's on_ready posts a notice for its own
+# entries so the requester knows to re-send. See inflight.py.
+INTERRUPTED: list[dict] = []
 
 
 def _configure_logging() -> None:
@@ -155,6 +161,25 @@ class AgentClient(discord.Client):
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
         fleet_log_event(f"{self.agent.id} online")
 
+        # Restart recovery: if the previous process died while this agent was
+        # mid-mention in a channel, say so there — otherwise the requester
+        # waits forever on a reply that was silently killed (see inflight.py).
+        # Entries are removed before posting so reconnect on_ready re-fires
+        # can't double-post.
+        mine = [e for e in INTERRUPTED if e.get("agent_id") == self.agent.id]
+        for entry in mine:
+            INTERRUPTED.remove(entry)
+            try:
+                channel_id = int(entry["channel_id"])
+                channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+                await channel.send(
+                    f"_(A restart interrupted a task I was working on here, started {entry.get('started_at', '?')}. "
+                    "I don't retry automatically — please re-send or re-mention me.)_"
+                )
+                log(f"inflight recovery notice posted: agent={self.agent.id} channel={channel_id}")
+            except Exception as exc:
+                log(f"inflight recovery notice FAILED: agent={self.agent.id} {type(exc).__name__}: {exc}")
+
     async def on_message(self, message: discord.Message) -> None:
         # Never respond to messages from ourselves (the bot itself).
         if message.author.id == getattr(self.user, "id", None):
@@ -236,6 +261,10 @@ async def run() -> None:
     config = load_config()
     log(f"loaded config: {len(config.agents)} agents, guild={config.guild_id}, "
         f"authorized_users={len(config.authorized_user_ids)}, default_repo={config.default_repo}")
+
+    INTERRUPTED.extend(inflight.drain())
+    if INTERRUPTED:
+        log(f"inflight recovery: {len(INTERRUPTED)} mention(s) were interrupted by the last shutdown")
 
     clients_and_tokens: list[tuple[AgentClient, str]] = []
     for agent in config.agents:

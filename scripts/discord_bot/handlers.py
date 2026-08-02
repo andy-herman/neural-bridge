@@ -18,6 +18,7 @@ import json
 from .auth import REFUSAL_MESSAGE, is_authorized
 from .claude_invoke import call_claude
 from . import honcho_client
+from . import inflight
 from .client_registry import post_as_agent
 from .config import BotConfig
 from .actions import extract_actions, validate_action_batch
@@ -245,6 +246,24 @@ def _is_handoff_eligible(message, config: BotConfig) -> tuple[bool, str | None]:
 
 async def handle_mention(client, message, config: BotConfig) -> None:
     """Called from any AgentClient's on_message when this bot is @-mentioned.
+
+    Thin wrapper: records the mention as in-flight so a restart mid-task
+    leaves a trace (a killed handoff on 2026-08-02 vanished without one —
+    see inflight.py). The next process posts a notice to the channel.
+    """
+    token = inflight.register(
+        agent_id=client.agent.id,
+        channel_id=message.channel.id,
+        author_id=str(message.author.id),
+    )
+    try:
+        await _handle_mention_inner(client, message, config)
+    finally:
+        inflight.clear(token)
+
+
+async def _handle_mention_inner(client, message, config: BotConfig) -> None:
+    """The actual mention pipeline.
 
     Eligibility:
       - Andy → always allowed; resets the per-channel handoff budget.
