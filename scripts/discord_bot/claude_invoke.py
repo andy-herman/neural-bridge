@@ -17,11 +17,11 @@ import os
 import re
 import subprocess
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-opus-4.8"  # copilot-api id (dotted); fleet runs Opus 4.8 via Copilot
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
 
 
-def _subprocess_env() -> dict[str, str]:
+def _subprocess_env(route_via_proxy: bool = True) -> dict[str, str]:
     """Environment for bot-spawned `claude -p` subprocesses.
 
     Sets NB_NO_DISCORD=1 so the SessionEnd hook's flush.py doesn't
@@ -39,6 +39,28 @@ def _subprocess_env() -> dict[str, str]:
     """
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_NO_DISCORD"] = "1"
+    # Route `claude -p` through the local copilot-api proxy so the fleet runs on
+    # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
+    # spending Claude Max weekly limits. copilot-api exposes the Anthropic
+    # /v1/messages endpoint; the key is a placeholder (the proxy authenticates
+    # with its own cached GitHub token). To revert to the Max login, set
+    # NB_CLAUDE_DIRECT=1 (and use a dashed model id like claude-opus-4-8, since
+    # the dotted DEFAULT_MODEL above is the copilot-api form).
+    #
+    # `route_via_proxy=False` opts a caller out entirely: the loop engineer uses
+    # it because its model ids are the dashed Anthropic form (claude-sonnet-5),
+    # not the dotted copilot-api form, and because an unattended coding run
+    # should not silently fail when the proxy is down. Everything conversational
+    # keeps the default.
+    if route_via_proxy and not os.environ.get("NB_CLAUDE_DIRECT"):
+        # Force the base URL so an ambient ANTHROPIC_BASE_URL (e.g. a shell that
+        # points at api.anthropic.com) can't silently bypass the proxy.
+        env["ANTHROPIC_BASE_URL"] = os.environ.get("NB_COPILOT_API_BASE", "http://localhost:4141")
+        env.setdefault("ANTHROPIC_API_KEY", "copilot-proxy")
+    else:
+        # Opting out means opting out of an inherited base URL too — otherwise a
+        # shell that exports one would quietly send this call somewhere else.
+        env.pop("ANTHROPIC_BASE_URL", None)
     return env
 
 
@@ -74,6 +96,9 @@ def wrap_untrusted(text: str, tag: str, framing: str | None = None) -> str:
     return f"{intro}\n\n<{tag}>\n{sanitized}\n</{tag}>"
 
 
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
 def call_claude_sync(
     prompt: str,
     model: str = DEFAULT_MODEL,
@@ -82,11 +107,19 @@ def call_claude_sync(
     add_dirs: list[str] | None = None,
     session_id: str | None = None,
     resume: bool = False,
+    effort: str | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
     If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
     enable headless tool use. Default is no tools (text-only generation).
+
+    `effort` sets the reasoning depth (`--effort`, one of VALID_EFFORTS).
+    Claude 5-generation models think by default, so an unset effort means every
+    call — including "what's on my calendar" — runs at full reasoning depth.
+    Passing a level per agent is the cheapest single lever on cost and latency.
+    An unknown value is dropped rather than passed through: the CLI would warn
+    and fall back anyway, and a typo shouldn't change behavior silently.
 
     If `add_dirs` is set, each path is passed as `--add-dir <path>`, granting
     the agent access (subject to `allowed_tools`) to directories outside the
@@ -104,6 +137,8 @@ def call_claude_sync(
     be a valid UUID; callers should use `session_store.SessionStore.get_or_create`.
     """
     args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+    if effort in VALID_EFFORTS:
+        args.extend(["--effort", effort])
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
     if add_dirs:
@@ -141,6 +176,7 @@ async def call_claude(
     add_dirs: list[str] | None = None,
     session_id: str | None = None,
     resume: bool = False,
+    effort: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -148,6 +184,6 @@ async def call_claude(
         None,
         lambda: call_claude_sync(
             prompt, model, timeout, allowed_tools, add_dirs,
-            session_id=session_id, resume=resume,
+            session_id=session_id, resume=resume, effort=effort,
         ),
     )

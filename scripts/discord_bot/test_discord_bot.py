@@ -265,6 +265,45 @@ class TestCallClaude(unittest.TestCase):
         # so the bot's claude binary still resolves.
         self.assertIn("PATH", env)
 
+    def test_subprocess_env_routes_fleet_through_proxy_by_default(self):
+        # Conversational agents run on the copilot-api proxy (dotted model ids).
+        import os as _os
+        with patch.dict(_os.environ, {}, clear=False):
+            _os.environ.pop("NB_CLAUDE_DIRECT", None)
+            env = claude_invoke._subprocess_env()
+        self.assertIn("ANTHROPIC_BASE_URL", env)
+
+    def test_subprocess_env_can_opt_out_of_proxy(self):
+        # The loop engineer opts out: it uses dashed Anthropic model ids, and an
+        # unattended run that opens PRs must not depend on a local proxy being
+        # up. It still gets the NB_NO_DISCORD suppression.
+        env = claude_invoke._subprocess_env(route_via_proxy=False)
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertEqual(env.get("NB_NO_DISCORD"), "1")
+
+    def test_effort_is_passed_when_valid(self):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0]
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync("prompt", "model", 30, effort="low")
+        self.assertIn("--effort", captured["args"])
+        self.assertEqual(captured["args"][captured["args"].index("--effort") + 1], "low")
+
+    def test_invalid_effort_is_dropped_not_forwarded(self):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0]
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync("prompt", "model", 30, effort="bogus")
+        self.assertNotIn("--effort", captured["args"])
+
     def test_subprocess_env_strips_nb_discord_webhook(self):
         # MEDIUM finding from the 2026-05-09 security-reviewer run:
         # NB_DISCORD_WEBHOOK should NOT propagate into the claude -p

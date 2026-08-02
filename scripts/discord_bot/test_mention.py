@@ -182,5 +182,95 @@ class TestAllowedTools(unittest.TestCase):
         self.assertIsNone(allowed_tools_for("not-a-real-agent"))
 
 
+class TestEffortPolicy(unittest.TestCase):
+    def test_known_agents_get_their_level(self):
+        from scripts.discord_bot.mention import effort_for
+        self.assertEqual(effort_for("luna"), "low")
+        self.assertEqual(effort_for("research"), "high")
+        self.assertEqual(effort_for("content"), "medium")
+
+    def test_unknown_agent_gets_default(self):
+        from scripts.discord_bot.mention import DEFAULT_EFFORT, effort_for
+        self.assertEqual(effort_for("not-a-real-agent"), DEFAULT_EFFORT)
+
+    def test_every_level_is_valid_for_the_cli(self):
+        # A typo here would be silently dropped at the call site and the agent
+        # would quietly run at default depth, so assert against the CLI's set.
+        from scripts.discord_bot.claude_invoke import VALID_EFFORTS
+        from scripts.discord_bot.mention import DEFAULT_EFFORT, EFFORT_PER_AGENT
+        self.assertIn(DEFAULT_EFFORT, VALID_EFFORTS)
+        for agent_id, level in EFFORT_PER_AGENT.items():
+            self.assertIn(level, VALID_EFFORTS, f"{agent_id} has invalid effort {level!r}")
+
+    def test_policy_only_covers_real_agents(self):
+        from scripts.discord_bot.mention import EFFORT_PER_AGENT, MENTION_ALLOWED_TOOLS
+        for agent_id in EFFORT_PER_AGENT:
+            self.assertIn(agent_id, MENTION_ALLOWED_TOOLS,
+                          f"{agent_id} has an effort level but is not a known agent")
+
+
+class TestNotesBudget(unittest.TestCase):
+    """Durable notes must survive the injection budget; the rolling log is what
+    gets dropped. Regression cover for the tail-slice bug that silently
+    discarded Luna's standing rules on every turn."""
+
+    DURABLE = (
+        "# Luna's working memory\n\nintro line\n\n"
+        "## Andy's standing preferences\n\n- be terse\n\n"
+        "## Decisions Andy has made that I should honor\n\n- no em-dashes\n\n"
+    )
+    LOG = "## Session log\n\n" + ("- shipped a thing\n" * 400)
+
+    def test_under_budget_is_untouched(self):
+        from scripts.discord_bot.mention import budget_notes
+        kept, dropped = budget_notes(self.DURABLE, 10_000)
+        self.assertEqual(kept, self.DURABLE)
+        self.assertEqual(dropped, [])
+
+    def test_log_is_dropped_before_durable_content(self):
+        from scripts.discord_bot.mention import budget_notes
+        kept, dropped = budget_notes(self.DURABLE + self.LOG, len(self.DURABLE) + 50)
+        self.assertIn("no em-dashes", kept)
+        self.assertIn("Andy's standing preferences", kept)
+        self.assertIn("Luna's working memory", kept)
+        self.assertTrue(dropped)
+
+    def test_log_section_partially_kept_when_room_remains(self):
+        from scripts.discord_bot.mention import budget_notes
+        kept, _ = budget_notes(self.DURABLE + self.LOG, len(self.DURABLE) + 500)
+        self.assertIn("Session log", kept)
+        self.assertIn("no em-dashes", kept)
+
+    def test_durable_overflow_cuts_from_the_end_and_reports(self):
+        from scripts.discord_bot.mention import budget_notes
+        kept, dropped = budget_notes(self.DURABLE + self.LOG, 60)
+        self.assertLessEqual(len(kept), 200)  # marker adds a little
+        self.assertIn("Luna's working memory", kept)  # earliest durable survives
+        self.assertTrue(dropped)
+
+    def test_result_respects_the_budget(self):
+        from scripts.discord_bot.mention import _TRUNC_MARK, budget_notes
+        for cap in (100, 500, 2000, 5000):
+            kept, _ = budget_notes(self.DURABLE + self.LOG, cap)
+            self.assertLessEqual(len(kept), cap + len(_TRUNC_MARK) + 1, f"cap={cap}")
+
+    def test_split_sections_keeps_preamble_and_headings(self):
+        from scripts.discord_bot.mention import split_note_sections
+        sections = split_note_sections(self.DURABLE)
+        self.assertEqual(sections[0][0], "")  # preamble before the first ##
+        self.assertIn("## Andy's standing preferences", [h for h, _ in sections])
+
+    def test_real_notes_file_keeps_the_decisions_section(self):
+        # The actual failure: a 16k notes.md whose curated half was being cut.
+        from scripts.discord_bot.mention import LUNA_NOTES_MAX_CHARS, LUNA_NOTES_PATH, budget_notes
+        if not LUNA_NOTES_PATH.exists():
+            self.skipTest("luna notes.md not present on this machine")
+        text = LUNA_NOTES_PATH.read_text(encoding="utf-8")
+        if "Decisions Andy has made" not in text:
+            self.skipTest("notes.md has no Decisions section to protect")
+        kept, _ = budget_notes(text, LUNA_NOTES_MAX_CHARS)
+        self.assertIn("Decisions Andy has made", kept)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

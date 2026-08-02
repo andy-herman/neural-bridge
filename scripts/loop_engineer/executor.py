@@ -20,7 +20,7 @@ import subprocess as sp
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.discord_bot.claude_invoke import wrap_untrusted
+from scripts.discord_bot.claude_invoke import _subprocess_env, wrap_untrusted
 
 from .config import LoopConfig
 from .queue import Issue
@@ -93,6 +93,8 @@ def _invoke(
         "--disallowedTools", cfg.disallowed_tools,
         "--max-turns", str(max_turns),
     ]
+    if cfg.effort:
+        args.extend(["--effort", cfg.effort])
     if resume_session:
         args.extend(["--resume", resume_session])
 
@@ -104,6 +106,13 @@ def _invoke(
             text=True,
             timeout=cfg.per_issue_timeout,
             stdin=sp.DEVNULL,
+            # Sets NB_NO_DISCORD=1 so the SessionEnd flush hook doesn't post the
+            # loop's internal sessions to Discord, and strips the webhook from
+            # the child env. Deliberately NOT routed through the copilot-api
+            # proxy: this path uses dashed Anthropic model ids, and an
+            # unattended run that opens PRs should not depend on an optional
+            # local proxy being up.
+            env=_subprocess_env(route_via_proxy=False),
         )
     except sp.TimeoutExpired:
         return ExecResult(False, resume_session, "", "timeout", 0)

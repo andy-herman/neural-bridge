@@ -7,10 +7,14 @@ context, and posts the response.
 
 from __future__ import annotations
 
+import logging
+import re
 from pathlib import Path
 
 from .claude_invoke import sanitize_untrusted_text
 from . import honcho_client
+
+_logger = logging.getLogger("nb_discord.mention")
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 MENTION_PROMPT_PATH = PROMPTS_DIR / "mention_v1.md"
@@ -70,6 +74,42 @@ def timeout_for(agent_id: str) -> int:
     """Per-agent claude -p timeout, with a default."""
     from .claude_invoke import DEFAULT_TIMEOUT
     return TIMEOUT_PER_AGENT.get(agent_id, DEFAULT_TIMEOUT)
+
+
+# Per-agent reasoning depth (`--effort`). Claude 5-generation models think by
+# default, so leaving this unset means a one-line Discord reply costs the same
+# reasoning budget as a threat model. Match depth to the job:
+#
+#   low     conversational turns and routing — most of Luna's traffic
+#   medium  drafting and editing where quality matters but the task is bounded
+#   high    genuine multi-step analysis: research, security review, triage
+#
+# DEFAULT_EFFORT applies to anyone unlisted. Raise an individual agent rather
+# than the default when its answers feel shallow; that keeps the cheap path
+# cheap. xhigh/max are deliberately unused here — they belong to the loop
+# engineer, which is doing real code generation.
+DEFAULT_EFFORT = "medium"
+EFFORT_PER_AGENT: dict[str, str] = {
+    "luna": "low",             # assistant chatter, calendar/inbox lookups
+    "echo": "low",             # voice-profile upkeep, pattern matching
+    "librarian": "low",        # vault index lookups and audits
+    "docs-editor": "medium",
+    "content": "medium",
+    "social": "medium",
+    "ux-designer": "medium",
+    "teaching-prep": "medium",
+    "recruiter": "medium",
+    "loid": "medium",
+    "research": "high",        # multi-source synthesis
+    "security-reviewer": "high",  # adversarial reasoning is the whole job
+    "senior-pm": "high",       # dependency and priority reasoning across a board
+    "automation-engineer": "high",
+}
+
+
+def effort_for(agent_id: str) -> str:
+    """Per-agent reasoning depth, with a default."""
+    return EFFORT_PER_AGENT.get(agent_id, DEFAULT_EFFORT)
 
 
 # Per-agent extra read directories granted to claude -p via --add-dir. Used when
@@ -222,6 +262,97 @@ def _lessons_block(agent_id: str) -> str:
     )
 
 
+# Headings whose content is a rolling log (a changelog of what happened). When
+# the notes file overflows the injection budget, THIS is what gets dropped —
+# never the durable sections above it.
+#
+# Why this exists: the original implementation kept the file's TAIL
+# (`notes[-8000:]`). Luna's notes.md grew to ~16k chars with the curated
+# material at the top (standing preferences, voice, and the "Decisions Andy has
+# made that I should honor" list) and an append-only session log at the bottom.
+# Tail-slicing therefore discarded her entire constitution every turn and kept
+# the changelog — silently, for months. Durable-first is the correct priority:
+# a rule Andy set is worth more than a record of which PR merged.
+_LOG_HEADING_RE = re.compile(
+    r"^#+\s*(session log|change ?log|activity log|log)\b", re.IGNORECASE
+)
+_TRUNC_MARK = "\n\n[…trimmed to fit prompt budget…]\n"
+
+
+def split_note_sections(text: str) -> list[tuple[str, str]]:
+    """Split markdown into [(heading, block)] where block includes its heading.
+
+    Content before the first `##` heading is returned first with heading "".
+    """
+    sections: list[tuple[str, str]] = []
+    heading = ""
+    buf: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("## "):
+            if buf:
+                sections.append((heading, "".join(buf)))
+            heading = line.strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    if buf:
+        sections.append((heading, "".join(buf)))
+    return sections
+
+
+def budget_notes(text: str, max_chars: int) -> tuple[str, list[str]]:
+    """Fit a notes file into `max_chars`, dropping rolling-log sections before
+    durable ones. Returns (kept_text, dropped_section_headings).
+
+    Document order is preserved in the output. If the durable sections alone
+    overflow the budget the log is dropped entirely and the durable content is
+    cut from the end — that case means the curated notes need a human refactor,
+    and the caller logs it loudly.
+    """
+    if len(text) <= max_chars:
+        return text, []
+
+    sections = split_note_sections(text)
+    is_log = [_LOG_HEADING_RE.match(h) is not None for h, _ in sections]
+    durable_total = sum(len(b) for (_, b), lg in zip(sections, is_log) if not lg)
+
+    out: list[str] = []
+    dropped: list[str] = []
+    # When durable content fits, it is all kept and the remainder funds the log.
+    # When it doesn't, the log gets nothing and durable is cut from the end.
+    budget = max_chars - durable_total if durable_total <= max_chars else 0
+    durable_budget = max_chars if durable_total > max_chars else None
+
+    for (heading, block), lg in zip(sections, is_log):
+        label = heading or "(preamble)"
+        if lg:
+            if budget <= 0:
+                dropped.append(label)
+            elif len(block) <= budget:
+                out.append(block)
+                budget -= len(block)
+            else:
+                # Keep the head of the log: newest entries first by convention.
+                out.append(block[:budget].rstrip() + _TRUNC_MARK)
+                dropped.append(f"{label} (partial)")
+                budget = 0
+            continue
+
+        if durable_budget is None:
+            out.append(block)
+        elif durable_budget <= 0:
+            dropped.append(label)
+        elif len(block) <= durable_budget:
+            out.append(block)
+            durable_budget -= len(block)
+        else:
+            out.append(block[:durable_budget].rstrip() + _TRUNC_MARK)
+            dropped.append(f"{label} (partial)")
+            durable_budget = 0
+
+    return "".join(out), dropped
+
+
 def _luna_notes_block() -> str:
     """Read Luna's vault notes file and return a context block to prepend to
     her mention prompt. Empty string if the file is missing or unreadable.
@@ -234,10 +365,13 @@ def _luna_notes_block() -> str:
         return ""
     if not notes.strip():
         return ""
-    if len(notes) > LUNA_NOTES_MAX_CHARS:
-        # Keep the most recent end of the file (chronologically newest entries
-        # for an append-style notes file).
-        notes = "[…earlier notes truncated to fit prompt budget…]\n\n" + notes[-LUNA_NOTES_MAX_CHARS:]
+    notes, dropped = budget_notes(notes, LUNA_NOTES_MAX_CHARS)
+    if dropped:
+        # Never fail silently: a shrinking memory is invisible from the outside.
+        _logger.warning(
+            "luna notes.md over budget (%d chars); dropped from prompt: %s",
+            LUNA_NOTES_MAX_CHARS, ", ".join(dropped),
+        )
     sanitized = sanitize_untrusted_text(notes, "luna-notes")
     return (
         "## Your prior notes (auto-injected from "

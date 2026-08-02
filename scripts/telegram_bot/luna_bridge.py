@@ -69,6 +69,7 @@ from scripts.discord_bot.mention import (
     build_mention_prompt,
     load_agent_definition,
     max_response_chars_for,
+    effort_for,
     timeout_for,
     truncate_response,
 )
@@ -222,9 +223,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tools = allowed_tools_for(AGENT_ID)
     extra_dirs = add_dirs_for(AGENT_ID)
     agent_timeout = timeout_for(AGENT_ID)
+    agent_effort = effort_for(AGENT_ID)
 
     log(
-        f"MENTION calling claude: chat={chat_id} session={session_rec.session_id[:8]}... "
+        f"MENTION calling claude: chat={chat_id} effort={agent_effort} "
+        f"session={session_rec.session_id[:8]}... "
         f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
     )
 
@@ -235,6 +238,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         add_dirs=extra_dirs,
         session_id=session_rec.session_id,
         resume=not is_new_session,
+        effort=agent_effort,
     )
 
     # Resume-failed retry (mirrors handlers.py pattern)
@@ -248,6 +252,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             add_dirs=extra_dirs,
             session_id=session_rec.session_id,
             resume=False,
+            effort=agent_effort,
         )
 
     if ok:

@@ -16,7 +16,7 @@ Reuses NB's existing infrastructure:
 Phase 1 scope: bidirectional text + voice chat with persistent memory.
 
 Does NOT yet support:
-  - Handoffs to other agents (handoff files written to Luna Master/Loid/Handoffs/
+  - Handoffs to other agents (handoff files written to Luna Master/Agents/Loid/Handoffs/
     are written by Loid himself; delivery is Andy's job)
   - Slash commands beyond /start
   - Document/image attachment ingest
@@ -73,6 +73,7 @@ from scripts.discord_bot.mention import (
     build_mention_prompt,
     load_agent_definition,
     max_response_chars_for,
+    effort_for,
     timeout_for,
     truncate_response,
 )
@@ -324,9 +325,11 @@ async def _process_message(
     tools = allowed_tools_for(AGENT_ID)
     extra_dirs = add_dirs_for(AGENT_ID)
     agent_timeout = timeout_for(AGENT_ID)
+    agent_effort = effort_for(AGENT_ID)
 
     log(
-        f"CLAUDE invoke: chat={chat_id} session={session_rec.session_id[:8]} "
+        f"CLAUDE invoke: chat={chat_id} effort={agent_effort} "
+        f"session={session_rec.session_id[:8]} "
         f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
     )
 
@@ -337,6 +340,7 @@ async def _process_message(
         add_dirs=extra_dirs,
         session_id=session_rec.session_id,
         resume=not is_new_session,
+        effort=agent_effort,
     )
 
     if not ok and not is_new_session:
@@ -349,6 +353,7 @@ async def _process_message(
             add_dirs=extra_dirs,
             session_id=session_rec.session_id,
             resume=False,
+            effort=agent_effort,
         )
 
     if ok:

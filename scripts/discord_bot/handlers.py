@@ -53,6 +53,7 @@ from .mention import (
     allowed_tools_for,
     build_mention_prompt,
     chunk_for_discord,
+    effort_for,
     is_mention_for_self,
     load_agent_definition,
     max_response_chars_for,
@@ -360,6 +361,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         tools = allowed_tools_for(agent_id)
         extra_dirs = add_dirs_for(agent_id)
         agent_timeout = timeout_for(agent_id)
+        agent_effort = effort_for(agent_id)
 
         # Per (channel × agent) session resumption. First mention creates a
         # fresh UUID and passes it via --session-id; subsequent mentions
@@ -373,6 +375,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
         log(
             f"MENTION calling claude: agent={agent_id} tools={tools or 'none'} "
             f"add_dirs={len(extra_dirs) if extra_dirs else 0} timeout={agent_timeout}s "
+            f"effort={agent_effort} "
             f"session={session_rec.session_id[:8]}... "
             f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
         )
@@ -380,6 +383,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
             prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
             session_id=session_rec.session_id,
             resume=not is_new_session,
+            effort=agent_effort,
         )
 
         # If --resume failed (most likely cause: Claude Code's own session
@@ -396,6 +400,7 @@ async def handle_mention(client, message, config: BotConfig) -> None:
                 prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
                 session_id=session_rec.session_id,
                 resume=False,
+                effort=agent_effort,
             )
 
         if ok:

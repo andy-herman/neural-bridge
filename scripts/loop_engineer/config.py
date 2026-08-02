@@ -95,6 +95,10 @@ class LoopConfig:
 
     # --- Invocation ---
     model: str = DEFAULT_MODEL
+    # Reasoning depth. The loop writes and debugs real code unsupervised, which
+    # is the one job that earns deep thinking — everything else in the fleet
+    # runs lower. Raise to xhigh/max only if issues routinely exhaust strikes.
+    effort: str = "high"
     allowed_tools: str = DEFAULT_ALLOWED_TOOLS
     disallowed_tools: str = DEFAULT_DISALLOWED_TOOLS
     test_command: str = DEFAULT_TEST_COMMAND
@@ -134,6 +138,7 @@ class LoopConfig:
             per_issue_timeout=_env_int("NB_LOOP_PER_ISSUE_TIMEOUT", 1800),
             poll_interval_seconds=_env_int("NB_LOOP_POLL_INTERVAL", 60),
             model=_env_str("NB_LOOP_MODEL", DEFAULT_MODEL),
+            effort=_env_str("NB_LOOP_EFFORT", "high"),
             allowed_tools=_env_str("NB_LOOP_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS),
             disallowed_tools=_env_str("NB_LOOP_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS),
             test_command=_env_str("NB_LOOP_TEST_COMMAND", DEFAULT_TEST_COMMAND),
