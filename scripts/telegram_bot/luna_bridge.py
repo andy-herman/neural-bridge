@@ -59,21 +59,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.discord_bot import honcho_client
-from scripts.discord_bot.claude_invoke import call_claude
+from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
-from scripts.discord_bot.mention import (
-    AGENTS_DIR,
-    MENTION_PROMPT_PATH,
-    add_dirs_for,
-    allowed_tools_for,
-    build_mention_prompt,
-    load_agent_definition,
-    max_response_chars_for,
-    effort_for,
-    timeout_for,
-    truncate_response,
-)
-from scripts.discord_bot.session_store import STORE as SESSION_STORE
 
 
 # ----------------------------------------------------------------------
@@ -198,74 +185,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Build the prompt using NB's existing mention pipeline. The history
     # we pass is what Andy has typed + Luna has replied in this Telegram
     # chat, in the same shape build_mention_prompt expects.
-    if not MENTION_PROMPT_PATH.exists():
-        log(f"MENTION prompt missing at {MENTION_PROMPT_PATH}")
+    # Shared invocation core (prompt build, session, resume-retry, truncate).
+    # Chunking, structured-block stripping, and Honcho capture stay here.
+    result = await run_agent_turn(
+        TurnRequest(
+            agent_id=AGENT_ID,
+            conversation_key=chat_id,
+            message_content=text,
+            channel_kind="DM",  # 1:1 chat — closest match to Discord DM
+            history=_chat_history_for(chat_id),
+            conversation_log_path="",  # no NB log file for Telegram turns yet
+        ),
+        log=log,
+    )
+
+    if result.setup_error:
+        log(result.setup_error)
         await message.reply_text("_(internal: mention prompt missing)_")
         return
-
-    template = MENTION_PROMPT_PATH.read_text(encoding="utf-8")
-    agent_definition = load_agent_definition(AGENT_ID)
-    history = _chat_history_for(chat_id)
-
-    prompt = build_mention_prompt(
-        template,
-        agent_id=AGENT_ID,
-        agent_definition=agent_definition,
-        channel_kind="DM",  # 1:1 chat — closest match to Discord DM
-        history=history,
-        message_content=text,
-        conversation_log_path="",  # no NB log file for Telegram turns yet
-    )
-
-    # Per (chat × agent) session-id for --resume continuity
-    session_rec, is_new_session = SESSION_STORE.get_or_create(chat_id, AGENT_ID)
-
-    tools = allowed_tools_for(AGENT_ID)
-    extra_dirs = add_dirs_for(AGENT_ID)
-    agent_timeout = timeout_for(AGENT_ID)
-    agent_effort = effort_for(AGENT_ID)
-
-    log(
-        f"MENTION calling claude: chat={chat_id} effort={agent_effort} "
-        f"session={session_rec.session_id[:8]}... "
-        f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
-    )
-
-    ok, stdout, err = await call_claude(
-        prompt,
-        timeout=agent_timeout,
-        allowed_tools=tools,
-        add_dirs=extra_dirs,
-        session_id=session_rec.session_id,
-        resume=not is_new_session,
-        effort=agent_effort,
-    )
-
-    # Resume-failed retry (mirrors handlers.py pattern)
-    if not ok and not is_new_session:
-        log(f"MENTION resume failed, retry fresh: err={err[:80]}")
-        session_rec = SESSION_STORE.reset(chat_id, AGENT_ID)
-        ok, stdout, err = await call_claude(
-            prompt,
-            timeout=agent_timeout,
-            allowed_tools=tools,
-            add_dirs=extra_dirs,
-            session_id=session_rec.session_id,
-            resume=False,
-            effort=agent_effort,
-        )
-
-    if ok:
-        SESSION_STORE.touch(chat_id, AGENT_ID)
-    else:
-        log(f"MENTION claude FAILED: err={err}")
-        await message.reply_text(f"_(I hit an error: `{err[:200]}`. Try again.)_")
+    if not result.ok:
+        await message.reply_text(f"_(I hit an error: `{result.error_reason[:200]}`. Try again.)_")
         return
 
     # Strip any structured action / attachments blocks (not yet supported on
     # Telegram — they'd show as raw markdown). Phase 2 will handle these.
-    response = _strip_structured_blocks(stdout)
-    response = truncate_response(response, limit=max_response_chars_for(AGENT_ID))
+    response = _strip_structured_blocks(result.response)
 
     if not response:
         log(f"MENTION empty response: chat={chat_id}")
@@ -287,7 +231,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             agent_id=AGENT_ID,
             user_message=text,
             agent_response=response,
-            session_id=session_rec.session_id,
+            session_id=result.session_id,
         )
     except Exception:
         pass

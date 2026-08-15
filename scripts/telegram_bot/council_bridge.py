@@ -81,17 +81,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.discord_bot import honcho_client
 from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude
 from scripts.discord_bot.keychain import get_token
-from scripts.discord_bot.mention import (
-    MENTION_PROMPT_PATH,
-    add_dirs_for,
-    allowed_tools_for,
-    build_mention_prompt,
-    load_agent_definition,
-    max_response_chars_for,
-    effort_for,
-    timeout_for,
-    truncate_response,
-)
+from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 
 # ----------------------------------------------------------------------
 # Config
@@ -310,34 +300,25 @@ async def _route(text: str, history: list[dict]) -> list[str]:
 async def _invoke_loid(text: str, history: list[dict]) -> tuple[bool, str]:
     """Loid via `claude -p`, his charter injected by mention. Stateless per
     turn (fresh session id); the shared transcript is his context."""
-    if not MENTION_PROMPT_PATH.exists():
-        return False, "internal: mention prompt missing"
-    template = MENTION_PROMPT_PATH.read_text(encoding="utf-8")
-    agent_definition = load_agent_definition("loid")
-    prompt = build_mention_prompt(
-        template,
-        agent_id="loid",
-        agent_definition=agent_definition,
-        channel_kind="COUNCIL (shared Telegram room with Andy and Yor)",
-        history=history,
-        message_content=text,
-        conversation_log_path="",
+    # Shared invocation core. Stateless: each council turn is rebuilt from the
+    # shared transcript rather than resumed, so there is no session to continue
+    # and conversation_key is never used for a session lookup.
+    result = await run_agent_turn(
+        TurnRequest(
+            agent_id="loid",
+            conversation_key=0,
+            message_content=text,
+            channel_kind="COUNCIL (shared Telegram room with Andy and Yor)",
+            history=history,
+            conversation_log_path="",
+            model=LOID_MODEL,
+            stateless=True,
+        ),
+        log=log,
     )
-    ok, stdout, err = await call_claude(
-        prompt,
-        model=LOID_MODEL,
-        timeout=timeout_for("loid"),
-        allowed_tools=allowed_tools_for("loid"),
-        add_dirs=add_dirs_for("loid"),
-        session_id=str(uuid.uuid4()),
-        resume=False,
-        effort=effort_for("loid"),
-    )
-    if not ok:
-        return False, err[:200]
-    resp = _strip_structured_blocks(stdout)
-    resp = truncate_response(resp, limit=max_response_chars_for("loid"))
-    return True, resp
+    if not result.ok:
+        return False, (result.setup_error or result.error_reason)[:200]
+    return True, _strip_structured_blocks(result.response)
 
 
 async def _invoke_yor(text: str, history: list[dict]) -> tuple[bool, str]:

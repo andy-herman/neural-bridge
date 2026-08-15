@@ -48,6 +48,7 @@ from .obsidian_writer import ObsidianWriter
 from .pm_intake import PMIntake, SessionState
 from .state_machine import STATE_LABEL_SET, apply_labels
 from .thread_map import ThreadMap
+from .agent_runtime import TurnRequest, run_agent_turn
 from .mention import (
     MENTION_PROMPT_PATH,
     add_dirs_for,
@@ -353,77 +354,30 @@ async def _handle_mention_inner(client, message, config: BotConfig) -> None:
         except Exception as exc:
             log(f"MENTION history fetch failed (non-fatal): {type(exc).__name__}: {exc}")
 
-        # Build prompt
-        template = MENTION_PROMPT_PATH.read_text(encoding="utf-8")
-        agent_definition = load_agent_definition(agent_id)
-        channel_kind = "thread" if isinstance(message.channel, discord.Thread) else "channel"
-
-        # Resolve this turn's conversation-log file so the agent knows where
-        # to look for context older than the recent-history window.
-        conv_log_path = str(conversation_log_path(agent_id, message))
-
-        prompt = build_mention_prompt(
-            template,
-            agent_id=agent_id,
-            agent_definition=agent_definition,
-            channel_kind=channel_kind,
-            history=history,
-            message_content=message.content,
-            conversation_log_path=conv_log_path,
+        # Shared invocation core: prompt assembly, per-(channel × agent) session
+        # resumption, the single resume-retry, and session touch all live in
+        # agent_runtime. See that module for why there is one copy now.
+        #
+        # The ingest block is prepended so Echo sees the dropped-files section
+        # before the standard mention scaffold, matching how the Echo voice and
+        # Luna notes blocks compose inside build_mention_prompt.
+        #
+        # Takes raw_stdout, not the truncated response: the action and
+        # attachment blocks are parsed out of the full text below, before
+        # anything is trimmed for Discord.
+        result = await run_agent_turn(
+            TurnRequest(
+                agent_id=agent_id,
+                conversation_key=int(message.channel.id),
+                message_content=message.content,
+                channel_kind="thread" if isinstance(message.channel, discord.Thread) else "channel",
+                history=history,
+                conversation_log_path=str(conversation_log_path(agent_id, message)),
+                prompt_prefix=ingest_block or "",
+            ),
+            log=log,
         )
-        # Prepend the ingest block so Echo sees the dropped-files section before
-        # the standard mention scaffold. Same composition pattern as the Echo
-        # voice and Luna notes blocks (which are prepended inside build_mention_prompt).
-        if ingest_block:
-            prompt = ingest_block + prompt
-
-        tools = allowed_tools_for(agent_id)
-        extra_dirs = add_dirs_for(agent_id)
-        agent_timeout = timeout_for(agent_id)
-        agent_effort = effort_for(agent_id)
-
-        # Per (channel × agent) session resumption. First mention creates a
-        # fresh UUID and passes it via --session-id; subsequent mentions
-        # resume via --resume <uuid>, so the model has the full prior
-        # transcript including file Reads. Sessions persist across daemon
-        # restarts (JSON-backed) and TTL out after 7 days inactive.
-        session_rec, is_new_session = SESSION_STORE.get_or_create(
-            int(message.channel.id), agent_id,
-        )
-
-        log(
-            f"MENTION calling claude: agent={agent_id} tools={tools or 'none'} "
-            f"add_dirs={len(extra_dirs) if extra_dirs else 0} timeout={agent_timeout}s "
-            f"effort={agent_effort} "
-            f"session={session_rec.session_id[:8]}... "
-            f"({'new' if is_new_session else f'turn {session_rec.turn_count + 1}'})"
-        )
-        ok, stdout, err = await call_claude(
-            prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
-            session_id=session_rec.session_id,
-            resume=not is_new_session,
-            effort=agent_effort,
-        )
-
-        # If --resume failed (most likely cause: Claude Code's own session
-        # cleanup pruned the underlying file), retry ONCE with a fresh
-        # session ID. We don't loop further — a second failure is a real
-        # problem the user should know about.
-        if not ok and not is_new_session:
-            log(
-                f"MENTION resume failed (will retry fresh): agent={agent_id} "
-                f"old_session={session_rec.session_id[:8]}... err={err[:80]}"
-            )
-            session_rec = SESSION_STORE.reset(int(message.channel.id), agent_id)
-            ok, stdout, err = await call_claude(
-                prompt, timeout=agent_timeout, allowed_tools=tools, add_dirs=extra_dirs,
-                session_id=session_rec.session_id,
-                resume=False,
-                effort=agent_effort,
-            )
-
-        if ok:
-            SESSION_STORE.touch(int(message.channel.id), agent_id)
+        ok, stdout, err = result.ok, result.raw_stdout, (result.setup_error or result.error_reason)
 
     if not ok:
         log(f"MENTION claude FAILED: agent={agent_id} error={err}")
