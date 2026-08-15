@@ -148,6 +148,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         session_id=session_id,
         resume=not is_new_session,
         effort=agent_effort,
+        agent_id=req.agent_id,
         **model_kwargs,
     )
 
@@ -168,6 +169,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             session_id=session_id,
             resume=False,
             effort=agent_effort,
+            agent_id=req.agent_id,
             **model_kwargs,
         )
 

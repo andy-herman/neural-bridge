@@ -21,7 +21,7 @@ DEFAULT_MODEL = "claude-opus-4.8"  # copilot-api id (dotted); fleet runs Opus 4.
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
 
 
-def _subprocess_env(route_via_proxy: bool = True) -> dict[str, str]:
+def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -> dict[str, str]:
     """Environment for bot-spawned `claude -p` subprocesses.
 
     Sets NB_NO_DISCORD=1 so the SessionEnd hook's flush.py doesn't
@@ -39,6 +39,12 @@ def _subprocess_env(route_via_proxy: bool = True) -> dict[str, str]:
     """
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_NO_DISCORD"] = "1"
+    # Stamped here, in ONE place, because hooks/guard_bash.py scopes Bash by
+    # agent and treats an unstamped process as an interactive human session
+    # (unconstrained). A call site that forgets this would silently hand an
+    # agent the whole shell, so it must not be settable per call site.
+    if agent_id:
+        env["NB_AGENT_ID"] = agent_id
     # Route `claude -p` through the local copilot-api proxy so the fleet runs on
     # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
     # spending Claude Max weekly limits. copilot-api exposes the Anthropic
@@ -108,6 +114,7 @@ def call_claude_sync(
     session_id: str | None = None,
     resume: bool = False,
     effort: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
@@ -156,7 +163,7 @@ def call_claude_sync(
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
-            env=_subprocess_env(),
+            env=_subprocess_env(agent_id=agent_id),
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
@@ -177,6 +184,7 @@ async def call_claude(
     session_id: str | None = None,
     resume: bool = False,
     effort: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -185,5 +193,6 @@ async def call_claude(
         lambda: call_claude_sync(
             prompt, model, timeout, allowed_tools, add_dirs,
             session_id=session_id, resume=resume, effort=effort,
+            agent_id=agent_id,
         ),
     )
