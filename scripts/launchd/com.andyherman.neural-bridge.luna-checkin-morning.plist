@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.luna-checkin-morning</string>
+
+    <!-- Luna's proactive morning check-in on Telegram.
+         07:40, deliberately after the 07:00 briefer cron so today's fleet
+         briefing exists to read. Odd minute rather than on the hour, matching
+         Yor's cadence: a message that lands at exactly 07:00 every day reads
+         like a machine.
+
+         She stays silent when nothing warrants interrupting him. That is the
+         designed outcome, not a failure, and it is what keeps the messages she
+         does send worth reading. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.telegram_bot.luna_checkin</string>
+        <string>--kind</string>
+        <string>morning</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/luna-checkin.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/luna-checkin.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Required: without it she has nobody to send to and exits 2.
+             Same value as the luna-telegram bridge plist. -->
+        <key>LUNA_TELEGRAM_ALLOWED_USERS</key>
+        <string>REPLACE_WITH_ANDY_TELEGRAM_USER_ID</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

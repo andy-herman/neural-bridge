@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.luna-checkin-evening</string>
+
+    <!-- Luna's proactive evening check-in on Telegram.
+         20:10. Looks for what changed state today and what is still open that
+         Andy probably thinks is closed. Explicitly told not to recap his day
+         back to him; he was there.
+
+         Passing is common here and correct. On a normal day nothing changed
+         state that he does not already know about. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.telegram_bot.luna_checkin</string>
+        <string>--kind</string>
+        <string>evening</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/luna-checkin.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/luna-checkin.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Required: without it she has nobody to send to and exits 2.
+             Same value as the luna-telegram bridge plist. -->
+        <key>LUNA_TELEGRAM_ALLOWED_USERS</key>
+        <string>REPLACE_WITH_ANDY_TELEGRAM_USER_ID</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
