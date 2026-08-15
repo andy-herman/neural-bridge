@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -162,7 +162,16 @@ class TestSummarizeOneAgent(unittest.TestCase):
 
     def test_skips_when_no_recent_activity(self):
         # Put an OLD log file so the gather returns empty.
-        self._put_log("luna", "old content", mtime=time.time() - 30 * 24 * 3600)
+        #
+        # "Old" has to be relative to the `today` this test passes in, not to
+        # the wall clock. The original used time.time() - 30 days against a
+        # hardcoded today=2026-05-11, which was fine while real time was near
+        # that date and became a time bomb afterwards: once the clock passed
+        # mid-June, "30 days ago" was NEWER than today, the file counted as
+        # recent, and the test fell through to a real (unmocked) Claude call.
+        stale = datetime.combine(date(2026, 5, 11) - timedelta(days=30),
+                                 dtime.min).timestamp()
+        self._put_log("luna", "old content", mtime=stale)
         ok, line = sw.summarize_one_agent("luna", today=date(2026, 5, 11))
         self.assertTrue(ok)
         self.assertIn("no conversation activity", line)
