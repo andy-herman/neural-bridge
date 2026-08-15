@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 from scripts.memory_canary import (  # noqa: E402
+    DEGRADED,
     FAILING,
     HEALTHY,
     IDLE,
@@ -39,8 +40,15 @@ class TestTelemetryRecording(unittest.TestCase):
         self.path = Path(self.tmp.name) / "t.jsonl"
         self._saved = mem.LOG_PATH
         mem.LOG_PATH = self.path
+        # record() no-ops under a test runner so mocked failures elsewhere in
+        # the suite cannot pollute the production log. This module is the
+        # exception: it has to exercise the recorder itself.
+        import os
+        os.environ[mem.ENV_FORCE] = "1"
 
     def tearDown(self):
+        import os
+        os.environ.pop(mem.ENV_FORCE, None)
         mem.LOG_PATH = self._saved
         self.tmp.cleanup()
 
@@ -127,6 +135,42 @@ class TestCanaryClassification(unittest.TestCase):
         res = evaluate(summary, had_traffic=True, watched=WATCH)
         self.assertEqual(res["honcho_capture"]["status"], SILENT)
         self.assertEqual(degraded(res), ["honcho_capture"])
+
+    def test_partial_degradation_is_caught(self):
+        # The gap the first version missed: one success made a store failing
+        # most of its writes report healthy.
+        summary = {"luna_notes": {"total": 10, "ok": 10, "failed": 0, "last_detail": ""},
+                   "honcho_capture": {"total": 15, "ok": 6, "failed": 9,
+                                      "last_detail": "connection refused"}}
+        res = evaluate(summary, had_traffic=True, watched=WATCH)
+        self.assertEqual(res["honcho_capture"]["status"], DEGRADED)
+        self.assertIn("40%", res["honcho_capture"]["reason"])
+        self.assertEqual(degraded(res), ["honcho_capture"])
+
+    def test_small_samples_do_not_trigger_rate_alarm(self):
+        # 1 ok / 1 failed is 50% but only two events; too noisy to alert on.
+        summary = {"luna_notes": {"total": 2, "ok": 1, "failed": 1, "last_detail": "x"},
+                   "honcho_capture": {"total": 2, "ok": 1, "failed": 1, "last_detail": "x"}}
+        res = evaluate(summary, had_traffic=True, watched=WATCH)
+        self.assertEqual(res["luna_notes"]["status"], HEALTHY)
+
+    def test_telemetry_suppressed_under_test_runner(self):
+        # The defect this guards: honcho's mocked "network blip" failures were
+        # landing in the production log, and the canary read them as a real 60%
+        # failure rate. Restores whatever the flag was so the suppression stays
+        # active for the rest of the suite.
+        import os
+        prior = os.environ.get(mem.ENV_FORCE)
+        try:
+            os.environ.pop(mem.ENV_FORCE, None)
+            self.assertTrue(mem._under_test(), "suppression must be on under a test runner")
+            os.environ[mem.ENV_FORCE] = "1"
+            self.assertFalse(mem._under_test(), "force flag must override suppression")
+        finally:
+            if prior is None:
+                os.environ.pop(mem.ENV_FORCE, None)
+            else:
+                os.environ[mem.ENV_FORCE] = prior
 
     def test_quiet_fleet_is_idle_not_degraded(self):
         # This fleet genuinely sits dormant for weeks. A canary that fires on

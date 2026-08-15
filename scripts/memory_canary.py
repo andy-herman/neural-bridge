@@ -22,14 +22,18 @@ cannot catch that, because there is no error. The only thing that distinguishes
 them is whether SUCCESS is still happening, so this canary asserts on the
 presence of recent successful events rather than the absence of failures.
 
-There are two distinct degraded shapes it names separately, because they need
-different repairs:
+Three distinct degraded shapes, named separately because the repair differs:
 
-  SILENT   the store logged nothing at all in the window. Either the code path
-           is not running, or it is running and not instrumented. This is the
-           shape that hid for ten weeks.
-  FAILING  the store logged events but none succeeded. The path runs and is
-           reachable; the store itself is broken.
+  SILENT    the store logged nothing at all in the window. Either the code path
+            is not running, or it is running and not instrumented. This is the
+            shape that hid for ten weeks.
+  FAILING   the store logged events but none succeeded. The path runs and is
+            reachable; the store itself is broken.
+  DEGRADED  the store succeeds sometimes, below the success-rate floor. The
+            first version of this canary missed this entirely: it only checked
+            ok == 0, so a layer failing 60% of its writes reported healthy
+            because one write landed. Partial degradation is the commoner real
+            shape and it is what precedes total failure.
 
 A store that is simply idle because Andy did not talk to any agent is NOT
 degraded, and the canary says so rather than crying wolf: when there is no
@@ -68,7 +72,16 @@ DEFAULT_WINDOW_DAYS = 7
 HEALTHY = "healthy"
 SILENT = "SILENT"
 FAILING = "FAILING"
+DEGRADED = "DEGRADED"
 IDLE = "idle"
+
+# A store that succeeds sometimes is not healthy. The first version of this
+# canary only flagged total failure (ok == 0), which meant a layer failing 60%
+# of its writes reported "ok" because one write landed. Partial degradation is
+# the more common real shape, so anything below this success rate is called out.
+MIN_SUCCESS_RATE = 0.75
+# Below this many events the rate is noise, so only total failure is reported.
+RATE_MIN_SAMPLES = 4
 
 
 def evaluate(summary: dict[str, dict], *, had_traffic: bool,
@@ -91,10 +104,18 @@ def evaluate(summary: dict[str, dict], *, had_traffic: bool,
             continue
         ok = row.get("ok", 0)
         failed = row.get("failed", 0)
+        total = ok + failed
         if ok == 0:
             out[store] = {
                 "status": FAILING, "ok": ok, "failed": failed,
                 "reason": f"{failed} attempt(s), none succeeded: {row.get('last_detail') or 'no detail'}",
+            }
+        elif total >= RATE_MIN_SAMPLES and (ok / total) < MIN_SUCCESS_RATE:
+            rate = ok / total
+            out[store] = {
+                "status": DEGRADED, "ok": ok, "failed": failed,
+                "reason": (f"{ok}/{total} succeeded ({rate:.0%}, below "
+                           f"{MIN_SUCCESS_RATE:.0%}): {row.get('last_detail') or 'no detail'}"),
             }
         else:
             out[store] = {"status": HEALTHY, "ok": ok, "failed": failed,
@@ -111,13 +132,14 @@ def had_agent_traffic(summary: dict[str, dict]) -> bool:
 def format_report(results: dict[str, dict], window_days: int) -> str:
     lines = [f"Memory canary, {window_days}-day window:"]
     for store, row in sorted(results.items()):
-        marker = {HEALTHY: "ok  ", IDLE: "idle", SILENT: "SILENT", FAILING: "FAIL"}[row["status"]]
+        marker = {HEALTHY: "ok  ", IDLE: "idle", SILENT: "SILENT",
+                  FAILING: "FAIL", DEGRADED: "DEGR"}[row["status"]]
         lines.append(f"  [{marker}] {store}: {row['reason']}")
     return "\n".join(lines)
 
 
 def degraded(results: dict[str, dict]) -> list[str]:
-    return [s for s, r in results.items() if r["status"] in (SILENT, FAILING)]
+    return [s for s, r in results.items() if r["status"] in (SILENT, FAILING, DEGRADED)]
 
 
 def main(argv: list[str] | None = None) -> int:

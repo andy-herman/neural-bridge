@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,9 @@ LOG_PATH = Path.home() / "Library" / "Logs" / "neural-bridge" / "memory-telemetr
 # bytes per event and a handful of events per turn, 20MB is many months.
 MAX_BYTES = 20 * 1024 * 1024
 ENV_DISABLE = "NB_NO_MEMORY_TELEMETRY"
+# Set by the telemetry module's OWN tests, which have to exercise recording.
+# Everything else running under a test runner is suppressed; see _under_test.
+ENV_FORCE = "NB_MEMORY_TELEMETRY_FORCE"
 
 
 def _utc_iso() -> str:
@@ -60,6 +64,21 @@ def _rotate_if_needed(path: Path) -> None:
             path.replace(path.with_suffix(".jsonl.1"))
     except OSError:
         pass
+
+
+def _under_test() -> bool:
+    """True when running inside a test runner.
+
+    The honcho suite mocks failures with messages like "network blip". Without
+    this guard those land in the production telemetry log, and the canary then
+    reports a 60% Honcho failure rate that is entirely an artifact of running
+    the tests. Telemetry that lies about the system is worse than none, so the
+    recorder no-ops under test rather than trusting every test author to
+    remember to disable it.
+    """
+    if os.environ.get(ENV_FORCE) == "1":
+        return False
+    return "unittest" in sys.modules or "pytest" in sys.modules
 
 
 def record(
@@ -80,7 +99,7 @@ def record(
     empty for two months is indistinguishable from a broken one and should be
     surfaced either way. `detail` carries the reason.
     """
-    if os.environ.get(ENV_DISABLE) == "1":
+    if os.environ.get(ENV_DISABLE) == "1" or _under_test():
         return
     try:
         event = {
