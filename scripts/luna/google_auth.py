@@ -192,8 +192,14 @@ def api_get(url: str, params: dict | None = None, timeout: int = 30) -> dict:
 
 # ---------- one-time interactive setup ----------
 
-def _run_setup(with_compose: bool) -> int:
-    """Interactive OAuth. Andy runs this once; agents never do."""
+def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
+    """Interactive OAuth. Andy runs this once; agents never do.
+
+    `wait_seconds` defaults to 15 minutes rather than 5. The first version
+    waited 5 and timed out twice in a row simply because a human stepped away
+    from the keyboard mid-flow. A consent screen is not a machine handshake;
+    it should still be there when you come back with a coffee.
+    """
     import http.server
     import socketserver
     import threading
@@ -237,7 +243,8 @@ def _run_setup(with_compose: bool) -> int:
     with socketserver.TCPServer(("localhost", 8765), Handler) as httpd:
         threading.Thread(target=httpd.handle_request, daemon=True).start()
         webbrowser.open(auth_url)
-        for _ in range(300):  # up to 5 minutes
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
             if "code" in captured or "error" in captured:
                 break
             time.sleep(1)
@@ -246,7 +253,8 @@ def _run_setup(with_compose: bool) -> int:
         print(f"authorization failed: {captured['error']}")
         return 1
     if "code" not in captured:
-        print("timed out waiting for the redirect")
+        print(f"timed out after {wait_seconds}s waiting for the redirect. "
+              f"Nothing was lost; just run setup again when you are at the keyboard.")
         return 1
 
     tok = _post_token({
@@ -275,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("setup", help="one-time interactive authorization")
     s.add_argument("--with-compose", action="store_true",
                    help="also request gmail.compose (allows drafting; also grants send)")
+    s.add_argument("--wait", type=int, default=900,
+                   help="seconds to wait for the browser redirect (default 900)")
     sub.add_parser("status", help="print configuration status")
     sub.add_parser("check", help="verify the token refreshes and the APIs answer")
     args = p.parse_args(argv)
@@ -284,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if is_configured() else 1
     if args.cmd == "setup":
         try:
-            return _run_setup(args.with_compose)
+            return _run_setup(args.with_compose, wait_seconds=args.wait)
         except GoogleAuthError as exc:
             print(f"setup failed: {exc}")
             return 1
