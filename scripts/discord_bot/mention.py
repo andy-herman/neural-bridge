@@ -553,36 +553,22 @@ MENTION_ALLOWED_TOOLS: dict[str, str] = {
     "security-reviewer":   "WebSearch,WebFetch,Read,Glob,Grep",  # read-only by design
     "docs-editor":         "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
     "senior-pm":           "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit",
-    # Luna: executive assistant. General read/write for her notes file +
-    # Calendar (read+write) and Gmail (read+draft) via the claude.ai MCP
-    # connectors. List specific tool names because Claude Code's --allowedTools
-    # doesn't support mcp__server__* wildcards. Add more entries here as Luna's
-    # workflow surfaces new tool needs.
-    "luna": (
-        "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit,"
-        "mcp__claude_ai_Google_Calendar__authenticate,"
-        "mcp__claude_ai_Google_Calendar__list_events,"
-        "mcp__claude_ai_Google_Calendar__create_event,"
-        "mcp__claude_ai_Google_Calendar__update_event,"
-        "mcp__claude_ai_Google_Calendar__delete_event,"
-        "mcp__claude_ai_Gmail__authenticate,"
-        "mcp__claude_ai_Gmail__search_threads,"
-        "mcp__claude_ai_Gmail__get_thread,"
-        "mcp__claude_ai_Gmail__create_draft,"
-        "mcp__claude_ai_Gmail__list_drafts,"
-        "mcp__claude_ai_Gmail__list_labels,"
-        # Google Drive (read-side only, mirroring the Gmail "no destructive
-        # writes" pattern). Luna needs these to act as file-fetcher for the
-        # squad per her Drive-overflow charter. If she needs to create/copy
-        # files or change sharing permissions, surface to Andy or
-        # @automation-engineer rather than wiring those tools here.
-        "mcp__claude_ai_Google_Drive__search_files,"
-        "mcp__claude_ai_Google_Drive__list_recent_files,"
-        "mcp__claude_ai_Google_Drive__read_file_content,"
-        "mcp__claude_ai_Google_Drive__download_file_content,"
-        "mcp__claude_ai_Google_Drive__get_file_metadata,"
-        "mcp__claude_ai_Google_Drive__get_file_permissions"
-    ),
+    # Luna: executive assistant. Reaches Andy's calendar and inbox through her
+    # own CLIs via Bash, not through MCP.
+    #
+    # This entry used to hand-enumerate eighteen mcp__claude_ai_* names for
+    # Calendar, Gmail and Drive. None of them ever resolved. --allowedTools only
+    # auto-approves tools that already exist, and claude.ai connectors are not
+    # loaded into a headless `claude -p`. Tested 2026-08-15: asked for today's
+    # events she answered NO_CALENDAR_ACCESS. Keeping them made the charter look
+    # truthful when it was not, so they are gone.
+    #
+    # Bash is scoped, not open. hooks/guard_bash.py is a PreToolUse hook that
+    # allows this agent only `python -m scripts.luna.calendar|inbox` and blocks
+    # everything else, including chained commands. Verified live: `ls /tmp`
+    # exits 2 and never runs. Do not add Bash to another agent without adding
+    # its allowlist entry there first, or it gets no shell at all.
+    "luna":                "WebSearch,WebFetch,Read,Glob,Grep,Write,Edit,Bash",
     # Librarian: Obsidian vault index + audits + restructure proposals.
     # Read/Write/Edit on the vault (which is mounted into knowledge/ via
     # symlink) plus Glob/Grep for navigation. No web, no MCP — pure

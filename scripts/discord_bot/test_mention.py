@@ -147,18 +147,42 @@ class TestAllowedTools(unittest.TestCase):
         self.assertNotIn("WebSearch", tools)
 
     def test_no_bash_anywhere(self):
-        # Agents must NOT have Bash in mention mode, with ONE documented
-        # exception: loid runs the synapse-journal CLI (its whole purpose, over
-        # Telegram + Discord) and genuinely needs Bash. Deliberate, scoped
-        # capability grant — see loid.md's tool frontmatter and mention.py's
-        # loid allowlist. Everyone else stays shell-free until autonomous access
-        # ships via a structured tool-use protocol.
+        # Agents must NOT have Bash in mention mode. Two documented exceptions,
+        # both because a CLI is the agent's actual job:
+        #   loid  runs synapse-journal (his career database)
+        #   luna  runs her calendar/inbox CLIs, because claude.ai MCP
+        #         connectors do not load in a headless claude -p
+        # Both are scoped by hooks/guard_bash.py, which allows only each
+        # agent's named commands and blocks everything else including chaining.
+        # The exemption is the grant; the hook is what makes it narrow.
         from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
-        BASH_EXEMPT = {"loid"}
+        BASH_EXEMPT = {"loid", "luna"}
         for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
             if agent_id in BASH_EXEMPT:
                 continue
             self.assertNotIn("Bash", tools, f"{agent_id} should not have Bash in mention mode")
+
+    def test_bash_holders_have_a_guard_allowlist(self):
+        # The exemption above is only safe while the hook actually scopes it.
+        # An agent granted Bash without an allowlist entry would get the whole
+        # shell the moment someone widened BASH_EXEMPT.
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "hooks"))
+        from guard_bash import AGENT_BASH_ALLOWLIST
+        from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
+        for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
+            if "Bash" in tools:
+                self.assertIn(agent_id, AGENT_BASH_ALLOWLIST,
+                              f"{agent_id} has Bash but no guard_bash allowlist entry")
+
+    def test_dead_mcp_entries_are_gone(self):
+        # They never resolved in a headless claude -p and made the charter look
+        # truthful when it was not. Regression guard against them creeping back.
+        from scripts.discord_bot.mention import MENTION_ALLOWED_TOOLS
+        for agent_id, tools in MENTION_ALLOWED_TOOLS.items():
+            self.assertNotIn("mcp__claude_ai_", tools,
+                             f"{agent_id} lists claude.ai MCP tools that do not load headless")
 
     def test_security_reviewer_is_read_only(self):
         # Per its plugin definition, security-reviewer surfaces findings
