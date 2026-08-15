@@ -87,22 +87,37 @@ class TestBriefingSelection(unittest.TestCase):
         _name, text = ci.latest_briefing(self.dir)
         self.assertLessEqual(len(text), ci.MAX_BRIEFING_CHARS + 40)
 
-    def test_stale_briefing_is_labeled_in_context(self):
+    def test_stale_briefing_is_labeled(self):
         # A stale briefing presented as current state would have her reporting
-        # yesterday's fleet as today's.
+        # last week's fleet as today's. Needs an actionable marker to appear
+        # at all, hence "failing".
         old = (date.today() - timedelta(days=2)).isoformat()
-        (self.dir / f"{old}.md").write_text("stale content", encoding="utf-8")
-        ctx = ci.gather_context(self.dir)
-        self.assertIn("NOT today's", ctx)
+        (self.dir / f"{old}.md").write_text("Synapse is failing", encoding="utf-8")
+        self.assertIn("NOT today's", ci.gather_fleet(self.dir))
 
     def test_todays_briefing_not_labeled_stale(self):
         today = date.today().isoformat()
-        (self.dir / f"{today}.md").write_text("fresh content", encoding="utf-8")
-        ctx = ci.gather_context(self.dir)
-        self.assertNotIn("NOT today's", ctx)
+        (self.dir / f"{today}.md").write_text("Synapse is failing", encoding="utf-8")
+        self.assertNotIn("NOT today's", ci.gather_fleet(self.dir))
 
-    def test_no_briefing_yields_empty_context(self):
-        self.assertEqual(ci.gather_context(self.dir), "")
+    def test_no_briefing_yields_no_fleet_section(self):
+        self.assertEqual(ci.gather_fleet(self.dir), "")
+
+    def test_healthy_fleet_is_omitted_entirely(self):
+        # Agent uptime is devops. A green fleet must not crowd out the
+        # commitments that actually belong in an EA check-in.
+        today = date.today().isoformat()
+        (self.dir / f"{today}.md").write_text(
+            "# Fleet Briefing\n\n- Status: ALL GOOD\n- Health: 100/100\n", encoding="utf-8")
+        self.assertEqual(ci.gather_fleet(self.dir), "")
+
+    def test_fleet_included_when_actionable(self):
+        today = date.today().isoformat()
+        (self.dir / f"{today}.md").write_text(
+            "# Fleet Briefing\n\n- Status: 1 ANOMALY DETECTED\n", encoding="utf-8")
+        out = ci.gather_fleet(self.dir)
+        self.assertIn("ANOMALY", out)
+        self.assertIn("secondary", out)
 
 
 class TestPromptBuilding(unittest.TestCase):

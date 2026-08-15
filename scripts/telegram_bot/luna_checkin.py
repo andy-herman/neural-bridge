@@ -9,8 +9,12 @@ without a single mention because of exactly that. An assistant that never speaks
 first is a tool you have to remember to pick up. Yor has three scheduled
 check-ins a day and is the agent Andy actually talks to; this is that pattern.
 
-The context she opens with is the fleet briefing her own briefer cron has been
-writing every morning since May and that nothing has ever read.
+Her primary context is Andy's commitment board (`Herman Tasks.md`), because
+that is what an executive assistant actually watches. Fleet health is secondary
+and only included when something is actionable: agent uptime is devops, and it
+crowds out the commitments that matter to his day. On the day this was built the
+board held two regulator-escalated items seventeen days overdue while Luna had
+been silent for twelve weeks.
 
 DESIGN NOTE, and it is the load-bearing one: `[PASS]` is a first-class outcome.
 A check-in that fires every day regardless of whether anything happened becomes
@@ -40,6 +44,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 from scripts.discord_bot.claude_invoke import call_claude_sync, sanitize_untrusted_text  # noqa: E402
 from scripts.discord_bot.keychain import get_token  # noqa: E402
+from scripts.luna import tasks  # noqa: E402
 from scripts.discord_bot.mention import (  # noqa: E402
     LUNA_NOTES_MAX_CHARS,
     LUNA_NOTES_PATH,
@@ -64,14 +69,15 @@ MAX_BRIEFING_CHARS = 4000
 
 KIND_GUIDANCE = {
     "morning": (
-        "It is the start of his day. Look for what is arriving today, what is "
-        "newly broken, and anything that will get worse if it waits. If the "
-        "fleet is healthy and nothing is due, say nothing."
+        "It is the start of his day. Lead with anything past due or escalated, "
+        "then what lands in the next couple of weeks that he has not started. "
+        "Deadlines a regulator is chasing outrank everything else. If nothing "
+        "is due and nothing is slipping, say nothing."
     ),
     "evening": (
-        "His working day is ending. Look for what changed state today and what "
-        "is still open that he probably thinks is closed. Do not recap the day "
-        "back to him; he was there."
+        "His working day is ending. Look for what is still open that he "
+        "probably thinks is handled, and anything past due that got no movement "
+        "today. Do not recap his day back to him; he was there."
     ),
 }
 
@@ -105,19 +111,57 @@ def latest_briefing(briefings_dir: Path = BRIEFINGS_DIR) -> tuple[str, str]:
     return target.name, text
 
 
-def gather_context(briefings_dir: Path = BRIEFINGS_DIR) -> str:
-    """Assemble what Luna knows right now. Empty string when she knows nothing."""
+def gather_tasks(today: date | None = None) -> str:
+    """Andy's commitment board, urgency-ordered. The primary EA context.
+
+    This is what an executive assistant actually watches. The board carried two
+    regulator-escalated items seventeen days overdue while Luna had been silent
+    for twelve weeks, which is the gap this whole check-in exists to close.
+    """
+    now = today or date.today()
+    board = tasks.load_board(today=now)
+    if not board:
+        mem.record(mem.RETRIEVE, "luna_tasks", agent_id=AGENT_ID,
+                   ok=False, detail="board unreadable or empty")
+        return ""
+    rendered = tasks.format_for_prompt(board, now)
+    mem.record(mem.RETRIEVE, "luna_tasks", agent_id=AGENT_ID, ok=True,
+               chars=len(rendered),
+               detail=f"{len(tasks.open_tasks(board))} open, "
+                      f"{len(tasks.overdue(board, now))} past due")
+    return f"### Andy's commitment board\n\n{rendered}"
+
+
+def gather_fleet(briefings_dir: Path = BRIEFINGS_DIR) -> str:
+    """Fleet health, secondary. Included only when something needs attention.
+
+    Agent health is devops, not executive assistance. It belongs in a check-in
+    only when it is actionable, otherwise it crowds out the commitments that
+    actually matter to his day.
+    """
     name, briefing = latest_briefing(briefings_dir)
     if not briefing:
         mem.record(mem.RETRIEVE, "luna_briefing", agent_id=AGENT_ID,
                    ok=False, detail="no briefing available")
         return ""
-    stale = "" if name.startswith(date.today().isoformat()) else " (NOT today's; treat as stale)"
     mem.record(mem.RETRIEVE, "luna_briefing", agent_id=AGENT_ID,
                ok=True, chars=len(briefing), detail=name)
+    needs_attention = ("ANOMALY" in briefing.upper()
+                       or "failing" in briefing
+                       or "Needs attention" in briefing)
+    if not needs_attention:
+        return ""
+    stale = "" if name.startswith(date.today().isoformat()) else " (NOT today's; treat as stale)"
     fenced = sanitize_untrusted_text(briefing, "fleet-briefing")
-    return (f"### Fleet briefing, {name}{stale}\n\n"
+    return (f"### Agent fleet, secondary ({name}{stale})\n\n"
+            f"Mention this only if it is genuinely actionable today.\n\n"
             f"<fleet-briefing>\n{fenced}\n</fleet-briefing>")
+
+
+def gather_context(briefings_dir: Path = BRIEFINGS_DIR, today: date | None = None) -> str:
+    """Assemble what Luna knows right now, commitments first."""
+    parts = [p for p in (gather_tasks(today), gather_fleet(briefings_dir)) if p]
+    return "\n\n".join(parts)
 
 
 def gather_notes() -> str:
