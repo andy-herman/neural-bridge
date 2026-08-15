@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .claude_invoke import sanitize_untrusted_text
 from . import honcho_client
+from . import memory_telemetry as _mem
 
 _logger = logging.getLogger("nb_discord.mention")
 
@@ -232,20 +233,34 @@ def _lessons_block(agent_id: str) -> str:
     """
     digest_dir = LESSONS_LEARNED_BASE / agent_id / "lessons-learned"
     if not digest_dir.exists():
+        # This layer returned "" on every turn from May to August and nobody
+        # noticed, because an empty string is indistinguishable from "no news".
+        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                    ok=False, detail="no lessons-learned dir")
         return ""
     try:
         digests = sorted(digest_dir.glob("*.md"))
-    except OSError:
+    except OSError as exc:
+        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                    ok=False, detail=f"listdir failed: {exc}")
         return ""
     if not digests:
+        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                    ok=False, detail="dir exists but holds no digests")
         return ""
     most_recent = digests[-1]
     try:
         content = most_recent.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                    ok=False, detail=f"read failed: {exc}")
         return ""
     if not content.strip():
+        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                    ok=False, detail=f"{most_recent.name} is empty")
         return ""
+    _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
+                ok=True, chars=len(content), detail=most_recent.name)
     if len(content) > LESSONS_LEARNED_MAX_CHARS:
         content = content[:LESSONS_LEARNED_MAX_CHARS].rstrip() + "\n\n[...truncated to fit prompt budget...]"
     sanitized = sanitize_untrusted_text(content, "lessons-learned")
@@ -358,13 +373,20 @@ def _luna_notes_block() -> str:
     her mention prompt. Empty string if the file is missing or unreadable.
     """
     if not LUNA_NOTES_PATH.exists():
+        _mem.record(_mem.RETRIEVE, "luna_notes", agent_id="luna",
+                    ok=False, detail="notes.md missing")
         return ""
     try:
         notes = LUNA_NOTES_PATH.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        _mem.record(_mem.RETRIEVE, "luna_notes", agent_id="luna",
+                    ok=False, detail=f"read failed: {exc}")
         return ""
     if not notes.strip():
+        _mem.record(_mem.RETRIEVE, "luna_notes", agent_id="luna",
+                    ok=False, detail="notes.md is empty")
         return ""
+    raw_chars = len(notes)
     notes, dropped = budget_notes(notes, LUNA_NOTES_MAX_CHARS)
     if dropped:
         # Never fail silently: a shrinking memory is invisible from the outside.
@@ -372,6 +394,13 @@ def _luna_notes_block() -> str:
             "luna notes.md over budget (%d chars); dropped from prompt: %s",
             LUNA_NOTES_MAX_CHARS, ", ".join(dropped),
         )
+    # Recorded as a successful retrieve that lost content, not as a failure:
+    # she did get her notes, just not all of them. The canary watches the
+    # dropped count separately so trimming does not read as an outage.
+    _mem.record(_mem.RETRIEVE, "luna_notes", agent_id="luna", ok=True,
+                chars=len(notes),
+                detail=(f"trimmed {raw_chars}->{len(notes)}; dropped "
+                        + "; ".join(dropped)) if dropped else "full")
     sanitized = sanitize_untrusted_text(notes, "luna-notes")
     return (
         "## Your prior notes (auto-injected from "
@@ -411,13 +440,17 @@ def _echo_voice_block() -> str:
     Empty string if missing/unreadable so the prompt builder degrades gracefully.
     """
     if not ECHO_VOICE_PATH.exists():
+        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail="voice.md missing")
         return ""
     try:
         voice = ECHO_VOICE_PATH.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail=f"read failed: {exc}")
         return ""
     if not voice.strip():
+        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail="voice.md is empty")
         return ""
+    _mem.record(_mem.RETRIEVE, "echo_voice", ok=True, chars=len(voice))
     if len(voice) > ECHO_VOICE_MAX_CHARS:
         voice = voice[: ECHO_VOICE_MAX_CHARS - 1].rstrip() + "\n[…profile truncated to fit prompt budget. Read the full file via the Read tool if needed: `~/Documents/Luna Master/Andy Profile/voice.md`]"
     sanitized = sanitize_untrusted_text(voice, "echo-voice")

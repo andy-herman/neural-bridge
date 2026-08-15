@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.memory-canary</string>
+
+    <!-- Daily read-back check on the memory stack. Exits non-zero and posts to
+         Discord when a store goes SILENT (logging nothing while the rest of the
+         fleet is active) or FAILING (attempting and never succeeding).
+
+         This is the job that would have caught the Honcho capture path being
+         dead from 2026-05-27 to 2026-08-02. It asserts on the presence of
+         recent SUCCESS rather than the absence of errors, because a healthy
+         quiet system and a dead one both produce zero errors.
+
+         --quiet so a healthy run prints nothing and only real degradation
+         reaches the log. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.memory_canary</string>
+        <string>--quiet</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 09:15 local, after the morning briefer at 07:00 so a fresh day's
+         traffic is represented rather than an empty overnight window. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/memory-canary.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/memory-canary.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

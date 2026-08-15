@@ -29,6 +29,8 @@ import logging
 import os
 from typing import Optional
 
+from . import memory_telemetry as _mem
+
 _logger = logging.getLogger("nb_discord.honcho")
 
 _client_cache = None
@@ -96,9 +98,13 @@ def get_peer_card_context(agent_id: str, max_chars: int = 2000) -> str:
     Truncates to max_chars to bound prompt growth.
     """
     if not _enabled():
+        _mem.record(_mem.RETRIEVE, "honcho_peer_card", agent_id=agent_id,
+                    ok=False, detail="honcho disabled")
         return ""
     client = _get_client()
     if client is None:
+        _mem.record(_mem.RETRIEVE, "honcho_peer_card", agent_id=agent_id,
+                    ok=False, detail="client unavailable")
         return ""
     try:
         user_peer = _user_peer_id()
@@ -108,6 +114,8 @@ def get_peer_card_context(agent_id: str, max_chars: int = 2000) -> str:
         agent_peer = client.peer(agent_id)
         card = agent_peer.get_card(user_peer) or client.peer(user_peer).get_card()
         if not card:
+            _mem.record(_mem.RETRIEVE, "honcho_peer_card", agent_id=agent_id,
+                        ok=False, detail="reachable but card is empty")
             return ""
         if isinstance(card, list):
             body = "\n".join(f"- {fact}" for fact in card if fact)
@@ -115,6 +123,8 @@ def get_peer_card_context(agent_id: str, max_chars: int = 2000) -> str:
             body = str(card)
         if len(body) > max_chars:
             body = body[: max_chars - 3] + "..."
+        _mem.record(_mem.RETRIEVE, "honcho_peer_card", agent_id=agent_id,
+                    ok=True, chars=len(body))
         return (
             "## Honcho peer card — what you (the agent) currently know about Andy\n\n"
             "These are persistent observations accumulated across all your conversations "
@@ -126,6 +136,8 @@ def get_peer_card_context(agent_id: str, max_chars: int = 2000) -> str:
         # warning, not debug: a silent failure here hid a dead capture path for
         # two months (May-Aug 2026) — visibility is worth the occasional noise.
         _logger.warning("Honcho peer card fetch failed for agent %s: %s", agent_id, exc)
+        _mem.record(_mem.RETRIEVE, "honcho_peer_card", agent_id=agent_id,
+                    ok=False, detail=f"{type(exc).__name__}: {exc}")
         return ""
 
 
@@ -145,9 +157,13 @@ def submit_turn(
     groups related turns. The bot's existing session_store UUIDs work well.
     """
     if not _enabled():
+        _mem.record(_mem.WRITE, "honcho_capture", agent_id=agent_id,
+                    ok=False, detail="honcho disabled")
         return
     client = _get_client()
     if client is None:
+        _mem.record(_mem.WRITE, "honcho_capture", agent_id=agent_id,
+                    ok=False, detail="client unavailable")
         return
     try:
         user_peer = _user_peer_id()
@@ -159,6 +175,12 @@ def submit_turn(
                 {"peer_id": agent_id, "content": agent_response},
             ]
         )
+        # This is the exact write that was dead from 2026-05-27 to 2026-08-02.
+        # Counting successes (not just failures) is the point: a store with zero
+        # events logged is indistinguishable from a healthy quiet one, which is
+        # how that outage survived ten weeks.
+        _mem.record(_mem.WRITE, "honcho_capture", agent_id=agent_id, ok=True,
+                    chars=len(user_message) + len(agent_response))
         global _logged_first_submit
         if not _logged_first_submit:
             _logger.info("Honcho first turn submitted OK (agent=%s, session=%s)", agent_id, sid[:8])
@@ -167,6 +189,8 @@ def submit_turn(
         # warning, not debug: a silent failure here hid a dead capture path for
         # two months (May-Aug 2026) — visibility is worth the occasional noise.
         _logger.warning("Honcho turn submit failed for agent %s: %s", agent_id, exc)
+        _mem.record(_mem.WRITE, "honcho_capture", agent_id=agent_id,
+                    ok=False, detail=f"{type(exc).__name__}: {exc}")
 
 
 def ensure_peer(agent_id: str) -> None:
