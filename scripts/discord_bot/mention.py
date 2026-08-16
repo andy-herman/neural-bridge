@@ -208,7 +208,14 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
 # her context window when claude -p starts.
 
 LUNA_NOTES_PATH = Path.home() / "Documents" / "Luna Master" / "Agents" / "Luna" / "notes.md"
-LUNA_NOTES_MAX_CHARS = 8000  # bound prompt size; truncate-with-ellipsis otherwise
+# Bound prompt size; budget_notes drops rolling-log sections first, durable ones
+# only as a last resort. Raised 8000 -> 12000 on 2026-08-16 because the durable
+# half of her notes had grown to ~10.7k, so every turn was dropping ~2.7k of it,
+# including part of "Decisions Andy has made that I should honor". Durable-first
+# ordering was working; there simply was not room. Paid for out of the 4000
+# reclaimed by retiring lessons_digest the same day, so the per-turn prompt is
+# still smaller than it was this morning.
+LUNA_NOTES_MAX_CHARS = 12000
 
 
 # Headings whose content is a rolling log (a changelog of what happened). When
