@@ -240,7 +240,23 @@ def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
               "command, but the grant permits it. Skip --with-compose to stay read-only.")
     print(f"\nOpening the consent screen. If it does not open, visit:\n{auth_url}\n")
 
-    with socketserver.TCPServer(("localhost", 8765), Handler) as httpd:
+    # allow_reuse_address so a previous run that timed out does not leave the
+    # port unusable. Without it, a second attempt dies with "Address already in
+    # use", having already told the user to go click Allow: the browser then
+    # redirects into nothing and the failure looks like the user's fault.
+    class _Server(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    httpd = None
+    try:
+        httpd = _Server(("localhost", 8765), Handler)
+    except OSError as exc:
+        print(f"cannot listen on {REDIRECT_URI}: {exc}")
+        print("Another setup run may still be holding the port. Try: "
+              "pkill -f scripts.luna.google_auth")
+        return 1
+
+    try:
         threading.Thread(target=httpd.handle_request, daemon=True).start()
         webbrowser.open(auth_url)
         deadline = time.time() + wait_seconds
@@ -248,6 +264,10 @@ def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
             if "code" in captured or "error" in captured:
                 break
             time.sleep(1)
+    finally:
+        # Always release the port, including on timeout. The daemon thread may
+        # still be blocked in handle_request; closing the socket frees it.
+        httpd.server_close()
 
     if "error" in captured:
         print(f"authorization failed: {captured['error']}")

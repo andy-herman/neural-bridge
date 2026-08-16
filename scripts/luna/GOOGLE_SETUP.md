@@ -55,8 +55,25 @@ command breaks the suite rather than slipping through review.
    - <https://console.cloud.google.com/apis/library/calendar-json.googleapis.com>
    - <https://console.cloud.google.com/apis/library/gmail.googleapis.com>
 3. Configure the OAuth consent screen: **External**, publishing status
-   **Testing**, and add your own Gmail address as a test user. Testing mode is
-   correct here; this app has exactly one user and never needs verification.
+   **In production**.
+
+   Two traps here, both hit for real on 2026-08-15:
+
+   **Do not pick Internal**, even though the console offers it. It is offered
+   whenever the project sits under an organization, and `luna-assistant` does
+   (`andy-herman17-org`). But the org is attached to the *project*, not to a
+   consumer `@gmail.com` *identity*. The selection is accepted and then consent
+   fails at the last step with `Error 403: org_internal`.
+
+   **Do not leave it in Testing.** Testing is the obvious choice for a one-user
+   app and it works on the day you set it up. Then refresh tokens for sensitive
+   scopes expire after 7 days and Luna goes dark every week. In production has
+   no such expiry. The cost is an "unverified app" warning at consent, which is
+   correct and expected for an app you published yourself and never submitted
+   for review: click **Advanced**, then **Go to Luna Assistant (unsafe)**.
+
+   The 100-user lifetime cap shown on the Audience page is irrelevant for a
+   single-user app.
 4. Credentials → Create credentials → **OAuth client ID** → **Desktop app**.
 5. Download the JSON.
 
@@ -79,8 +96,12 @@ A browser opens, you approve, and a token lands at
 `~/.config/neural-bridge/google_token.json` with mode 600. The command prints
 the refresh token only in redacted form.
 
-Google will warn that the app is unverified. That is expected for a Testing-mode
-app you created yourself; continue past it.
+At the consent screen: pick the account, then click **Advanced** and **Go to
+Luna Assistant (unsafe)** past the unverified-app warning, then **Allow**.
+
+The command waits 15 minutes for the redirect and then gives up cleanly,
+releasing the port. Nothing is lost on a timeout; just run it again when you are
+actually at the keyboard. Override with `--wait <seconds>` if you want longer.
 
 ## Step 4. Verify
 
@@ -114,6 +135,9 @@ have never resolved and they make the charter look truthful when it is not.
 | `token file has no refresh_token` | revoke at <https://myaccount.google.com/permissions>, redo step 3 |
 | `API 403: insufficient authentication scopes` | scopes changed since authorizing; redo step 3 |
 | `token endpoint returned 400: invalid_grant` | refresh token revoked or expired; redo step 3 |
+| `Error 403: org_internal` at consent | audience is set to Internal; switch to External on the Audience page |
+| `cannot listen on http://localhost:8765` | a previous setup run is still holding the port: `pkill -f scripts.luna.google_auth` |
+| Luna worked for a week then stopped | publishing status slipped back to Testing; set it to In production |
 
 ## Rotating or revoking
 
