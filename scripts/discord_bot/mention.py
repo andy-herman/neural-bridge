@@ -210,72 +210,6 @@ ADD_DIRS_PER_AGENT: dict[str, list[str]] = {
 LUNA_NOTES_PATH = Path.home() / "Documents" / "Luna Master" / "Agents" / "Luna" / "notes.md"
 LUNA_NOTES_MAX_CHARS = 8000  # bound prompt size; truncate-with-ellipsis otherwise
 
-# Weekly lessons-learned digest (produced by scripts/summarize_weekly.py). Same
-# auto-inject pattern as Luna's notes, but generalized: every agent that has a
-# digest file gets it injected. The summarizer cron writes to
-# Agents/<agent_id>/lessons-learned/YYYY-WW.md every Monday 04:00, compressing
-# the prior 7 days of conversation logs into preferences + patterns + decisions
-# the agent should carry into next week. We always inject the MOST RECENT file
-# in that directory (one week behind at worst).
-LESSONS_LEARNED_BASE = Path.home() / "Documents" / "Luna Master" / "Agents"
-LESSONS_LEARNED_MAX_CHARS = 4000  # digest is supposed to be ~2k; cap with headroom
-
-
-def _lessons_block(agent_id: str) -> str:
-    """Read the most recent weekly lessons-learned digest for this agent and
-    return a context block to prepend to the mention prompt. Empty string if
-    no digest exists yet (new agent, or summarize_weekly hasn't run for them).
-
-    The digest is the compressed memory pattern — what to carry into THIS
-    week's conversations based on the prior week's signal. Distinct from
-    Luna's manual notes.md (which only Luna maintains) and from the verbatim
-    conversation archive (searched on-demand via Grep).
-    """
-    digest_dir = LESSONS_LEARNED_BASE / agent_id / "lessons-learned"
-    if not digest_dir.exists():
-        # This layer returned "" on every turn from May to August and nobody
-        # noticed, because an empty string is indistinguishable from "no news".
-        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                    ok=False, detail="no lessons-learned dir")
-        return ""
-    try:
-        digests = sorted(digest_dir.glob("*.md"))
-    except OSError as exc:
-        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                    ok=False, detail=f"listdir failed: {exc}")
-        return ""
-    if not digests:
-        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                    ok=False, detail="dir exists but holds no digests")
-        return ""
-    most_recent = digests[-1]
-    try:
-        content = most_recent.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                    ok=False, detail=f"read failed: {exc}")
-        return ""
-    if not content.strip():
-        _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                    ok=False, detail=f"{most_recent.name} is empty")
-        return ""
-    _mem.record(_mem.RETRIEVE, "lessons_digest", agent_id=agent_id,
-                ok=True, chars=len(content), detail=most_recent.name)
-    if len(content) > LESSONS_LEARNED_MAX_CHARS:
-        content = content[:LESSONS_LEARNED_MAX_CHARS].rstrip() + "\n\n[...truncated to fit prompt budget...]"
-    sanitized = sanitize_untrusted_text(content, "lessons-learned")
-    return (
-        f"## Your lessons learned (auto-injected from "
-        f"~/Documents/Luna Master/Agents/{agent_id}/lessons-learned/{most_recent.name})\n\n"
-        f"This is a compressed digest of patterns, preferences, decisions, and "
-        f"open threads from your conversations with Andy over the past week. "
-        f"You wrote it via the weekly summarization cron. Treat it as your own "
-        f"working memory; it is already in your context, so don't re-read the "
-        f"file via a tool call. For verbatim past conversations, the full "
-        f"archive is at `~/Documents/Luna Master/Agents/{agent_id}/conversations/`.\n\n"
-        f"<lessons-learned>\n{sanitized}\n</lessons-learned>\n\n"
-    )
-
 
 # Headings whose content is a rolling log (a changelog of what happened). When
 # the notes file overflows the injection budget, THIS is what gets dropped —
@@ -366,7 +300,6 @@ def budget_notes(text: str, max_chars: int) -> tuple[str, list[str]]:
             durable_budget = 0
 
     return "".join(out), dropped
-
 
 def _luna_notes_block() -> str:
     """Read Luna's vault notes file and return a context block to prepend to
@@ -674,22 +607,22 @@ def build_mention_prompt(
         if notes_prefix:
             rendered = notes_prefix + rendered
 
-    # Every agent: prepend the most recent weekly lessons-learned digest if
-    # one exists. This is the compressed compounding memory — last week's
-    # preferences/decisions/patterns folded into a few hundred lines.
-    # Produced by scripts/summarize_weekly.py on Monday 04:00. Layered ABOVE
-    # Luna's notes (which are most-recent-first hand-curated) and Echo's
-    # voice (style mirror) so the digest reads as the first thing in context.
-    lessons_prefix = _lessons_block(agent_id)
-    if lessons_prefix:
-        rendered = lessons_prefix + rendered
+    # The weekly lessons-learned digest used to be prepended here. Retired
+    # 2026-08-16 on the evidence, not on taste: over its instrumented lifetime
+    # it resolved for 1 request in 7, because exactly one agent ever had a
+    # digest directory, while costing a 4000 character budget slot on every
+    # other agent's every turn. Its stated job, compressing last week's signal
+    # into what to carry forward, is the note store's job.
+    #
+    # The one real digest that existed was migrated into Luna's notes.md before
+    # removal. See docs/MEMORY_CONSOLIDATION.md gate G1.
 
     # Every agent: prepend the Honcho peer card — LLM-extracted persistent
     # observations about Andy, shared across all agents in this workspace and
     # with Yor (the Hermes-side thinking-partner agent). Each agent contributes
     # observations from its own perspective via directional mode; the peer-card
-    # facts compound. Layered ABOVE lessons so it reads as the foundational
-    # "who is this person" context before the more recent reflective digest.
+    # facts compound. This is the outermost layer, so it reads as the
+    # foundational "who is this person" context before anything more recent.
     # No-ops if Honcho is unreachable (see honcho_client._enabled / _get_client).
     honcho_prefix = honcho_client.get_peer_card_context(agent_id)
     if honcho_prefix:

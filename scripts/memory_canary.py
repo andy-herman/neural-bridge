@@ -59,9 +59,10 @@ from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 # Stores the canary knows about, with the stage that proves the layer is alive.
 # `traffic_gated` means the store only produces events when an agent actually
 # runs, so silence is expected during a quiet window and is reported as IDLE.
+# lessons_digest was removed 2026-08-16. It resolved for 1 request in 7 over
+# its instrumented life and is retired; see docs/MEMORY_CONSOLIDATION.md.
 WATCHED: dict[str, dict] = {
     "luna_notes":       {"stage": mem.RETRIEVE, "traffic_gated": True},
-    "lessons_digest":   {"stage": mem.RETRIEVE, "traffic_gated": True},
     "echo_voice":       {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_peer_card": {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_capture":   {"stage": mem.WRITE,    "traffic_gated": True},
