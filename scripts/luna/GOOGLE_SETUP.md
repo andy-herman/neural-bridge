@@ -111,20 +111,23 @@ actually at the keyboard. Override with `--wait <seconds>` if you want longer.
 .venv/bin/python -m scripts.luna.inbox unread --count 3
 ```
 
-## Step 5. Let Luna actually call them
+## Step 5. Luna's side (already done)
 
-Until this step she still cannot reach any of it. Two changes:
+No action needed; recorded here so the wiring is findable.
 
-1. Grant her `Bash` in `MENTION_ALLOWED_TOOLS` (`scripts/discord_bot/mention.py`).
-   Note the tradeoff honestly: that is unrestricted shell, not shell scoped to
-   these two scripts. Loid already holds Bash for the same reason and there is a
-   documented test exemption for it. The narrower fix is a `PreToolUse` hook
-   that allowlists the two commands, which is the deferred item in
-   `docs/LOOP_ENGINEER.md`.
-2. Tell her the commands exist, in her charter, with one line each.
+- She holds `Bash` in `MENTION_ALLOWED_TOOLS`, and `hooks/guard_bash.py` scopes
+  it to exactly `python -m scripts.luna.calendar|inbox`. Anything else exits 2
+  and never runs, chained commands included. The hook landed *before* the grant
+  so the permission was narrow from the first minute.
+- Her charter lists the commands and states plainly that she can read but not
+  write, and that a `CALENDAR_UNAVAILABLE` result means she reports it rather
+  than guessing.
+- The eighteen dead `mcp__claude_ai_*` entries are gone, with a test that fails
+  if any agent lists one again.
 
-Then drop the eighteen dead `mcp__claude_ai_*` entries from her allowlist. They
-have never resolved and they make the charter look truthful when it is not.
+Verified end to end on 2026-08-15 before Google access existed: asked for the
+day's calendar, she ran the CLI, quoted `CALENDAR_UNAVAILABLE` verbatim, pointed
+at this document, and did not retry.
 
 ## Troubleshooting
 
