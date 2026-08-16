@@ -165,6 +165,9 @@ Andy's domain. Getting these wrong is expensive, so if you're unsure, flag it in
 | corrective action | 시정 조치 |
 | evidence, audit artifacts | 증적 / 증빙 |
 | control item | 통제 항목 |
+| control matrix | 통제 매트릭스 (not 관리 매트릭스) |
+| access control | 접근 통제 |
+| sign-off / approval | 승인 |
 | due diligence | 실사 |
 | regulator | 규제 기관 |
 | data privacy | 개인정보 보호 |
