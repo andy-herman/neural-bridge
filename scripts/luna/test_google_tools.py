@@ -85,6 +85,64 @@ class TestConflicts(unittest.TestCase):
         self.assertEqual(cal.find_conflicts([]), [])
 
 
+class TestDuplicateDetection(unittest.TestCase):
+    """The real case: the same flight entered in English and Korean."""
+
+    def _pair(self, t1, t2, s=9, e=11):
+        return _ev(t1, s, e), _ev(t2, s, e)
+
+    def test_cross_language_flight_is_duplicate(self):
+        a, b = self._pair("Flight to Seattle (KE 41)", "Flight to 시애틀 (KE 41)")
+        self.assertTrue(cal.looks_duplicate(a, b))
+
+    def test_duplicate_excluded_from_conflicts(self):
+        a, b = self._pair("Flight to Seattle (KE 41)", "Flight to 시애틀 (KE 41)")
+        self.assertEqual(cal.find_conflicts([a, b]), [])
+        self.assertEqual(len(cal.find_duplicates([a, b])), 1)
+
+    def test_identical_titles_are_duplicate(self):
+        a, b = self._pair("Standup", "Standup")
+        self.assertTrue(cal.looks_duplicate(a, b))
+
+    def test_different_meetings_same_slot_stay_a_conflict(self):
+        # The thing that must NOT be swallowed: two real meetings booked over
+        # each other is exactly what Andy needs told.
+        a, b = self._pair("Budget review", "Dentist")
+        self.assertFalse(cal.looks_duplicate(a, b))
+        self.assertEqual(len(cal.find_conflicts([a, b])), 1)
+
+    def test_partial_overlap_is_never_duplicate(self):
+        a, b = _ev("Flight to Seattle (KE 41)", 9, 11), _ev("Flight to 시애틀 (KE 41)", 10, 12)
+        self.assertFalse(cal.looks_duplicate(a, b))
+        self.assertEqual(len(cal.find_conflicts([a, b])), 1)
+
+    def test_shared_digit_token_drives_it(self):
+        # Course codes and room numbers survive translation the same way.
+        a, b = self._pair("INFO 310 lecture", "INFO 310 강의")
+        self.assertTrue(cal.looks_duplicate(a, b))
+
+    def test_same_number_different_event_is_not_duplicate(self):
+        # A shared digit token alone must not merge unrelated events... but
+        # here the titles genuinely share "310", so this documents the limit:
+        # identical start AND end is also required, and these differ.
+        a, b = _ev("INFO 310 lecture", 9, 11), _ev("Room 310 booking", 13, 14)
+        self.assertFalse(cal.looks_duplicate(a, b))
+
+    def test_untitled_events_same_slot_treated_as_duplicate(self):
+        a, b = self._pair("", "")
+        self.assertTrue(cal.looks_duplicate(a, b))
+
+    def test_report_shows_duplicates_separately(self):
+        a, b = self._pair("Flight to Seattle (KE 41)", "Flight to 시애틀 (KE 41)")
+        out = cal.format_conflicts(cal.find_conflicts([a, b]), cal.find_duplicates([a, b]))
+        self.assertIn("No overlapping meetings", out)
+        self.assertIn("DUPLICATES", out)
+
+    def test_report_omits_duplicate_section_when_none(self):
+        out = cal.format_conflicts([], [])
+        self.assertNotIn("DUPLICATES", out)
+
+
 class TestCalendarFormatting(unittest.TestCase):
     def test_empty_day(self):
         self.assertIn("nothing scheduled", cal.format_events([], "Today"))

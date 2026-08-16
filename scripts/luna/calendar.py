@@ -21,6 +21,7 @@ Exit codes: 0 fine, 1 API or auth failure, 2 not configured.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -102,7 +103,60 @@ def overlaps(a: Event, b: Event) -> bool:
     return a.start < b.end and b.start < a.end
 
 
+# Tokens that survive translation: latin letters and digits. Andy's calendar
+# carries the same flight twice, once in English and once in Korean, so a
+# similarity check over full titles would score them as unrelated.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_DUP_TOKEN_RATIO = 0.6
+
+
+def _title_tokens(summary: str) -> set[str]:
+    return set(_TOKEN_RE.findall(summary.lower()))
+
+
+def looks_duplicate(a: Event, b: Event) -> bool:
+    """True when two events are the same thing entered twice, not a clash.
+
+    "Flight to Seattle (KE 41)" and "Flight to 시애틀 (KE 41)" occupy identical
+    minutes and are one flight. Reporting that as an overlap is a false alarm,
+    and an assistant whose first real conflict report is wrong does not get
+    believed on the second.
+
+    Requires identical start AND end, then either a shared token containing a
+    digit (flight number, room, course code: the parts that do not get
+    translated) or a high share of common latin tokens. Two genuinely different
+    meetings booked over each other have neither, so they stay conflicts.
+    """
+    if a.start != b.start or a.end != b.end:
+        return False
+    ta, tb = _title_tokens(a.summary), _title_tokens(b.summary)
+    if not ta or not tb:
+        # Identical slot, nothing comparable in the titles: treat as duplicate
+        # rather than invent a conflict.
+        return True
+    shared = ta & tb
+    if any(any(ch.isdigit() for ch in tok) for tok in shared):
+        return True
+    return len(shared) / min(len(ta), len(tb)) >= _DUP_TOKEN_RATIO
+
+
+def find_duplicates(events: list[Event]) -> list[tuple[Event, Event]]:
+    """Same event entered more than once. Worth telling Andy about; it means
+    his calendar is lying about how full he is."""
+    ordered = sorted([e for e in events if e.start and not e.all_day],
+                     key=lambda e: e.start)
+    out = []
+    for i, first in enumerate(ordered):
+        for second in ordered[i + 1:]:
+            if second.start > first.start:
+                break
+            if looks_duplicate(first, second):
+                out.append((first, second))
+    return out
+
+
 def find_conflicts(events: list[Event]) -> list[tuple[Event, Event]]:
+    """Genuine overlaps. Duplicates are excluded; see looks_duplicate."""
     ordered = sorted([e for e in events if e.start and not e.all_day],
                      key=lambda e: e.start)
     out = []
@@ -110,7 +164,7 @@ def find_conflicts(events: list[Event]) -> list[tuple[Event, Event]]:
         for second in ordered[i + 1:]:
             if second.start >= first.end:
                 break
-            if overlaps(first, second):
+            if overlaps(first, second) and not looks_duplicate(first, second):
                 out.append((first, second))
     return out
 
@@ -155,12 +209,21 @@ def format_events(events: list[Event], header: str) -> str:
     return "\n".join(lines)
 
 
-def format_conflicts(pairs: list[tuple[Event, Event]]) -> str:
-    if not pairs:
-        return "No overlapping meetings."
-    lines = [f"OVERLAPS ({len(pairs)}):"]
-    for a, b in pairs:
-        lines.append(f"- {_fmt_time(a)} {a.summary}  vs  {_fmt_time(b)} {b.summary}")
+def format_conflicts(pairs: list[tuple[Event, Event]],
+                     dupes: list[tuple[Event, Event]] | None = None) -> str:
+    lines: list[str] = []
+    if pairs:
+        lines.append(f"OVERLAPS ({len(pairs)}):")
+        for a, b in pairs:
+            lines.append(f"- {_fmt_time(a)} {a.summary}  vs  {_fmt_time(b)} {b.summary}")
+    else:
+        lines.append("No overlapping meetings.")
+    if dupes:
+        # Reported, not hidden: a duplicated event makes the calendar look
+        # busier than the day actually is.
+        lines.append(f"\nDUPLICATES ({len(dupes)}), same thing entered twice:")
+        for a, b in dupes:
+            lines.append(f"- {_fmt_time(a)} {a.summary}  ==  {b.summary}")
     return "\n".join(lines)
 
 
@@ -199,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             print(format_events(events[: args.count], f"Next {args.count}"))
         else:
             start, end = _window(args.days)
-            print(format_conflicts(find_conflicts(fetch_events(start, end))))
+            evs = fetch_events(start, end)
+            print(format_conflicts(find_conflicts(evs), find_duplicates(evs)))
     except GoogleAuthError as exc:
         print(f"CALENDAR_ERROR: {exc}", file=sys.stderr)
         return 1
