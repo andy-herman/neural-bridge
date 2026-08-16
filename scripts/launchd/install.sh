@@ -6,13 +6,30 @@
 #   - com.andyherman.neural-bridge.publish-prep       (Sunday 18:00 PT publish prep)
 #   - com.andyherman.neural-bridge.compile-nightly    (03:00 daily concept compile)
 #   - com.andyherman.neural-bridge.auto-reload        (every 2 min: pull main + reload daemon if daemon-relevant files changed)
-#   - com.andyherman.neural-bridge.summarize-weekly   (Monday 04:00: compress prior week of conversation logs into per-agent lessons-learned digests)
 #   - com.andyherman.neural-bridge.echo-synthesis     (Sunday 05:00: synthesize new Discord messages into Echo's structured profile files)
 #   - com.andyherman.neural-bridge.echo-transcripts   (Daily 04:30: ingest new Claude Code session transcripts into Echo's claude-transcripts.md corpus)
 #   - com.andyherman.neural-bridge.echo-mindframe     (Daily 04:45: ingest Andy-authored turns from MindFrame Discord logs into mindframe-conversations.md; no-op clean if source path missing)
 #
 # Idempotent: safe to run multiple times. Re-bootstraps any agent that's
 # already loaded.
+#
+# CONFIG BELONGS IN ~/.hermes/.env, NOT IN THESE PLISTS.
+#
+# scripts/env_file.py loads that file from each daemon's main(), and anything
+# already in the environment still wins, so a plist CAN override a value. It
+# should not be the only place one lives: a variable set only in a plist works
+# for the scheduled run and makes every hand run of the same code fail, which
+# is how LUNA_TELEGRAM_ALLOWED_USERS hid until 2026-08-16.
+#
+# The plists intentionally keep only USER, PATH, HOME and PYTHONUNBUFFERED,
+# which describe the launch context rather than the program's configuration.
+#
+# Note that com.andyherman.neural-bridge.luna-telegram is symlinked from
+# ~/Library/LaunchAgents into this directory, so editing that plist edits a
+# tracked file. The others are copies.
+#
+# summarize-weekly was removed 2026-08-16 along with the lessons_digest layer
+# it fed. See docs/MEMORY_CONSOLIDATION.md.
 
 set -euo pipefail
 
@@ -21,7 +38,6 @@ AGENTS=(
     "com.andyherman.neural-bridge.publish-prep"
     "com.andyherman.neural-bridge.compile-nightly"
     "com.andyherman.neural-bridge.auto-reload"
-    "com.andyherman.neural-bridge.summarize-weekly"
     "com.andyherman.neural-bridge.echo-synthesis"
     "com.andyherman.neural-bridge.echo-transcripts"
     "com.andyherman.neural-bridge.echo-mindframe"
