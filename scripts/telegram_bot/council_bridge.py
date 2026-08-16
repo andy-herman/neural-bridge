@@ -82,6 +82,7 @@ from scripts.discord_bot import honcho_client
 from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude
 from scripts.discord_bot.keychain import get_token
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
+from scripts.env_file import load_default_env  # noqa: E402
 
 # ----------------------------------------------------------------------
 # Config
@@ -220,6 +221,13 @@ ROUTER_INSTRUCTION = (
     "- loid: career strategy, interview prep, promotion and leveling, positioning, workplace moves.\n\n"
     "Decide who should respond to Andy's LATEST message. Usually exactly one. Both only when it "
     "genuinely spans both lanes. Neither ([]) when it is small talk or an aside that needs no advisor.\n"
+    "Judge the latest message on its own lane; do NOT default to whichever advisor spoke recently "
+    "(no momentum bias). If the message touches career, interviews, promotion, leveling, a manager, "
+    "or a workplace move at all, include loid. If it spans career AND writing/ideation, return both, "
+    "primary lane first.\n"
+    "Neither is ONLY for content-free asides. A direct address to the room (a greeting, a presence "
+    "check like 'are you there', a question about how this chat works) always gets a response: route "
+    "it to yor, or to loid if he is the one being addressed by role.\n"
     'Return ONLY a JSON object, no prose: {"order": ["loid"]} where order lists the advisor ids '
     "yor and/or loid in the sequence they should speak, or an empty list for neither."
 )
@@ -519,6 +527,11 @@ def _chunk_for_telegram(text: str) -> list[str]:
 # ----------------------------------------------------------------------
 
 def main() -> None:
+    # Config lives in ~/.hermes/.env so a hand run behaves like the
+    # scheduled one. Anything already in the environment wins, so the
+    # launchd plists keep overriding this.
+    load_default_env()
+
     _configure_logging()
 
     allowed = _allowed_user_ids()

@@ -48,3 +48,8 @@ scripts/.inflight_mentions.json
 # Loop engineer per-issue worktrees. Live under this clone but must never be
 # committed and must stay invisible to the auto-reload watcher's `main` view.
 .trees/
+
+# Optional local env overrides read by scripts/env_file.py. Holds tokens.
+.env
+.env.*
+!.env.example

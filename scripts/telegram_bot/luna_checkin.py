@@ -50,6 +50,7 @@ from scripts.discord_bot.mention import (  # noqa: E402
     LUNA_NOTES_PATH,
     budget_notes,
 )
+from scripts.env_file import load_default_env  # noqa: E402
 
 AGENT_ID = "luna"
 KEYCHAIN_SERVICE = "neural-bridge-telegram-luna"
@@ -228,6 +229,11 @@ def send_telegram(chat_id: int, text: str, token: str, timeout: int = 15) -> boo
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
+    # Config lives in ~/.hermes/.env so a hand run behaves like the
+    # scheduled one. Anything already in the environment wins, so the
+    # launchd plists keep overriding this.
+    load_default_env()
+
     parser = argparse.ArgumentParser(description="Luna proactive Telegram check-in")
     parser.add_argument("--kind", choices=sorted(KIND_GUIDANCE), required=True)
     parser.add_argument("--dry-run", action="store_true",

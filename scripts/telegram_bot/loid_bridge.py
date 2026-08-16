@@ -66,6 +66,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.discord_bot import honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
+from scripts.env_file import load_default_env  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -378,6 +379,11 @@ def _chunk_for_telegram(text: str) -> list[str]:
 # ----------------------------------------------------------------------
 
 def main() -> None:
+    # Config lives in ~/.hermes/.env so a hand run behaves like the
+    # scheduled one. Anything already in the environment wins, so the
+    # launchd plists keep overriding this.
+    load_default_env()
+
     _configure_logging()
 
     allowed = _allowed_user_ids()
