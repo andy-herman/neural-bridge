@@ -63,6 +63,7 @@ from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 # its instrumented life and is retired; see docs/MEMORY_CONSOLIDATION.md.
 WATCHED: dict[str, dict] = {
     "luna_notes":       {"stage": mem.RETRIEVE, "traffic_gated": True},
+    "luna_live_state":  {"stage": mem.RETRIEVE, "traffic_gated": True},
     "echo_voice":       {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_peer_card": {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_capture":   {"stage": mem.WRITE,    "traffic_gated": True},

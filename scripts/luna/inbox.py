@@ -124,6 +124,23 @@ def format_messages(messages: list[Message], header: str) -> str:
     return "\n".join(lines)
 
 
+def find_waiting(days: int = 5, scan: int = 20) -> list[Message]:
+    """Threads Andy spoke last in, older than `days`, still with no reply.
+
+    The one command he will not think to ask for, so it is also the one worth
+    surfacing unprompted. Costs one thread GET per candidate, which is why
+    `scan` is tunable: the CLI can afford 20, a per-turn prefetch cannot.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y/%m/%d")
+    stalled: list[Message] = []
+    for m in fetch_messages(f"in:sent before:{cutoff}", scan):
+        thread = api_get(f"{THREADS_URL}/{m.thread_id}", {"format": "minimal"})
+        msgs = thread.get("messages", [])
+        if msgs and "SENT" in (msgs[-1].get("labelIds") or []):
+            stalled.append(m)
+    return stalled
+
+
 def format_thread(messages: list[Message]) -> str:
     if not messages:
         return "Thread not found or empty."
@@ -161,17 +178,8 @@ def main(argv: list[str] | None = None) -> int:
             msgs = [parse_message(m) for m in payload.get("messages", [])]
             print(format_thread(msgs))
         else:
-            # Threads Andy spoke last in, older than N days, still no reply.
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=args.days)).strftime("%Y/%m/%d")
-            q = f"in:sent before:{cutoff}"
-            sent = fetch_messages(q, 20)
-            stalled = []
-            for m in sent:
-                thread = api_get(f"{THREADS_URL}/{m.thread_id}", {"format": "minimal"})
-                msgs = thread.get("messages", [])
-                if msgs and "SENT" in (msgs[-1].get("labelIds") or []):
-                    stalled.append(m)
-            print(format_messages(stalled, f"Sent over {args.days}d ago, no reply"))
+            print(format_messages(find_waiting(args.days),
+                                  f"Sent over {args.days}d ago, no reply"))
     except GoogleAuthError as exc:
         print(f"INBOX_ERROR: {exc}", file=sys.stderr)
         return 1

@@ -308,6 +308,26 @@ def budget_notes(text: str, max_chars: int) -> tuple[str, list[str]]:
 
     return "".join(out), dropped
 
+def _luna_live_state_block() -> str:
+    """Luna's pre-fetched calendar/inbox state, instrumented like every other
+    memory layer so the canary notices when it goes quiet.
+
+    Imported lazily: it reaches Google, and mention.py is imported by tests and
+    by paths that must not pay for a network client they never use.
+    """
+    try:
+        from scripts.luna.live_state import live_state_block
+        block = live_state_block()
+    except Exception as exc:
+        _mem.record(_mem.RETRIEVE, "luna_live_state", agent_id="luna",
+                    ok=False, detail=f"{type(exc).__name__}: {exc}"[:160])
+        return ""
+    _mem.record(_mem.RETRIEVE, "luna_live_state", agent_id="luna",
+                ok=bool(block), chars=len(block),
+                detail="" if block else "empty block")
+    return block
+
+
 def _luna_notes_block() -> str:
     """Read Luna's vault notes file and return a context block to prepend to
     her mention prompt. Empty string if the file is missing or unreadable.
@@ -613,6 +633,16 @@ def build_mention_prompt(
         notes_prefix = _luna_notes_block()
         if notes_prefix:
             rendered = notes_prefix + rendered
+
+        # Today's calendar and the threads he is waiting on, fetched before the
+        # turn starts. She has the CLIs and the Bash grant to get these herself,
+        # and she repeatedly told him she could not, in sessions where running
+        # the command by hand worked seconds later. Three rounds of charter
+        # wording took that from always to sometimes and stalled. Handing her
+        # the state removes the decision instead of arguing with it: there is
+        # nothing left to be wrong about. Cached ~5 min, fails to "" silently,
+        # and she still runs the CLIs for anything outside this window.
+        rendered = _luna_live_state_block() + rendered
 
     # The weekly lessons-learned digest used to be prepended here. Retired
     # 2026-08-16 on the evidence, not on taste: over its instrumented lifetime
