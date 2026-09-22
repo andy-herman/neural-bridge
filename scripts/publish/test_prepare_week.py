@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -144,11 +145,29 @@ class TestGenerateKoreanTranslation(unittest.TestCase):
         )
 
     def test_dry_run_short_circuits(self):
-        """Smoke: dry_run=True returns without invoking node."""
-        c = self._make_candidate(Path("/tmp/fake.md"))
-        ok, msg = prepare_week.generate_korean_translation(c, dry_run=True, force=False)
-        self.assertTrue(ok)
+        """Smoke: dry_run=True returns without invoking node.
+
+        The function checks that the translate script exists before the
+        dry-run branch, so point it at a temp file rather than depending on
+        the blog checkout being present on the machine running the tests.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            fake_script = Path(td) / "translate-to-korean.mjs"
+            fake_script.write_text("// stub\n", encoding="utf-8")
+            c = self._make_candidate(Path(td) / "posts" / "fake.md")
+            with mock.patch.object(prepare_week, "TRANSLATE_SCRIPT", fake_script), \
+                 mock.patch.object(prepare_week, "subprocess") as sp:
+                ok, msg = prepare_week.generate_korean_translation(c, dry_run=True, force=False)
+                sp.Popen.assert_not_called()
+        self.assertTrue(ok, msg)
         self.assertIn("dry-run", msg)
+
+    def test_missing_translate_script_reports_not_ok(self):
+        c = self._make_candidate(Path("/tmp/fake.md"))
+        with mock.patch.object(prepare_week, "TRANSLATE_SCRIPT", Path("/nonexistent/translate.mjs")):
+            ok, msg = prepare_week.generate_korean_translation(c, dry_run=True, force=False)
+        self.assertFalse(ok)
+        self.assertIn("missing", msg)
 
     def test_missing_translate_script_errors_cleanly(self):
         """If TRANSLATE_SCRIPT path doesn't exist, return False with a
