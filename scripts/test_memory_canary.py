@@ -194,3 +194,47 @@ class TestCanaryClassification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TestLayerFourStores(unittest.TestCase):
+    """The wiki stores added 2026-09-22 after the read loop was found open."""
+
+    def test_compile_is_not_traffic_gated(self):
+        from scripts.memory_canary import WATCHED
+        self.assertFalse(WATCHED["compile_concepts"]["traffic_gated"])
+        # A quiet fleet is still SILENT for compile: launchd runs it regardless.
+        res = evaluate({}, had_traffic=False, watched={"compile_concepts": WATCHED["compile_concepts"]})
+        self.assertEqual(res["compile_concepts"]["status"], SILENT)
+
+    def test_wiki_and_flush_are_traffic_gated(self):
+        from scripts.memory_canary import WATCHED
+        sub = {k: WATCHED[k] for k in ("wiki_recall", "flush_daily_log")}
+        res = evaluate({}, had_traffic=False, watched=sub)
+        self.assertEqual({r["status"] for r in res.values()}, {IDLE})
+        res = evaluate({}, had_traffic=True, watched=sub)
+        self.assertEqual({r["status"] for r in res.values()}, {SILENT})
+
+    def test_scheduled_compile_alone_is_not_agent_traffic(self):
+        # A nightly compile in an otherwise idle week must not flip every
+        # traffic-gated store from IDLE to SILENT.
+        from scripts.memory_canary import WATCHED
+        summary = {"compile_concepts": {"total": 7, "ok": 7, "failed": 0, "last_detail": ""}}
+        self.assertFalse(had_agent_traffic(summary, WATCHED))
+        summary["wiki_recall"] = {"total": 1, "ok": 1, "failed": 0, "last_detail": ""}
+        self.assertTrue(had_agent_traffic(summary, WATCHED))
+        # Unknown stores still count as traffic, as before.
+        self.assertTrue(had_agent_traffic({"new_store": {"total": 1, "ok": 1, "failed": 0}}, WATCHED))
+
+    def test_report_appends_grounding_line_when_events_given(self):
+        summary = {"wiki_recall": {"total": 2, "ok": 2, "failed": 0, "last_detail": ""}}
+        events = [
+            {"store": "wiki_recall", "stage": "utilize", "agent_id": "research", "ok": True, "chars": 300},
+            {"store": "wiki_recall", "stage": "utilize", "agent_id": "luna", "ok": True, "chars": 0},
+        ]
+        watched = {"wiki_recall": {"stage": mem.UTILIZE, "traffic_gated": True}}
+        text = format_report(evaluate(summary, had_traffic=True, watched=watched), 7, events)
+        self.assertIn("1 of 2 agent turns grounded", text)
+        # Without events the line is absent, so --json callers are unaffected.
+        text2 = format_report(evaluate(summary, had_traffic=True, watched=watched), 7)
+        self.assertNotIn("grounded", text2)

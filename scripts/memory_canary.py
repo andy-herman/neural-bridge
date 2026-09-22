@@ -67,6 +67,15 @@ WATCHED: dict[str, dict] = {
     "echo_voice":       {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_peer_card": {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_capture":   {"stage": mem.WRITE,    "traffic_gated": True},
+    # Layer 4 (the wiki) was uninstrumented until 2026-09-22, which is how a
+    # 135-day gap in concept promotion went unnoticed. wiki_recall is the read
+    # side (one UTILIZE per agent turn); flush_daily_log is the write side per
+    # session; compile_concepts is one event per live nightly run and is NOT
+    # traffic gated, because launchd runs it whether or not anyone talked to
+    # an agent: silence there means the job is not running.
+    "wiki_recall":      {"stage": mem.UTILIZE,  "traffic_gated": True},
+    "flush_daily_log":  {"stage": mem.WRITE,    "traffic_gated": True},
+    "compile_concepts": {"stage": mem.WRITE,    "traffic_gated": False},
 }
 
 DEFAULT_WINDOW_DAYS = 7
@@ -125,18 +134,44 @@ def evaluate(summary: dict[str, dict], *, had_traffic: bool,
     return out
 
 
-def had_agent_traffic(summary: dict[str, dict]) -> bool:
-    """Did anything at all get recorded this window? If not, the fleet was idle
-    rather than broken, and the distinction is what keeps this alertable."""
-    return any(row.get("total", 0) > 0 for row in summary.values())
+def had_agent_traffic(summary: dict[str, dict],
+                      watched: dict[str, dict] | None = None) -> bool:
+    """Did any agent-driven store record anything this window? If not, the
+    fleet was idle rather than broken, and the distinction is what keeps this
+    alertable.
+
+    Stores that run on a schedule (traffic_gated False, e.g. the nightly
+    compile) are excluded: a compile that ran at 03:00 in a week when nobody
+    talked to an agent is not traffic, and counting it would turn every idle
+    store into a SILENT alarm on quiet weeks.
+    """
+    watched = watched if watched is not None else WATCHED
+    return any(
+        row.get("total", 0) > 0
+        for store, row in summary.items()
+        if watched.get(store, {}).get("traffic_gated", True)
+    )
 
 
-def format_report(results: dict[str, dict], window_days: int) -> str:
+def format_report(results: dict[str, dict], window_days: int,
+                  events: list[dict] | None = None) -> str:
     lines = [f"Memory canary, {window_days}-day window:"]
     for store, row in sorted(results.items()):
         marker = {HEALTHY: "ok  ", IDLE: "idle", SILENT: "SILENT",
                   FAILING: "FAIL", DEGRADED: "DEGR"}[row["status"]]
         lines.append(f"  [{marker}] {store}: {row['reason']}")
+    if events is not None:
+        # Informational, never affects the exit code: whether the wiki is
+        # alive is health; whether it is useful is this line.
+        try:
+            hooks_dir = str(REPO_ROOT / "hooks")
+            if hooks_dir not in sys.path:
+                sys.path.insert(0, hooks_dir)
+            import wiki_recall
+            lines.append(wiki_recall.format_grounding(
+                wiki_recall.grounding_summary(events), window_days))
+        except Exception as exc:
+            lines.append(f"Wiki grounding: unavailable ({type(exc).__name__})")
     return "\n".join(lines)
 
 
@@ -163,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     bad = degraded(results)
-    report = json.dumps(results, indent=2) if args.json else format_report(results, args.days)
+    report = json.dumps(results, indent=2) if args.json else format_report(results, args.days, events)
 
     if bad or not args.quiet:
         print(report)

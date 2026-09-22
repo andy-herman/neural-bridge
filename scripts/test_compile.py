@@ -389,6 +389,35 @@ class TestMainWithMockedGate(unittest.TestCase):
         self.assertIn("last_run_at", state)
         self.assertEqual(len(state["compiled_concepts"]), 2)
 
+    def test_gate_subprocess_env_tells_the_prompt_hook_to_stand_down(self):
+        # The filing gate must see exactly its calibrated prompt; the
+        # UserPromptSubmit hook must not append wiki concepts to it.
+        env = cmp._subprocess_env_for_compile_claude()
+        self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
+        self.assertEqual(env.get("NB_AGENT"), "compile")
+
+    def test_live_run_records_one_telemetry_event_and_dry_run_none(self):
+        with patch("compile.subprocess.run", side_effect=self._mock_promote), \
+             patch.object(cmp, "_telemetry") as tel:
+            self._run_main(["--dry-run"])
+        tel.assert_not_called()
+        with patch("compile.subprocess.run", side_effect=self._mock_promote), \
+             patch.object(cmp, "_telemetry") as tel:
+            self._run_main(["--no-dry-run"])
+        tel.assert_called_once()
+        self.assertTrue(tel.call_args.kwargs["ok"])
+        self.assertEqual(tel.call_args.kwargs["chars"], 2)  # two candidates promoted
+        self.assertIn("PROMOTE=2", tel.call_args.kwargs["detail"])
+
+    def test_no_candidates_live_run_records_ok_event(self):
+        for f in cmp.DAILY_LOGS_DIR.rglob("*.md"):
+            f.unlink()
+        with patch("compile.subprocess.run", side_effect=self._mock_promote), \
+             patch.object(cmp, "_telemetry") as tel:
+            self._run_main(["--no-dry-run"])
+        tel.assert_called_once()
+        self.assertEqual(tel.call_args.kwargs["detail"], "no_candidates")
+
     def test_no_candidates_dry_run_does_not_advance_state(self):
         # Regression: the no-candidates branch once wrote state unconditionally,
         # so a quiet dry run advanced last_run_at and the next live run's

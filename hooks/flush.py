@@ -85,8 +85,31 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     override), it should not propagate into every subprocess where a tool
     call might surface it. flush.py uses the keychain directly via
     discord_post.send(), so the env var is unnecessary here regardless.
+
+    Also sets NB_SKIP_WIKI_RECALL=1: the flush prompt is a fixed extraction
+    template and must not have wiki concepts appended to it by the
+    UserPromptSubmit hook, or the summary starts echoing the wiki back into
+    the daily log it is supposed to feed.
     """
-    return {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env["NB_SKIP_WIKI_RECALL"] = "1"
+    return env
+
+
+def _telemetry(agent: str, *, ok: bool, chars: int = 0, detail: str = "") -> None:
+    """Record one WRITE event for store "flush_daily_log". Never raises.
+
+    Until 2026-09 flush emitted no telemetry, so the memory canary could not
+    tell a flush that had stopped from a fleet that was idle. This is the
+    write half of Layer 4 becoming countable.
+    """
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import memory_telemetry as mem
+        mem.record(mem.WRITE, "flush_daily_log", agent_id=agent, ok=ok, chars=chars, detail=detail)
+    except Exception:
+        return
 
 
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
@@ -307,10 +330,14 @@ def main() -> int:
         write_failed(args.agent, args.session_id, last_raw, last_err)
         prefix = last_err.split(":", 1)[0] if last_err else "unknown"
         write_queue(args.agent, args.session_id, f"failed:{prefix}")
+        _telemetry(args.agent, ok=False, detail=f"failed:{prefix}")
         return 0
 
     if schema.is_empty_session(parsed):
         write_queue(args.agent, args.session_id, "skipped:empty")
+        # An empty session is a legitimate outcome (gate votes, one-line
+        # sessions), not a failure of the write path, so it counts as ok.
+        _telemetry(args.agent, ok=True, chars=0, detail="skipped:empty")
         return 0
 
     ended_at = utc_iso()
@@ -330,6 +357,7 @@ def main() -> int:
     )
     append_session(args.agent, block, session_n)
     write_queue(args.agent, args.session_id, "flushed")
+    _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
 
     if not args.no_discord:
         header = f"**Flush** | agent: `{args.agent}` | {ended_at}"

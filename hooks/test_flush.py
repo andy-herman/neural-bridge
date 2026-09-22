@@ -331,6 +331,26 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertFalse(log_file.exists())
         self.assertIn("research sess-empty skipped:empty", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
+    def test_subprocess_env_tells_the_prompt_hook_to_stand_down(self):
+        env = flush._subprocess_env_for_claude()
+        self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
+        self.assertNotIn("NB_DISCORD_WEBHOOK", env)
+
+    def test_telemetry_records_each_terminal_outcome(self):
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [], "proposed_concepts": []})
+        empty = json.dumps({"decisions": [], "findings": [], "open_questions": [], "proposed_concepts": []})
+        cases = [(valid, True, "session_n=1"), (empty, True, "skipped:empty"), ("not json", False, "failed:json_decode")]
+        for stdout, ok, detail in cases:
+            with self.subTest(detail=detail), \
+                 patch("flush.subprocess.run", side_effect=self._mock_claude(stdout)), \
+                 patch.object(flush, "_telemetry") as tel:
+                self._run_main(["--agent", "research", "--session-id", "s-" + detail,
+                                "--transcript", str(self.transcript), "--no-discord"])
+            tel.assert_called_once()
+            self.assertEqual(tel.call_args.args[0], "research")
+            self.assertEqual(tel.call_args.kwargs["ok"], ok)
+            self.assertEqual(tel.call_args.kwargs["detail"], detail)
+
     def test_parse_failure_writes_failed_after_retry(self):
         with patch("flush.subprocess.run", side_effect=self._mock_claude("not json at all")):
             rc = self._run_main([
