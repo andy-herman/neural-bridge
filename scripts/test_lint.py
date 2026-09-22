@@ -10,6 +10,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -288,3 +289,90 @@ class TestCheckAgentsRoster(_BaseTmp):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCheckDocsTruth(_BaseTmp):
+    """The four drift shapes from the 2026-07 and 2026-09 truth passes."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_dt = (L.AGENTS_MD_FILE, L.PLUGIN_AGENTS_DIR, L.README_FILE, L.MARKETPLACE_FILE,
+                          L.PLUGIN_MANIFEST_FILE, L.DECISIONS_DIR, L.SETTINGS_FILE)
+        L.AGENTS_MD_FILE = self.tmp_path / "AGENTS.md"
+        L.README_FILE = self.tmp_path / "README.md"
+        L.PLUGIN_AGENTS_DIR = self.tmp_path / "plugins" / "neural-bridge-core" / "agents"
+        L.PLUGIN_AGENTS_DIR.mkdir(parents=True)
+        L.MARKETPLACE_FILE = self.tmp_path / ".claude-plugin" / "marketplace.json"
+        L.PLUGIN_MANIFEST_FILE = self.tmp_path / "plugins" / "neural-bridge-core" / ".claude-plugin" / "plugin.json"
+        L.DECISIONS_DIR = self.tmp_path / "decisions"
+        L.SETTINGS_FILE = self.tmp_path / ".claude" / "settings.json"
+        for d in (L.MARKETPLACE_FILE.parent, L.PLUGIN_MANIFEST_FILE.parent, L.DECISIONS_DIR, L.SETTINGS_FILE.parent):
+            d.mkdir(parents=True, exist_ok=True)
+        for name in ("research", "content", "luna"):
+            (L.PLUGIN_AGENTS_DIR / f"{name}.md").write_text("---\n---\n", encoding="utf-8")
+        self._versions("0.9.0", "0.9.0")
+        L.AGENTS_MD_FILE.write_text("plugin with three specialist agents\n", encoding="utf-8")
+        L.README_FILE.write_text("1. Agents  three .md plugin files\n", encoding="utf-8")
+        (self.tmp_path / "hooks").mkdir()
+        (self.tmp_path / "hooks" / "ok.py").write_text("", encoding="utf-8")
+        self._settings('python3 "$CLAUDE_PROJECT_DIR/hooks/ok.py"')
+
+    def tearDown(self):
+        (L.AGENTS_MD_FILE, L.PLUGIN_AGENTS_DIR, L.README_FILE, L.MARKETPLACE_FILE,
+         L.PLUGIN_MANIFEST_FILE, L.DECISIONS_DIR, L.SETTINGS_FILE) = self._saved_dt
+        super().tearDown()
+
+    def _versions(self, manifest: str, market: str) -> None:
+        L.PLUGIN_MANIFEST_FILE.write_text(json.dumps({"name": "core", "version": manifest}), encoding="utf-8")
+        L.MARKETPLACE_FILE.write_text(json.dumps({"plugins": [{"name": "core", "version": market}]}), encoding="utf-8")
+
+    def _settings(self, command: str) -> None:
+        L.SETTINGS_FILE.write_text(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}]}}), encoding="utf-8")
+
+    def _adr(self, name: str, status: str, created: str) -> None:
+        (L.DECISIONS_DIR / name).write_text(f"---\nstatus: {status}\ncreated: {created}\n---\n# x\n", encoding="utf-8")
+
+    def _run(self):
+        return L.check_docs_truth(today=datetime(2026, 9, 22, tzinfo=timezone.utc))
+
+    def test_in_sync_no_findings(self):
+        self.assertEqual(self._run(), [])
+
+    def test_wrong_agent_count_in_prose(self):
+        L.README_FILE.write_text("1. Agents  nine .md plugin files\n", encoding="utf-8")
+        L.AGENTS_MD_FILE.write_text("  core/  V1 core plugin (3 specialist agents)\n", encoding="utf-8")
+        ev = [f.evidence for f in self._run()]
+        self.assertEqual(len(ev), 1 + 0, ev)  # README wrong; AGENTS says 3 which matches on disk
+        self.assertIn('says "nine .md plugin files" but plugins/neural-bridge-core/agents/ holds 3', ev[0])
+
+    def test_counts_outside_roster_context_are_ignored(self):
+        L.README_FILE.write_text("Cap is 5 cross-agent turns per thread; nine agents chatted.\n", encoding="utf-8")
+        self.assertEqual(self._run(), [])
+
+    def test_version_mismatch(self):
+        self._versions("0.9.0", "0.8.0")
+        ev = [f.evidence for f in self._run()]
+        self.assertTrue(any("marketplace says 0.8.0 but plugin.json says 0.9.0" in e for e in ev), ev)
+
+    def test_stale_proposed_adr_is_flagged_but_fresh_or_decided_is_not(self):
+        self._adr("0001-old.md", "proposed", "2026-05-08")
+        self._adr("0002-fresh.md", "proposed", "2026-09-01")
+        self._adr("0003-done.md", "accepted", "2026-05-08")
+        findings = self._run()
+        self.assertEqual([f.file for f in findings], ["decisions/0001-old.md"])
+        self.assertIn("137 days", findings[0].evidence)
+
+    def test_cwd_relative_hook_command_is_flagged(self):
+        self._settings("python3 hooks/ok.py")
+        ev = [f.evidence for f in self._run()]
+        self.assertTrue(any("cwd-relative" in e for e in ev), ev)
+
+    def test_hook_pointing_at_missing_script_is_flagged(self):
+        self._settings('python3 "$CLAUDE_PROJECT_DIR/hooks/gone.py"')
+        ev = [f.evidence for f in self._run()]
+        self.assertTrue(any("hooks/gone.py, which does not exist" in e for e in ev), ev)
+
+    def test_registered_in_deterministic_checks(self):
+        self.assertIn("docs-truth", L.DETERMINISTIC_CHECKS)
+        self.assertIn("docs-truth", L.ALL_CHECKS)
