@@ -15,6 +15,18 @@ from .claude_invoke import sanitize_untrusted_text
 from . import honcho_client
 from . import memory_telemetry as _mem
 
+# The wiki's read side lives with the hooks (stdlib-only, shared with the
+# UserPromptSubmit hook). Import failure degrades to "no wiki context" and is
+# counted by the telemetry the module itself emits, so it cannot hide.
+try:
+    import sys as _sys
+    _HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
+    if _HOOKS_DIR not in _sys.path:
+        _sys.path.insert(0, _HOOKS_DIR)
+    import wiki_recall as _wiki
+except Exception:  # pragma: no cover - exercised only when the repo layout breaks
+    _wiki = None
+
 _logger = logging.getLogger("nb_discord.mention")
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -596,6 +608,20 @@ def format_discord_history(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+WIKI_RECALL_BUDGET_CHARS = 1800
+
+
+def _wiki_recall_block(agent_id: str, message_content: str) -> str:
+    """Ranked concept articles for this message, or "" when none match."""
+    if _wiki is None:
+        _mem.record(_mem.UTILIZE, "wiki_recall", agent_id=agent_id, ok=False,
+                    detail="hooks/wiki_recall.py not importable")
+        return ""
+    block, _hits = _wiki.recall(message_content or "", agent_id=agent_id,
+                                budget_chars=WIKI_RECALL_BUDGET_CHARS)
+    return block
+
+
 def build_mention_prompt(
     template: str,
     *,
@@ -609,6 +635,12 @@ def build_mention_prompt(
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
     sanitized_definition = sanitize_untrusted_text(agent_definition, "agent-definition")
+    # Related wiki concepts, ranked against the clean user message rather than
+    # the rendered template (which would match on its own boilerplate). Goes
+    # in as a data block near the top so the shared substrate is visible before
+    # the agent's own stores. Records one UTILIZE event per turn either way;
+    # see hooks/wiki_recall.py for why an empty result is still "ok".
+    wiki_block = _wiki_recall_block(agent_id, message_content)
     rendered = (
         template
         .replace("{agent_id}", agent_id)
@@ -618,6 +650,9 @@ def build_mention_prompt(
         .replace("{message}", sanitized_message)
         .replace("{conversation_log_path}", conversation_log_path)
     )
+    if wiki_block:
+        rendered = wiki_block + rendered
+
     # Echo's voice profile auto-injected for voice-mirroring agents
     # (content, social, luna). Lets them reference Andy's voice without a
     # tool call. Phase 5 of the Echo build.

@@ -265,6 +265,20 @@ class TestCallClaude(unittest.TestCase):
         # so the bot's claude binary still resolves.
         self.assertIn("PATH", env)
 
+    def test_subprocess_env_tells_the_prompt_hook_to_stand_down(self):
+        # mention.py injects wiki concepts against the clean user message; the
+        # repo's UserPromptSubmit hook must not do it again on the rendered
+        # template.
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _FakeResult(0, "ok", "")
+
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run", side_effect=fake_run):
+            claude_invoke.call_claude_sync("prompt", "model", 30)
+        self.assertEqual(captured["env"].get("NB_SKIP_WIKI_RECALL"), "1")
+
     def test_subprocess_env_routes_fleet_through_proxy_by_default(self):
         # Conversational agents run on the copilot-api proxy (dotted model ids).
         import os as _os

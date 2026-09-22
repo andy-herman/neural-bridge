@@ -39,6 +39,11 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     """
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_NO_DISCORD"] = "1"
+    # The daemon injects related wiki concepts itself (mention.py), ranked
+    # against the clean user message. Tell the repo's UserPromptSubmit hook to
+    # stand down so the rendered prompt is not matched a second time against
+    # its own template boilerplate.
+    env["NB_SKIP_WIKI_RECALL"] = "1"
     # Stamped here, in ONE place, because hooks/guard_bash.py scopes Bash by
     # agent and treats an unstamped process as an interactive human session
     # (unconstrained). A call site that forgets this would silently hand an

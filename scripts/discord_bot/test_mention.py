@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PKG_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PKG_DIR.parent.parent))
@@ -298,3 +299,51 @@ class TestNotesBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+
+class TestWikiRecallInjection(unittest.TestCase):
+    TEMPLATE = "AGENT={agent_id}\nMSG={message}\n"
+
+    def _build(self, message: str) -> str:
+        return build_mention_prompt(
+            self.TEMPLATE, agent_id="research", agent_definition="def",
+            channel_kind="channel", history=[], message_content=message,
+        )
+
+    def test_matching_message_gets_the_block_at_the_top(self):
+        from scripts.discord_bot import mention
+        block = mention._wiki.BLOCK_BEGIN + "\n- [[cve-cwe-owasp-hierarchy]]\n" + mention._wiki.BLOCK_END + "\n\n"
+        with patch.object(mention._wiki, "recall", return_value=(block, ["hit"])) as rec, \
+             patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
+            out = self._build("how do CVE and CWE relate?")
+        self.assertTrue(out.startswith(block))
+        self.assertIn("MSG=how do CVE and CWE relate?", out)
+        # Ranked against the raw message, attributed to the agent, budgeted.
+        self.assertEqual(rec.call_args.args[0], "how do CVE and CWE relate?")
+        self.assertEqual(rec.call_args.kwargs["agent_id"], "research")
+        self.assertEqual(rec.call_args.kwargs["budget_chars"], mention.WIKI_RECALL_BUDGET_CHARS)
+
+    def test_no_match_leaves_the_prompt_unchanged(self):
+        from scripts.discord_bot import mention
+        with patch.object(mention._wiki, "recall", return_value=("", [])), \
+             patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
+            out = self._build("what is on my calendar")
+        self.assertEqual(out, "AGENT=research\nMSG=what is on my calendar\n")
+
+    def test_real_corpus_end_to_end(self):
+        from scripts.discord_bot import mention
+        with patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
+            out = self._build("explain the CVE CWE OWASP hierarchy")
+        self.assertIn("[[cve-cwe-owasp-hierarchy]]", out)
+        self.assertIn(mention._wiki.BLOCK_BEGIN, out)
+
+    def test_missing_module_is_counted_not_hidden(self):
+        from scripts.discord_bot import mention
+        with patch.object(mention, "_wiki", None), \
+             patch.object(mention._mem, "record") as rec, \
+             patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
+            out = self._build("cve")
+        self.assertEqual(out, "AGENT=research\nMSG=cve\n")
+        rec.assert_called_once()
+        self.assertFalse(rec.call_args.kwargs["ok"])
