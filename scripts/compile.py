@@ -340,9 +340,12 @@ def strip_code_fences(text: str) -> str:
 def _subprocess_env_for_compile_claude() -> dict[str, str]:
     """Environment for compile.py-spawned `claude -p` subprocesses.
 
-    Sets NB_AGENT=compile so the SessionEnd hook attributes the spawned
-    session correctly in daily-logs (instead of falling through to
-    `_unattributed`).
+    Sets NB_AGENT=compile as a marker on the spawned session. "compile" is
+    deliberately not in schema.KNOWN_AGENTS, so the SessionEnd hook files
+    these sessions under daily-logs/_unattributed/, which
+    find_daily_log_files() skips: the compiler never ingests summaries of
+    its own gate calls. (An earlier version of this docstring claimed the
+    opposite; the code never did that.)
 
     Sets NB_NO_DISCORD=1 so flush.py writes the daily-log entry but
     skips the Discord post — a 70-candidate dry-run otherwise floods
@@ -1007,7 +1010,8 @@ def main() -> int:
     if not candidates:
         log_line(args.verbose, "no candidates; exiting clean")
         state["last_run_at"] = utc_iso()
-        write_compile_state(state)
+        if not args.dry_run:
+            write_compile_state(state)
         return 0
 
     template = FILING_GATE_PROMPT.read_text(encoding="utf-8")
