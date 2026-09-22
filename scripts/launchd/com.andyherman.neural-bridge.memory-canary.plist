@@ -14,7 +14,7 @@
          recent SUCCESS rather than the absence of errors, because a healthy
          quiet system and a dead one both produce zero errors.
 
-         --quiet so a healthy run prints nothing and only real degradation
+         the quiet flag so a healthy run prints nothing and only real degradation
          reaches the log. -->
     <key>ProgramArguments</key>
     <array>

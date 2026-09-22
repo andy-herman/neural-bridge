@@ -6,7 +6,7 @@
     <string>com.andyherman.neural-bridge.loop-engineer</string>
 
     <!-- NOT installed by scripts/launchd/install.sh. Install by hand only
-         AFTER a supervised foreground `--once` run has proven the pipeline
+         AFTER a supervised foreground single-batch (once) run has proven the pipeline
          end to end. This daemon opens PRs; it earns unattended operation, it
          is not granted it by default.
 
