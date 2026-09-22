@@ -1,14 +1,14 @@
 ---
 type: adr
 project: Neural Bridge
-status: proposed
+status: superseded
 created: 2026-05-08
 tags: [neural-bridge, decision]
 ---
 
 # ADR-0005: Ingest ~/.claude/memory/ into the wiki via compile.py
 
-**Status:** Proposed (agent-drafted, awaiting human review)
+**Status:** Superseded by [ADR-001](ADR-001-auto-memory-interaction.md), which records the same decision as accepted. Truth-pass note 2026-09-22: the ingestion itself was never implemented; `scripts/compile.py` does not read `~/.claude/memory/` (grep confirms no reference in `scripts/` or `hooks/`).
 **Date:** 2026-05-08
 **Tracks:** Issue #7 — andy-herman/neural-bridge
 

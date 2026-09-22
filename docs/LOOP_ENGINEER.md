@@ -152,10 +152,12 @@ rm ~/Library/LaunchAgents/com.andyherman.neural-bridge.loop-engineer.plist
 
 ## Design notes / deferred hardening
 
-- **No repo-root CLAUDE.md.** The research recommends CLAUDE.md invariants that
-  survive context compaction. We deliberately do *not* add one, because the
+- **Loop invariants are not in CLAUDE.md.** The research recommends CLAUDE.md
+  invariants that survive context compaction. A repo-root `CLAUDE.md` does
+  exist (added 2026-07-09; it imports AGENTS.md and states the wiki write
+  rules), but it deliberately carries no loop-agent framing, because the
   Discord daemon also runs `claude -p` from the repo root and would inherit
-  loop-agent framing. Instead the invariants live in the prompt
+  it. The loop invariants live in the prompt
   (`prompts/implement_issue_v1.md`, re-sent every fresh session) and are
   re-asserted on each fix attempt, with the daemon-side test-integrity gate as
   the hard backstop. Per-attempt `max_turns` is low enough that a single attempt

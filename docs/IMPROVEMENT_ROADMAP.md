@@ -42,7 +42,7 @@ This is Neural Bridge's stated reason to exist, and it is the best-evidenced thr
 ## Theme D: Reliability and evaluation  [adoptability: MEDIUM-HIGH]
 
 1. **A filing-gate eval set.** This is the linchpin for Theme A. The defense research shows thresholds must be calibrated, not assumed. Build a small labeled set: known-bad injections (MINJA-style) that the gate must catch, and known-good concepts it must pass. Measure false-positive rate on benign edits. Without this, a multi-vote gate is faith-based.
-2. **Cover the untested critical paths.** End-to-end compile (mock gate, real daily logs) and the future query engine are currently untested. The Discord bot, hooks, and echo synthesis have good `test_*.py` coverage already.
+2. **Cover the untested critical paths.** ~~End-to-end compile (mock gate, real daily logs) and the future query engine are currently untested.~~ Corrected 2026-09-22: `scripts/test_compile.py` covers end-to-end compile with a mocked gate, and `hooks/test_wiki_recall.py` covers the query-time read path. The Discord bot, hooks, and echo synthesis have good `test_*.py` coverage already.
 3. **MAST as a standing audit.** See Theme B.
 
 ## Theme E: Cost and latency  [adoptability: MEDIUM]
@@ -63,6 +63,8 @@ This is Neural Bridge's stated reason to exist, and it is the best-evidenced thr
 ## Build status
 
 2026-06-24: shortlist items 1 (multi-vote filing gate) and 2 (filing-gate eval set) are implemented. See `scripts/compile.py` (`call_filing_gate_voted`, `aggregate_verdicts`, `--votes` default 3) and `scripts/eval_filing_gate.py` over `scripts/eval/filing_gate_cases.jsonl`. Still open: a live calibration run of the eval, and the per-agent Beta-Binomial trust model (A.3).
+
+2026-09-22: the September audit found the gate had processed exactly one batch (2026-05-10) and that nothing read the wiki. PR #162 repaired the pipeline (attribution, dry-run state, plists), closed the read loop (`hooks/wiki_recall.py`), and put flush, compile, and recall under the memory canary. Items A.3 to A.5 and C.1 stay deferred on purpose: hardening a gate that has no traffic is faith-based. Revisit once the grounding metric in the canary report shows the wiki is used.
 
 ## Sources
 

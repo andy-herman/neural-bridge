@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/guard_concepts.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/guard_concepts.py\"",
             "timeout": 10
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/guard_bash.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/guard_bash.py\"",
             "timeout": 10
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/session_start.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/session_start.py\"",
             "timeout": 10
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/user_prompt_submit.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/user_prompt_submit.py\"",
             "timeout": 10
           }
         ]
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/session_end.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/session_end.py\"",
             "timeout": 30
           }
         ]
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/session_end.py",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/session_end.py\"",
             "timeout": 30
           }
         ]

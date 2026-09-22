@@ -17,7 +17,7 @@ Neural Bridge is the substrate where the work compounds.
 ## The substrate, in five layers
 
 ```
-1. Agents          nine .md plugin files, each a specialist
+1. Agents          fourteen .md plugin files, each a specialist
 2. Skills          inherited from user-level Claude Code settings
 3. Transport       Discord (mention any agent from any device)
 4. Shared state    knowledge/ wiki + daily-logs + filing gate + lint
@@ -71,8 +71,8 @@ Thirteen bot identities, one daemon, one asyncio loop. Each agent has its own Di
 ```
 .claude-plugin/marketplace.json    plugin marketplace declaration
 plugins/neural-bridge-core/        the core plugin
-  agents/                          nine specialist .md definitions
-hooks/                             session_end, session_start, flush, schema
+  agents/                          fourteen specialist .md definitions
+hooks/                             session_start, user_prompt_submit, session_end, flush, wiki_recall, guards, schema
 scripts/                           compile (filing gate), lint, discord_bot/
   discord_bot/                     daemon, mention routing, GitHub actions
   launchd/                         persistence under launchd

@@ -1,14 +1,14 @@
 ---
 type: adr
 project: Neural Bridge
-status: proposed
+status: accepted
 created: 2026-05-08
 tags: [neural-bridge, decision]
 ---
 
 # ADR-0003: Hybrid wiki ownership — shared concepts/, per-agent raw subdirs
 
-**Status:** Proposed (agent-drafted, awaiting human review)
+**Status:** Accepted. Accepted 2026-09-22 (truth pass): implemented and mechanically enforced by hooks/guard_concepts.py and scripts/compile.py.
 **Date:** 2026-05-08
 **Tracks:** Issue #5 — andy-herman/neural-bridge
 
