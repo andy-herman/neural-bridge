@@ -27,12 +27,8 @@ DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
 QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 FLUSH_SCRIPT = REPO_ROOT / "hooks" / "flush.py"
 
-KNOWN_AGENTS = {
-    "research", "teaching-prep", "content", "senior-pm", "social",
-    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
-    "luna", "librarian", "echo", "ux-designer",
-}
-UNATTRIBUTED = "_unattributed"
+sys.path.insert(0, str(REPO_ROOT / "hooks"))
+from schema import KNOWN_AGENTS, UNATTRIBUTED  # noqa: E402
 
 
 def resolve_agent(payload: dict) -> str:

@@ -36,11 +36,8 @@ AGENTS_DIR = KNOWLEDGE_DIR / "agents"
 DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
 QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 
-KNOWN_AGENTS = {
-    "research", "teaching-prep", "content", "senior-pm", "social",
-    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
-}
-UNATTRIBUTED = "_unattributed"
+sys.path.insert(0, str(HOOKS_DIR))
+from schema import KNOWN_AGENTS, UNATTRIBUTED  # noqa: E402
 
 DEFAULT_BUDGET = 4000  # chars total
 INDEX_CAP = 1500
