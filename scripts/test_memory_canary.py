@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -238,3 +239,64 @@ class TestLayerFourStores(unittest.TestCase):
         # Without events the line is absent, so --json callers are unaffected.
         text2 = format_report(evaluate(summary, had_traffic=True, watched=watched), 7)
         self.assertNotIn("grounded", text2)
+
+
+class TestConsolidationGates(unittest.TestCase):
+    """docs/MEMORY_CONSOLIDATION.md Step 0, as one command."""
+
+    def _ev(self, store, stage, agent="a", ok=True, chars=1, epoch=100):
+        return {"store": store, "stage": stage, "agent_id": agent, "ok": ok, "chars": chars, "epoch": epoch}
+
+    def test_no_data_says_no_data(self):
+        from scripts.memory_canary import gates
+        g = gates([])
+        self.assertEqual(g["G2"]["answer"], "no data")
+        self.assertEqual(g["G3"]["answer"], "no data")
+        self.assertEqual(g["G4"]["answer"], "dead: no reads and no compile runs")
+        self.assertEqual(g["progress_log"]["answer"], "none yet")
+
+    def test_g2_luna_only_versus_all_three(self):
+        from scripts.memory_canary import gates
+        only = [self._ev("echo_voice", mem.RETRIEVE, agent="luna")] * 3
+        self.assertEqual(gates(only)["G2"]["answer"], "luna only")
+        mixed = only + [self._ev("echo_voice", mem.RETRIEVE, agent="content")]
+        self.assertEqual(gates(mixed)["G2"]["answer"], "keep for all three")
+        self.assertEqual(gates(mixed)["G2"]["by_agent"], {"luna": 3, "content": 1})
+
+    def test_g3_threshold(self):
+        from scripts.memory_canary import G3_KEEP_RATE, gates
+        good = [self._ev("honcho_peer_card", mem.RETRIEVE, chars=500)] * 9 + \
+               [self._ev("honcho_peer_card", mem.RETRIEVE, chars=0)]
+        self.assertEqual(gates(good)["G3"]["answer"], "keep injected")
+        bad = [self._ev("honcho_peer_card", mem.RETRIEVE, chars=500)] * 5 + \
+              [self._ev("honcho_peer_card", mem.RETRIEVE, ok=True, chars=0)] * 5
+        g = gates(bad)["G3"]
+        self.assertEqual(g["answer"], "demote to retrieval-only")
+        self.assertLess(g["rate"], G3_KEEP_RATE)
+
+    def test_g4_shapes(self):
+        from scripts.memory_canary import gates
+        reads = [self._ev("wiki_recall", mem.UTILIZE, chars=300), self._ev("wiki_recall", mem.UTILIZE, chars=0)]
+        comp = [self._ev("compile_concepts", mem.WRITE, agent="compile", epoch=555)]
+        self.assertEqual(gates(reads)["G4"]["answer"], "alive: read but compile not running")
+        self.assertEqual(gates(comp)["G4"]["answer"], "alive: compiling but never read")
+        g = gates(reads + comp)["G4"]
+        self.assertEqual(g["answer"], "alive")
+        self.assertEqual((g["reads"], g["grounded"], g["last_compile_epoch"]), (2, 1, 555))
+
+    def test_progress_log_adoption_lists_agents_with_injected_logs(self):
+        from scripts.memory_canary import gates
+        ev = [self._ev("progress_log", mem.RETRIEVE, agent="luna", chars=200),
+              self._ev("progress_log", mem.RETRIEVE, agent="research", chars=0)]
+        self.assertEqual(gates(ev)["progress_log"]["agents"], ["luna"])
+
+    def test_gates_flag_prints_and_exits_zero(self):
+        from scripts import memory_canary as mc
+        import io
+        from contextlib import redirect_stdout
+        with patch.object(mem, "read_events", return_value=[]):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mc.main(["--gates", "--no-notify"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Consolidation gates", buf.getvalue())

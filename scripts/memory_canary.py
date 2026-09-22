@@ -76,6 +76,10 @@ WATCHED: dict[str, dict] = {
     "wiki_recall":      {"stage": mem.UTILIZE,  "traffic_gated": True},
     "flush_daily_log":  {"stage": mem.WRITE,    "traffic_gated": True},
     "compile_concepts": {"stage": mem.WRITE,    "traffic_gated": False},
+    # The progress log (MEMORY_CONSOLIDATION Step 1): read on every mention,
+    # written by flush at session close. A missing file records ok/chars=0, so
+    # this row measures whether the path runs, not whether every agent has one.
+    "progress_log":     {"stage": mem.RETRIEVE, "traffic_gated": True},
 }
 
 DEFAULT_WINDOW_DAYS = 7
@@ -175,6 +179,75 @@ def format_report(results: dict[str, dict], window_days: int,
     return "\n".join(lines)
 
 
+# ---------- consolidation decision gates ----------
+#
+# docs/MEMORY_CONSOLIDATION.md, Step 0: each retire/keep call names the
+# telemetry query that decides it. Those queries lived in prose only, so the
+# gates stayed unanswered for six weeks. This makes each one a single command:
+#   python -m scripts.memory_canary --gates --days 30
+
+G3_KEEP_RATE = 0.90   # peer card must be non-empty at least this often to stay injected
+
+
+def gates(events: list[dict]) -> dict[str, dict]:
+    """Answer gates G2, G3, G4 from raw events. Pure, so it is testable."""
+    def _sel(store: str, stage: str) -> list[dict]:
+        return [e for e in events if e.get("store") == store and e.get("stage") == stage]
+
+    # G2: echo_voice retrieves by agent. Keep for 3 agents or 1?
+    echo = _sel("echo_voice", mem.RETRIEVE)
+    by_agent: dict[str, int] = {}
+    for e in echo:
+        by_agent[e.get("agent_id") or "?"] = by_agent.get(e.get("agent_id") or "?", 0) + 1
+    g2 = {"question": "keep echo_voice injected for content/social, or luna only?",
+          "by_agent": by_agent,
+          "answer": ("no data" if not echo else
+                     "luna only" if set(by_agent) <= {"luna"} else "keep for all three")}
+
+    # G3: honcho_peer_card non-empty rate. Keep as an injected layer?
+    card = _sel("honcho_peer_card", mem.RETRIEVE)
+    nonempty = sum(1 for e in card if e.get("ok") and int(e.get("chars", 0)) > 0)
+    rate = (nonempty / len(card)) if card else 0.0
+    g3 = {"question": f"keep honcho peer card injected (needs non-empty >= {G3_KEEP_RATE:.0%})?",
+          "retrieves": len(card), "nonempty": nonempty, "rate": rate,
+          "answer": ("no data" if not card else
+                     "keep injected" if rate >= G3_KEEP_RATE else "demote to retrieval-only")}
+
+    # G4: is the repo wiki alive? Reads since the read loop shipped, and the
+    # last live compile.
+    reads = _sel("wiki_recall", mem.UTILIZE)
+    grounded = sum(1 for e in reads if e.get("ok") and int(e.get("chars", 0)) > 0)
+    compiles = _sel("compile_concepts", mem.WRITE)
+    last_compile = max((int(e.get("epoch", 0)) for e in compiles), default=0)
+    g4 = {"question": "is knowledge/concepts read at all, and does compile still run?",
+          "reads": len(reads), "grounded": grounded, "compile_runs": len(compiles),
+          "last_compile_epoch": last_compile,
+          "answer": ("dead: no reads and no compile runs" if not reads and not compiles else
+                     "alive: read but compile not running" if reads and not compiles else
+                     "alive: compiling but never read" if compiles and not reads else
+                     "alive")}
+
+    # Progress log adoption: how many agents have a log that was actually read.
+    prog = [e for e in _sel("progress_log", mem.RETRIEVE) if e.get("ok") and int(e.get("chars", 0)) > 0]
+    agents_with_log = sorted({e.get("agent_id") or "?" for e in prog})
+    p1 = {"question": "which agents have a progress.md that is being injected?",
+          "agents": agents_with_log,
+          "answer": ", ".join(agents_with_log) if agents_with_log else "none yet"}
+
+    return {"G2": g2, "G3": g3, "G4": g4, "progress_log": p1}
+
+
+def format_gates(results: dict[str, dict], window_days: int) -> str:
+    lines = [f"Consolidation gates, {window_days}-day window:"]
+    for key, row in results.items():
+        lines.append(f"  {key}: {row['question']}")
+        facts = {k: v for k, v in row.items() if k not in ("question", "answer")}
+        if facts:
+            lines.append("      " + ", ".join(f"{k}={v}" for k, v in facts.items()))
+        lines.append(f"      -> {row['answer']}")
+    return "\n".join(lines)
+
+
 def degraded(results: dict[str, dict]) -> list[str]:
     return [s for s, r in results.items() if r["status"] in (SILENT, FAILING, DEGRADED)]
 
@@ -186,11 +259,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--quiet", action="store_true", help="only print when degraded")
     parser.add_argument("--no-notify", action="store_true", help="skip the Discord notice")
+    parser.add_argument("--gates", action="store_true",
+                        help="answer the MEMORY_CONSOLIDATION decision gates instead of the health check")
     args = parser.parse_args(argv)
 
     try:
         since = int(time.time()) - args.days * 86400
         events = mem.read_events(since_epoch=since)
+        if args.gates:
+            answers = gates(events)
+            print(json.dumps(answers, indent=2) if args.json else format_gates(answers, args.days))
+            return 0
         summary = mem.summarize(events)
         results = evaluate(summary, had_traffic=had_agent_traffic(summary))
     except Exception as exc:  # canary infrastructure itself failed
