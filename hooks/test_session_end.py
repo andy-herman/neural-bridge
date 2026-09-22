@@ -37,6 +37,17 @@ class TestResolveAgent(unittest.TestCase):
         with patch.dict(os.environ, {"NB_AGENT": "loid"}, clear=False):
             self.assertEqual(session_end.resolve_agent({}), "loid")
 
+    def test_daemon_stamp_nb_agent_id_is_honoured(self):
+        # claude_invoke.py stamps NB_AGENT_ID on every Discord turn. Before
+        # 2026-09-22 this hook ignored it, so all Discord work was unattributed
+        # and compile.py never ingested it.
+        with patch.dict(os.environ, {"NB_AGENT": "", "NB_AGENT_ID": "luna"}, clear=False):
+            self.assertEqual(session_end.resolve_agent({"cwd": "/x/neural-bridge"}), "luna")
+
+    def test_nb_agent_overrides_nb_agent_id(self):
+        with patch.dict(os.environ, {"NB_AGENT": "research", "NB_AGENT_ID": "luna"}, clear=False):
+            self.assertEqual(session_end.resolve_agent({}), "research")
+
     def test_compile_marker_is_unattributed(self):
         with patch.dict(os.environ, {"NB_AGENT": "compile"}, clear=False):
             self.assertEqual(

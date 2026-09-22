@@ -49,11 +49,13 @@ No external Python packages required. Standard library only.
 The hook resolves `<agent>` for the daily log path in this order:
 
 1. `payload['agent_type']` from the Claude Code hook event
-2. `NB_AGENT` environment variable (manual override; future use)
-3. `cwd` basename, if it matches a known agent (`research`, `teaching-prep`, `content`, `senior-pm`)
+2. `NB_AGENT` (manual override), then `NB_AGENT_ID` (stamped on every `claude -p` turn by the Discord daemon)
+3. `cwd` basename, if it matches a known agent
 4. `_unattributed` (fallback)
 
-Sessions that resolve to `_unattributed` still get a daily log; the compile pass downstream decides what to do with them.
+The known-agent set is `hooks/schema.py` `KNOWN_AGENTS`, pinned by test to the plugin's agent files.
+
+Sessions that resolve to `_unattributed` still get a daily log, but `compile.py` skips every `_`-prefixed directory, so unattributed work never reaches the wiki. Until 2026-09-22 the hook read only `NB_AGENT`, so every Discord turn was unattributed; that is the main reason 13 of 14 agents had never produced a concept.
 
 ## Running flush manually
 
