@@ -351,6 +351,47 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
             self.assertEqual(tel.call_args.kwargs["ok"], ok)
             self.assertEqual(tel.call_args.kwargs["detail"], detail)
 
+    def test_progress_entry_is_written_at_session_close(self):
+        valid = json.dumps({"decisions": ["Chose X"], "findings": ["Found Y"],
+                            "open_questions": [], "proposed_concepts": []})
+        with patch("flush.subprocess.run", side_effect=self._mock_claude(valid)), \
+             patch.object(flush, "_progress_append", return_value=(True, "appended")) as prog:
+            self._run_main(["--agent", "research", "--session-id", "s-prog",
+                            "--transcript", str(self.transcript), "--no-discord"])
+        prog.assert_called_once()
+        agent, data, session_id, hook_event = prog.call_args.args
+        self.assertEqual((agent, session_id, hook_event), ("research", "s-prog", "SessionEnd"))
+        self.assertEqual(data["decisions"], ["Chose X"])
+
+    def test_progress_append_skips_unattributed_and_missing_vault(self):
+        data = {"decisions": ["a"], "findings": [], "open_questions": []}
+        self.assertEqual(flush._progress_append("_unattributed", data, "s", "SessionEnd")[0], False)
+        with patch("scripts.discord_bot.progress_log.AGENTS_BASE", self.tmp_path / "no-vault"):
+            ok, reason = flush._progress_append("research", data, "s", "SessionEnd")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "vault absent")
+
+    def test_progress_append_with_nothing_narrative_is_ok_not_failure(self):
+        data = {"decisions": [], "findings": [], "open_questions": [],
+                "proposed_concepts": [{"slug": "x", "summary": "y"}]}
+        vault = self.tmp_path / "Agents"
+        vault.mkdir()
+        with patch("scripts.discord_bot.progress_log.AGENTS_BASE", vault):
+            ok, reason = flush._progress_append("research", data, "s", "SessionEnd")
+        self.assertEqual((ok, reason), (True, "nothing to log"))
+        self.assertFalse((vault / "research" / "progress.md").exists())
+
+    def test_progress_append_writes_into_a_present_vault(self):
+        data = {"decisions": ["a"], "findings": [], "open_questions": ["q"]}
+        vault = self.tmp_path / "Agents"
+        vault.mkdir()
+        with patch("scripts.discord_bot.progress_log.AGENTS_BASE", vault):
+            ok, reason = flush._progress_append("research", data, "sess-1234", "SessionEnd")
+        self.assertTrue(ok, reason)
+        text = (vault / "research" / "progress.md").read_text(encoding="utf-8")
+        self.assertIn("session sess-123", text)
+        self.assertIn("- q", text)
+
     def test_parse_failure_writes_failed_after_retry(self):
         with patch("flush.subprocess.run", side_effect=self._mock_claude("not json at all")):
             rc = self._run_main([

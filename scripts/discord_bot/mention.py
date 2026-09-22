@@ -14,6 +14,7 @@ from pathlib import Path
 from .claude_invoke import sanitize_untrusted_text
 from . import honcho_client
 from . import memory_telemetry as _mem
+from . import progress_log as _progress
 
 # The wiki's read side lives with the hooks (stdlib-only, shared with the
 # UserPromptSubmit hook). Import failure degrades to "no wiki context" and is
@@ -387,6 +388,31 @@ def _luna_notes_block() -> str:
     )
 
 
+def _progress_block(agent_id: str) -> str:
+    """Recent progress.md entries for this agent, or "" when there are none.
+
+    A missing file is recorded as ok with chars=0, not as a failure: it means
+    no non-empty session has closed for this agent since the log shipped.
+    Only a read error is ok=False. See progress_log.py for why (the
+    lessons_digest lesson).
+    """
+    try:
+        text, status = _progress.read_recent(agent_id)
+    except Exception as exc:  # the reader never raises, but a turn must not depend on that
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=False,
+                    detail=f"{type(exc).__name__}: {exc}"[:160])
+        return ""
+    if status in ("missing", "empty"):
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=True,
+                    chars=0, detail=f"progress.md {status}")
+        return ""
+    if status != "ok":
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=False, detail=status)
+        return ""
+    _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=True, chars=len(text))
+    return _progress.render_block(agent_id, sanitize_untrusted_text(text, "progress-log"))
+
+
 # ----------- Echo profile auto-inject (Phase 5) -----------
 #
 # Echo (the self-knowledge agent) maintains profile files at
@@ -660,6 +686,13 @@ def build_mention_prompt(
         echo_prefix = _echo_voice_block()
         if echo_prefix:
             rendered = echo_prefix + rendered
+
+    # Every agent: the append-only progress log, the narrative half of the
+    # consolidated note store (docs/MEMORY_CONSOLIDATION.md, Step 1). Prepended
+    # before notes.md so it reads *behind* the notes in the final prompt.
+    progress_prefix = _progress_block(agent_id)
+    if progress_prefix:
+        rendered = progress_prefix + rendered
 
     # Luna gets her own working-memory file auto-injected on top of Echo's
     # voice profile. Echo gives her stylistic mirror; her notes give her

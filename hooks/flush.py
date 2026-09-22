@@ -112,6 +112,43 @@ def _telemetry(agent: str, *, ok: bool, chars: int = 0, detail: str = "") -> Non
         return
 
 
+def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -> tuple[bool, str]:
+    """Append this session's entry to the agent's vault progress.md.
+
+    The narrative half of the consolidated note store
+    (docs/MEMORY_CONSOLIDATION.md, Step 1). Never raises; returns (ok, reason).
+    Skipped for unattributed sessions and on machines without the vault.
+    """
+    if agent == schema.UNATTRIBUTED:
+        return False, "unattributed"
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import progress_log
+        entry = progress_log.render_entry(
+            session_id=session_id,
+            decisions=data.get("decisions", []),
+            findings=data.get("findings", []),
+            open_questions=data.get("open_questions", []),
+            source=hook_event,
+        )
+        if not entry:
+            # Nothing narrative to record (e.g. a session that only proposed
+            # concepts). Not a failure of the write path.
+            ok, reason = True, "nothing to log"
+        else:
+            ok, reason = progress_log.append_entry(agent, entry)
+        try:
+            from scripts.discord_bot import memory_telemetry as mem
+            mem.record(mem.WRITE, progress_log.STORE, agent_id=agent, ok=ok,
+                       chars=len(entry) if ok else 0, detail=reason)
+        except Exception:
+            pass
+        return ok, reason
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
     try:
@@ -358,6 +395,7 @@ def main() -> int:
     append_session(args.agent, block, session_n)
     write_queue(args.agent, args.session_id, "flushed")
     _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
+    _progress_append(args.agent, parsed, args.session_id, args.hook_event)
 
     if not args.no_discord:
         header = f"**Flush** | agent: `{args.agent}` | {ended_at}"

@@ -345,5 +345,78 @@ class TestWikiRecallInjection(unittest.TestCase):
              patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
             out = self._build("cve")
         self.assertEqual(out, "AGENT=research\nMSG=cve\n")
-        rec.assert_called_once()
-        self.assertFalse(rec.call_args.kwargs["ok"])
+        wiki_calls = [c for c in rec.call_args_list if c.args[1] == "wiki_recall"]
+        self.assertEqual(len(wiki_calls), 1)
+        self.assertFalse(wiki_calls[0].kwargs["ok"])
+
+
+class TestProgressLogInjection(unittest.TestCase):
+    """MEMORY_CONSOLIDATION Step 1: progress.md rides behind notes.md."""
+    TEMPLATE = "AGENT={agent_id}\nMSG={message}\n"
+
+    def _build(self, agent_id="research", message="hello"):
+        from scripts.discord_bot import mention
+        with patch.object(mention._wiki, "recall", return_value=("", [])), \
+             patch.object(mention.honcho_client, "get_peer_card_context", return_value=""):
+            return build_mention_prompt(self.TEMPLATE, agent_id=agent_id, agent_definition="d",
+                                        channel_kind="channel", history=[], message_content=message)
+
+    def test_entries_are_injected_and_counted(self):
+        from scripts.discord_bot import mention
+        entry = "## 2026-09-22 00:00Z session abc\n\n**Decided**\n- ship it\n"
+        with patch.object(mention._progress, "read_recent", return_value=(entry, "ok")), \
+             patch.object(mention._mem, "record") as rec:
+            out = self._build()
+        self.assertIn("<progress-log>", out)
+        self.assertIn("ship it", out)
+        self.assertLess(out.index("<progress-log>"), out.index("AGENT=research"))
+        calls = [c for c in rec.call_args_list if c.args[1] == "progress_log"]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].kwargs["ok"])
+        self.assertGreater(calls[0].kwargs["chars"], 0)
+
+    def test_missing_log_is_ok_with_zero_chars_not_a_failure(self):
+        # The lessons_digest trap: a layer most agents lack must not read as
+        # a failing layer, or the canary pages on every quiet agent forever.
+        from scripts.discord_bot import mention
+        with patch.object(mention._progress, "read_recent", return_value=("", "missing")), \
+             patch.object(mention._mem, "record") as rec:
+            out = self._build()
+        self.assertNotIn("<progress-log>", out)
+        calls = [c for c in rec.call_args_list if c.args[1] == "progress_log"]
+        self.assertTrue(calls[0].kwargs["ok"])
+        self.assertEqual(calls[0].kwargs["chars"], 0)
+
+    def test_read_error_is_a_failure(self):
+        from scripts.discord_bot import mention
+        with patch.object(mention._progress, "read_recent", return_value=("", "OSError: boom")), \
+             patch.object(mention._mem, "record") as rec:
+            self._build()
+        calls = [c for c in rec.call_args_list if c.args[1] == "progress_log"]
+        self.assertFalse(calls[0].kwargs["ok"])
+
+    def test_progress_sits_behind_luna_notes(self):
+        from scripts.discord_bot import mention
+        entry = "## 2026-09-22 00:00Z session abc\n\n- a\n"
+        with patch.object(mention._progress, "read_recent", return_value=(entry, "ok")), \
+             patch.object(mention, "_luna_notes_block", return_value="<luna-notes>N</luna-notes>\n"), \
+             patch.object(mention, "_luna_live_state_block", return_value=""), \
+             patch.object(mention, "_echo_voice_block", return_value=""):
+            out = self._build(agent_id="luna")
+        self.assertLess(out.index("<luna-notes>"), out.index("<progress-log>"))
+        self.assertLess(out.index("<progress-log>"), out.index("AGENT=luna"))
+
+
+class TestRetrievalOnlyStoresStayOut(unittest.TestCase):
+    """MEMORY_CONSOLIDATION Step 3: conversation_log and semantic_index are
+    retrieval-only. This guard fails if either is wired into the prompt."""
+
+    def test_mention_module_does_not_read_retrieval_only_stores(self):
+        import re
+        src = (PKG_DIR / "mention.py").read_text(encoding="utf-8")
+        self.assertNotIn("semantic_search", src)
+        # Only the directory helpers (for --add-dir) may be imported from
+        # conversation_log; never a reader of its contents.
+        for m in re.finditer(r"from \.conversation_log import ([^\n]+)", src):
+            names = {n.strip() for n in m.group(1).split(",")}
+            self.assertTrue(names <= {"agent_conversations_dir", "shared_conversations_dir"}, names)
