@@ -90,9 +90,19 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     template and must not have wiki concepts appended to it by the
     UserPromptSubmit hook, or the summary starts echoing the wiki back into
     the daily log it is supposed to feed.
+
+    Also sets NB_SKIP_FLUSH=1: the extraction call is itself a `claude -p`
+    session, and the repo's SessionEnd hook fires for it like any other.
+    Without this the hook would spawn a second flush to summarise the
+    extraction transcript, whose own call would fire the hook again, and so
+    on: one model call per level, with nothing to stop it except the prompt
+    (which embeds the previous level's transcript) eventually outgrowing the
+    argv limit and crashing a flush. Verified 2026-09-23 that hooks do fire
+    for nested `claude -p` calls and that their transcripts exist.
     """
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_SKIP_WIKI_RECALL"] = "1"
+    env["NB_SKIP_FLUSH"] = "1"
     return env
 
 

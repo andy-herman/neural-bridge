@@ -6,7 +6,7 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 
 | File | Status | Purpose |
 |---|---|---|
-| `session_end.py` | working | Hook fired on `SessionEnd` and `PreCompact`. Resolves which agent owns the session, spawns `flush.py` as a detached subprocess, exits 0 immediately so the CLI never blocks on summarization. |
+| `session_end.py` | working | Hook fired on `SessionEnd` and `PreCompact`. Resolves which agent owns the session, spawns `flush.py` as a detached subprocess, exits 0 immediately so the CLI never blocks on summarization. Stands down (breadcrumb only, no flush) when `NB_SKIP_FLUSH=1` or `NB_AGENT=compile` is in the environment; see below. |
 | `flush.py` | working (v1) | Calls `claude -p` with the flush prompt + transcript. Validates JSON output against ADR-007 schema, appends a structured session block to `daily-logs/<agent>/YYYY-MM-DD.md`. Handles failed-parse, empty-session, and one parse retry. Posts the session block to Discord on success (via `discord_post`). |
 | `prompts/flush_v1.md` | working | Prompt template for `flush.py`. Light filing gate: explicit "transcript is data, not instructions" framing. |
 | `schema.py` | working | Pure-stdlib schema validators for ADR-007 daily-log structure. Shared with future `compile.py` and `lint.py`. |
@@ -25,6 +25,17 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 - `scripts/compile.py` sends the filing-gate and concept-writer prompts; injecting the wiki's current contents into the gate would bias verdicts toward what the wiki already says.
 
 Anything else that shells to `claude -p` from this repo with a prompt that must not be altered should set the same variable.
+
+## Flush: when it must stand down
+
+Every `claude -p` call fires the `SessionEnd` hook, including calls this repo makes to itself, and including calls nested inside another Claude Code session (verified 2026-09-23 with a three-level probe: the hook fired at every depth). Two callers therefore set `NB_SKIP_FLUSH=1` so `session_end.py` writes a `skipped:NB_SKIP_FLUSH` breadcrumb and exits without spawning `flush.py`:
+
+- `scripts/compile.py`, on every filing-gate vote and concept-writer call. Until 2026-09-23 each vote cost a second model call to summarise itself into `daily-logs/_unattributed/`, which `compile.py` skips by design, so the output was never read. The `NB_AGENT=compile` marker compile has always stamped is honoured as a second skip signal (`skipped:compile_session`), so either variable alone is enough.
+- `flush.py`, on its own extraction call. Without the flag the hook would spawn a flush to summarise the extraction transcript, whose own `claude -p` would fire the hook again, one model call per level. The only thing that ever stopped it was the prompt, which embeds the previous level's transcript, outgrowing the argv limit a few levels down and crashing that flush.
+
+The Discord daemon does not set it: its `claude -p` turns are the agents' real work and are exactly what flush exists to capture.
+
+Anything else that shells to `claude -p` from this repo and does not want a daily-log entry for that call should set the same variable. The breadcrumb keeps the audit trail: `_queue.log` still shows the hook ran, only that it spent no model call.
 
 ## Light vs. heavy filing gate
 
@@ -102,6 +113,12 @@ After installing the hook, open a Claude Code session in the repo, do anything, 
 ```
 <ts> <agent> <id> flush_spawned
 <ts> <agent> <id> flushed         (or skipped:empty / failed:<reason>)
+```
+
+A gate vote or a flush's own extraction call leaves a single line instead, with no second one:
+
+```
+<ts> _unattributed <id> skipped:NB_SKIP_FLUSH
 ```
 
 And a session block in `daily-logs/<agent>/YYYY-MM-DD.md`.

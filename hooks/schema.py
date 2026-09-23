@@ -23,9 +23,11 @@ PLUGIN_AGENTS = frozenset({
 })
 
 # Note: compile.py sets NB_AGENT=compile on the sessions it spawns, but
-# "compile" is deliberately NOT a known agent. Those sessions therefore file
-# under _unattributed, which compile.find_daily_log_files() skips, so the
-# compiler never ingests summaries of its own gate calls.
+# "compile" is deliberately NOT a known agent. session_end.py treats the
+# marker (and NB_SKIP_FLUSH=1) as "do not spawn flush", so normally no daily
+# log is written for a gate call at all; if one ever is, it files under
+# _unattributed, which compile.find_daily_log_files() skips, so the compiler
+# never ingests summaries of its own gate calls.
 KNOWN_AGENTS = PLUGIN_AGENTS | {UNATTRIBUTED}
 HOOK_EVENTS = {"SessionEnd", "PreCompact"}
 

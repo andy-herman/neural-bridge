@@ -102,6 +102,53 @@ class TestMain(unittest.TestCase):
         finally:
             os.unlink(transcript)
 
+    def _payload_with_transcript(self, agent_type="luna"):
+        fh = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        return {"agent_type": agent_type, "session_id": "gate-vote-1",
+                "transcript_path": fh.name, "hook_event_name": "SessionEnd"}
+
+    def test_compile_marker_skips_flush_entirely(self):
+        # A compile gate vote is a claude -p session like any other, so the
+        # hook fires for it. Before 2026-09-23 that spawned a flush model call
+        # to summarise one gate vote into _unattributed/, which nothing reads.
+        payload = self._payload_with_transcript(agent_type="")
+        with patch.dict(os.environ, {"NB_AGENT": "compile", "NB_SKIP_FLUSH": ""}, clear=False), \
+             patch.object(session_end, "spawn_flush") as spawn:
+            self.assertEqual(self._run(payload), 0)
+        spawn.assert_not_called()
+        queue = session_end.QUEUE_LOG.read_text(encoding="utf-8")
+        self.assertIn("_unattributed gate-vote-1 skipped:compile_session", queue)
+        self.assertNotIn("flush_spawned", queue)
+
+    def test_nb_skip_flush_skips_even_an_attributed_session(self):
+        # flush.py sets this on its own extraction call: hooks fire for nested
+        # claude -p sessions (verified 2026-09-23), so without it a flush
+        # would summarise a flush, recursively.
+        payload = self._payload_with_transcript(agent_type="luna")
+        with patch.dict(os.environ, {"NB_AGENT": "", "NB_SKIP_FLUSH": "1"}, clear=False), \
+             patch.object(session_end, "spawn_flush") as spawn:
+            self.assertEqual(self._run(payload), 0)
+        spawn.assert_not_called()
+        self.assertIn("luna gate-vote-1 skipped:NB_SKIP_FLUSH",
+                      session_end.QUEUE_LOG.read_text(encoding="utf-8"))
+
+    def test_skip_signals_are_exact(self):
+        # Only the documented values opt out; an empty or unrelated value must
+        # not silently switch the memory pipeline off.
+        self.assertIsNone(session_end.flush_opt_out({}))
+        self.assertIsNone(session_end.flush_opt_out({"NB_SKIP_FLUSH": "", "NB_AGENT": "luna"}))
+        self.assertIsNone(session_end.flush_opt_out({"NB_SKIP_FLUSH": "0"}))
+        self.assertIsNone(session_end.flush_opt_out({"NB_AGENT": "compiler"}))
+        for v in ("1", "true", "YES", " on "):
+            self.assertEqual(session_end.flush_opt_out({"NB_SKIP_FLUSH": v}), "skipped:NB_SKIP_FLUSH")
+        self.assertEqual(session_end.flush_opt_out({"NB_AGENT": "Compile"}), "skipped:compile_session")
+        # The generic flag wins when both are present, so the breadcrumb names
+        # the mechanism a caller actually set.
+        self.assertEqual(session_end.flush_opt_out({"NB_SKIP_FLUSH": "1", "NB_AGENT": "compile"}),
+                         "skipped:NB_SKIP_FLUSH")
+
     def test_missing_transcript_writes_breadcrumb_and_does_not_spawn(self):
         payload = {"agent_type": "research", "session_id": "s1",
                    "transcript_path": "/nonexistent/t.jsonl", "hook_event_name": "SessionEnd"}

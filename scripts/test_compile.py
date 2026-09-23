@@ -396,6 +396,17 @@ class TestMainWithMockedGate(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertEqual(env.get("NB_AGENT"), "compile")
 
+    def test_gate_subprocess_env_tells_the_session_end_hook_to_stand_down(self):
+        # Every gate vote is a claude -p session and fires SessionEnd; without
+        # this each vote cost a second model call to summarise itself into
+        # daily-logs/_unattributed/, which nothing reads.
+        env = cmp._subprocess_env_for_compile_claude()
+        self.assertEqual(env.get("NB_SKIP_FLUSH"), "1")
+        # And the hook agrees, given exactly this environment.
+        sys.path.insert(0, str(SCRIPTS_DIR.parent / "hooks"))
+        import session_end
+        self.assertEqual(session_end.flush_opt_out(env), "skipped:NB_SKIP_FLUSH")
+
     def test_live_run_records_one_telemetry_event_and_dry_run_none(self):
         with patch("compile.subprocess.run", side_effect=self._mock_promote), \
              patch.object(cmp, "_telemetry") as tel:

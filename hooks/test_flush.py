@@ -336,6 +336,15 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertNotIn("NB_DISCORD_WEBHOOK", env)
 
+    def test_subprocess_env_stops_flush_from_flushing_itself(self):
+        # The extraction call is a claude -p session; SessionEnd fires for it
+        # (nested hooks verified 2026-09-23). Without this flag the hook would
+        # spawn a flush of the flush, and so on, one model call per level.
+        env = flush._subprocess_env_for_claude()
+        self.assertEqual(env.get("NB_SKIP_FLUSH"), "1")
+        import session_end
+        self.assertEqual(session_end.flush_opt_out(env), "skipped:NB_SKIP_FLUSH")
+
     def test_telemetry_records_each_terminal_outcome(self):
         valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [], "proposed_concepts": []})
         empty = json.dumps({"decisions": [], "findings": [], "open_questions": [], "proposed_concepts": []})
