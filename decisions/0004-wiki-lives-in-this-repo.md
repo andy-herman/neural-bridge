@@ -1,14 +1,14 @@
 ---
 type: adr
 project: Neural Bridge
-status: proposed
+status: accepted
 created: 2026-05-08
 tags: [neural-bridge, decision]
 ---
 
 # ADR-0004: Wiki lives in this repo (re-evaluate if private content emerges)
 
-**Status:** Proposed (agent-drafted, awaiting human review)
+**Status:** Accepted. Accepted 2026-09-22 (truth pass): knowledge/ is committed and public. The private vault (Luna Master) stayed separate; the re-evaluation trigger has not fired.
 **Date:** 2026-05-08
 **Tracks:** Issue #6 — andy-herman/neural-bridge
 

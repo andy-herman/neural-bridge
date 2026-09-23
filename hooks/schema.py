@@ -10,12 +10,23 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 
-KNOWN_AGENTS = {
-    "research", "teaching-prep", "content", "senior-pm", "social",
-    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
-    "luna", "librarian", "echo", "ux-designer",
-    "_unattributed",
-}
+# The single source of truth for agent ids. session_start.py, session_end.py,
+# flush.py, and compile.py all import this set; a test asserts it matches the
+# plugin's agents/*.md filenames so the roster cannot drift again (it did:
+# session_start once knew 9 agents, session_end 13, this file 13, the plugin 14).
+UNATTRIBUTED = "_unattributed"
+
+PLUGIN_AGENTS = frozenset({
+    "automation-engineer", "content", "docs-editor", "echo", "librarian",
+    "loid", "luna", "recruiter", "research", "security-reviewer", "senior-pm",
+    "social", "teaching-prep", "ux-designer",
+})
+
+# Note: compile.py sets NB_AGENT=compile on the sessions it spawns, but
+# "compile" is deliberately NOT a known agent. Those sessions therefore file
+# under _unattributed, which compile.find_daily_log_files() skips, so the
+# compiler never ingests summaries of its own gate calls.
+KNOWN_AGENTS = PLUGIN_AGENTS | {UNATTRIBUTED}
 HOOK_EVENTS = {"SessionEnd", "PreCompact"}
 
 REQUIRED_FLUSH_KEYS = {"decisions", "findings", "open_questions", "proposed_concepts"}

@@ -17,7 +17,7 @@ Six layers, built bottom-up:
 | 1. Agents | ✅ 14 defined (13 registered on Discord) | `plugins/neural-bridge-core/agents/*.md` |
 | 2. Skills | ✅ plugin-level: filing-gate-review, lint-triage (plus user-level inheritance) | `plugins/neural-bridge-core/skills/` |
 | 3. Transport | ✅ Discord daemon + Telegram bridge (Luna, Loid) | `scripts/discord_bot/`, `scripts/telegram_bot/` |
-| 4. Shared state | ✅ wiki + daily logs + filing gate + Honcho peer memory | `knowledge/`, `daily-logs/`, `scripts/discord_bot/honcho_client.py` |
+| 4. Shared state | ✅ wiki (compiled, read at query time) + daily logs + progress logs + filing gate + Honcho peer memory, all under the memory canary | `knowledge/`, `daily-logs/`, `hooks/wiki_recall.py`, `scripts/discord_bot/progress_log.py`, `scripts/memory_canary.py` |
 | 5. Orchestration | ✅ Discord daemon, senior-pm, cross-agent handoff, squad-discuss | `scripts/discord_bot/` |
 | 6. Frontend | dashboard generator + fleet heartbeats into the Obsidian vault | `scripts/dashboard.py`, `scripts/fleet_heartbeat.py` |
 
@@ -48,7 +48,7 @@ Six layers, built bottom-up:
 .claude-plugin/        Marketplace manifest (this repo declares itself a Claude Code plugin marketplace)
   marketplace.json     Lists the plugins this repo ships
 plugins/               One subdirectory per plugin
-  neural-bridge-core/  V1 core plugin (3 specialist agents)
+  neural-bridge-core/  Core plugin (fourteen specialist agents; see roster above)
     .claude-plugin/
       plugin.json      Plugin manifest
     agents/            Subagent definitions
@@ -63,7 +63,7 @@ knowledge/             The wiki - LLM-maintained, never hand-edited
   agents/              Per-agent memory subdirectories
 raw/                   External ingest (Web Clipper, papers) - gitignored
 daily-logs/            Per-agent session summaries - gitignored
-hooks/                 Lifecycle hooks: session_start, session_end, flush, discord_post (shipped, tested)
+hooks/                 Lifecycle hooks: session_start, user_prompt_submit (wiki recall), session_end, flush, guard_bash, guard_concepts, discord_post (shipped, tested)
 scripts/               compile.py, lint.py, dashboard.py, fleet_heartbeat.py, discord_bot/, telegram_bot/, launchd/
 decisions/             Architecture decision records (ADRs)
 docs/                  Build status, build plans, audits, lint reports, Honcho integration docs

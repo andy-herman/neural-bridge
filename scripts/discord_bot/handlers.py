@@ -444,10 +444,14 @@ async def _handle_mention_inner(client, message, config: BotConfig) -> None:
                 agent_id=agent_id,
                 user_message=message.content or "",
                 agent_response=response,
-                session_id=session_rec.session_id,
+                session_id=result.session_id,
             )
-        except Exception:
-            pass  # honcho_client already swallows; this is paranoia
+        except Exception as exc:
+            # honcho_client already swallows transport errors, so anything that
+            # reaches here is a programming error at this call site (an unbound
+            # name once hid here for weeks behind a bare `pass`). Log it; never
+            # let it break the reply.
+            log(f"HONCHO submit_turn raised at call site: agent={agent_id} error={exc!r}")
 
     # Attachment validation feedback (rejected paths + over-cap).
     if parsed_attach.parse_error:

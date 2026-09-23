@@ -1,0 +1,33 @@
+name: Tests
+
+# Runs the hook and script test suites on every push and pull request.
+# CLAUDE.md requires `python -m pytest hooks/ scripts/` to stay green before
+# committing to hooks or scripts; until this workflow existed nothing enforced
+# that outside the developer's machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # scripts/echo/synthesize_profile.py uses a backslash inside an
+          # f-string expression, which only parses on 3.12 or newer.
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pyyaml
+          python -m pip install -r scripts/discord_bot/requirements.txt
+
+      - name: Run the hook and script suites
+        run: python -m pytest hooks/ scripts/ -q -p no:cacheprovider

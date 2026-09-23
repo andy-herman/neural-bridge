@@ -1,7 +1,9 @@
 # Memory consolidation: design, held ready
 
-**Status: designed, not executed.** Nothing here has been run. Execution is
-gated on the evidence in step 0 below.
+**Status: partially executed (2026-09-22).** Steps 1, 2, and 3 are done and
+Step 5 is decided. Steps 4 and the G2 decision wait on telemetry that only
+exists on the Mac Mini; `python -m scripts.memory_canary --gates --days 30`
+answers each remaining gate in one command. See "Execution record" at the end.
 
 Phase 0 of the roadmap calls for collapsing the memory stack into "one durable
 progress log plus one bounded, human-readable note store, re-read at session
@@ -31,7 +33,7 @@ Eight stores. Sizes are real, not estimates.
 | 5 | `honcho` | service up | yes, 2000 char cap | capture 6/6, card 22/25 = 88% |
 | 6 | `luna_notes` | 16,089 B | yes, 8000 char cap | 1/1 |
 | 7 | `echo_profile` | 11 files | yes (3 agents), 6000 cap | 1/1 |
-| 8 | `repo_wiki` | 7 concepts, 8 quarantined | via SessionStart hook | last compile 2026-05-10 |
+| 8 | `repo_wiki` | 7 concepts, 8 quarantined | via SessionStart hook | last compile 2026-05-10 (see execution record: read loop and telemetry added 2026-09-22) |
 
 Four of these are injected into prompts and therefore compete for the same
 context budget. That is the actual problem: worst case a Luna turn carried
@@ -144,3 +146,51 @@ revert the commit; the store's files are still there.
   with Step 5 rather than inside it.
 - Does not introduce a new memory technology. Adding a ninth store to fix
   having eight is the obvious trap.
+
+## Execution record
+
+### 2026-08-16: Step 2 done
+
+`lessons_digest` retired (commit `4b56023`). Its one live digest was folded
+into Luna's `notes.md`; the 4000 reclaimed characters paid for raising her
+notes budget to 12,000.
+
+### 2026-09-22: Steps 1, 3, 5 done; gates made answerable
+
+The September audit found the wiki's read loop had never closed: articles were
+compiled once (2026-05-10) and no code path ever opened one. It also found the
+reason 13 of 14 agents had never written a concept: the Discord daemon stamps
+`NB_AGENT_ID` on every turn, but the SessionEnd hook only read `NB_AGENT`, so
+every Discord turn was flushed as `_unattributed`, which `compile.py` skips.
+
+- **Step 1 done.** `scripts/discord_bot/progress_log.py` is the progress log.
+  `hooks/flush.py` appends one dated entry per non-empty session at session
+  close (decided / found / open); `mention.py` injects the most recent
+  entries, 3000 characters, behind `notes.md` on every mention. The store is
+  `progress_log` in the canary. A missing file is recorded as ok with zero
+  chars, deliberately: lessons_digest died of counting "no file yet" as
+  failure. Adoption is reported by `--gates`.
+- **Step 3 done.** `test_mention.py` carries a guard that fails if
+  `semantic_search` or a `conversation_log` reader is ever imported into the
+  prompt builder. Both stores stay retrieval-only.
+- **Step 5 decided: revive, not delete.** PR #162 fixed the compile state
+  bug, unified the agent roster, honoured `NB_AGENT_ID` at SessionEnd so agent
+  work actually reaches `daily-logs/<agent>/`, added query-time retrieval
+  (`hooks/wiki_recall.py`, the UserPromptSubmit hook, and the Discord prompt
+  builder), and instrumented flush, compile, and recall so the canary covers
+  the wiki. G4 is therefore answered structurally: the wiki is read on every
+  turn and the reads are counted. Whether it is *useful* is the grounding
+  metric in the canary report; if that stays near zero for a month, the
+  delete branch of Step 5 reopens.
+- **Gates G2 and G3 (Step 4) still open.** They need Mac-side telemetry.
+  Run `python -m scripts.memory_canary --gates --days 30`. G3 demotes Honcho
+  to retrieval-only if its peer card is non-empty less than 90% of the time.
+- **Step 6.** After the Mac pulls this, run the canary daily for a week and
+  confirm `progress_log`, `flush_daily_log`, and `wiki_recall` are healthy
+  and `compile_concepts` stops being SILENT once the nightly job has run.
+
+Stores after this pass: `notes.md` (curated, injected), `progress.md`
+(narrative, injected), `repo_wiki` (compiled concepts, injected on relevance),
+`honcho` (injected, pending G3), `echo_profile` (injected, pending G2),
+`conversation_log` and `semantic_index` (retrieval-only). `session_store` is
+not memory.

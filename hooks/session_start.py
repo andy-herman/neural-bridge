@@ -36,11 +36,8 @@ AGENTS_DIR = KNOWLEDGE_DIR / "agents"
 DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
 QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 
-KNOWN_AGENTS = {
-    "research", "teaching-prep", "content", "senior-pm", "social",
-    "recruiter", "automation-engineer", "security-reviewer", "docs-editor",
-}
-UNATTRIBUTED = "_unattributed"
+sys.path.insert(0, str(HOOKS_DIR))
+from schema import KNOWN_AGENTS, UNATTRIBUTED  # noqa: E402
 
 DEFAULT_BUDGET = 4000  # chars total
 INDEX_CAP = 1500
@@ -66,9 +63,15 @@ def resolve_agent(payload: dict) -> str:
     agent_type = (payload.get("agent_type") or "").strip().lower()
     if agent_type in KNOWN_AGENTS:
         return agent_type
-    env_agent = os.environ.get("NB_AGENT", "").strip().lower()
-    if env_agent in KNOWN_AGENTS:
-        return env_agent
+    # NB_AGENT is the manual override; NB_AGENT_ID is what the Discord daemon
+    # stamps on every claude -p turn (claude_invoke.py) for guard_bash. Until
+    # 2026-09-22 only NB_AGENT was read here, so every Discord turn was filed
+    # under _unattributed, which compile.py skips: the wiki never saw any
+    # agent's Discord work, which is most of the fleet's work.
+    for key in ("NB_AGENT", "NB_AGENT_ID"):
+        env_agent = os.environ.get(key, "").strip().lower()
+        if env_agent in KNOWN_AGENTS:
+            return env_agent
     cwd = payload.get("cwd") or os.getcwd()
     cwd_base = Path(cwd).name.lower()
     if cwd_base in KNOWN_AGENTS:

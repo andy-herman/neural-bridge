@@ -340,9 +340,12 @@ def strip_code_fences(text: str) -> str:
 def _subprocess_env_for_compile_claude() -> dict[str, str]:
     """Environment for compile.py-spawned `claude -p` subprocesses.
 
-    Sets NB_AGENT=compile so the SessionEnd hook attributes the spawned
-    session correctly in daily-logs (instead of falling through to
-    `_unattributed`).
+    Sets NB_AGENT=compile as a marker on the spawned session. "compile" is
+    deliberately not in schema.KNOWN_AGENTS, so the SessionEnd hook files
+    these sessions under daily-logs/_unattributed/, which
+    find_daily_log_files() skips: the compiler never ingests summaries of
+    its own gate calls. (An earlier version of this docstring claimed the
+    opposite; the code never did that.)
 
     Sets NB_NO_DISCORD=1 so flush.py writes the daily-log entry but
     skips the Discord post — a 70-candidate dry-run otherwise floods
@@ -356,7 +359,32 @@ def _subprocess_env_for_compile_claude() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_AGENT"] = "compile"
     env["NB_NO_DISCORD"] = "1"
+    # The filing gate and concept writer must see exactly the prompt they were
+    # calibrated against. Without this the repo's UserPromptSubmit hook would
+    # append related concepts to every gate call, biasing verdicts toward
+    # whatever the wiki already says.
+    env["NB_SKIP_WIKI_RECALL"] = "1"
     return env
+
+
+def _telemetry(*, ok: bool, chars: int = 0, detail: str = "") -> None:
+    """Record one WRITE event for store "compile_concepts". Never raises.
+
+    One event per live run, not per candidate: the canary's question is
+    "did the nightly compile run and land anything", and the 135-day gap
+    found in the 2026-09 audit is exactly what a per-run event exposes.
+    Dry runs are not recorded; they write nothing to the wiki.
+    """
+    try:
+        # compile.py runs as a script (sys.path[0] is scripts/), so the repo
+        # root has to be added explicitly or this import fails and the
+        # except below turns the whole instrument into a silent no-op.
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import memory_telemetry as mem
+        mem.record(mem.WRITE, "compile_concepts", agent_id="compile", ok=ok, chars=chars, detail=detail)
+    except Exception:
+        return
 
 
 def _claude_or_fallback(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
@@ -1007,7 +1035,9 @@ def main() -> int:
     if not candidates:
         log_line(args.verbose, "no candidates; exiting clean")
         state["last_run_at"] = utc_iso()
-        write_compile_state(state)
+        if not args.dry_run:
+            write_compile_state(state)
+            _telemetry(ok=True, chars=0, detail="no_candidates")
         return 0
 
     template = FILING_GATE_PROMPT.read_text(encoding="utf-8")
@@ -1134,6 +1164,13 @@ def main() -> int:
     refresh_index(promoted_slugs, dry_run=args.dry_run)
 
     print(summary)
+
+    if not args.dry_run:
+        landed = counts[PROMOTE] + counts[QUARANTINE]
+        # A run where every candidate errored is a failed write path. A run
+        # that only rejected is a working gate, so it is ok with chars=0.
+        gate_ran = landed + counts[REJECT] > 0
+        _telemetry(ok=gate_ran or counts["errors"] == 0, chars=landed, detail=summary)
 
     # Compute the run-log path before the Discord block: the summary references
     # it when there are more than 10 action lines, and the file itself is written

@@ -45,3 +45,7 @@ Option 1 creates a maintenance burden (remembering to suppress the primitive) an
 ## Implementation note
 
 This decision takes effect when `compile.py` ships (issue #10). No code change is required before then. The `compile.py` spec in `docs/v2-build-plan.md` is updated by this ADR to list `~/.claude/memory/` as an explicit input.
+
+## Truth-pass note (2026-09-22)
+
+The decision stands, but the implementation never landed: `scripts/compile.py` has no reference to `~/.claude/memory/` and ingests only `daily-logs/`. Until that changes, this ADR describes intent, not behaviour. Tracked in docs/STATUS.md known gaps.

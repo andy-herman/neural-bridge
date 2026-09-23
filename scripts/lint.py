@@ -40,13 +40,20 @@ LINT_DIR = REPO_ROOT / "docs" / "lint"
 IMPERATIVE_PROMPT = SCRIPTS_DIR / "prompts" / "lint_imperative_language_v1.md"
 AGENTS_MD_FILE = REPO_ROOT / "AGENTS.md"
 PLUGIN_AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
+README_FILE = REPO_ROOT / "README.md"
+MARKETPLACE_FILE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+PLUGIN_MANIFEST_FILE = REPO_ROOT / "plugins" / "neural-bridge-core" / ".claude-plugin" / "plugin.json"
+DECISIONS_DIR = REPO_ROOT / "decisions"
+SETTINGS_FILE = REPO_ROOT / ".claude" / "settings.json"
+# An ADR still "proposed" after this long is either accepted in practice or dead.
+ADR_STALE_DAYS = 60
 
 DEFAULT_MODEL = "claude-sonnet-5"
 LINT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 60
 
-ALL_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster", "imperative-language")
-DETERMINISTIC_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster")
+ALL_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster", "docs-truth", "imperative-language")
+DETERMINISTIC_CHECKS = ("broken-links", "orphans", "frontmatter", "agents-roster", "docs-truth")
 LLM_CHECKS = ("imperative-language",)
 
 # Wiki link: [[slug]] or [[slug|display]]
@@ -253,6 +260,138 @@ def check_agents_roster(verbose: bool = False) -> list[Finding]:
 
 
 # ---------- check 3: frontmatter validity ----------
+
+# ---------- docs-truth ----------
+#
+# The docs drifted from the code twice (2026-07 and 2026-09 truth passes): agent
+# counts written as prose, a plugin version stated in three places, ADRs left
+# "proposed" for four months, and hook commands that only resolve from the repo
+# root. Each sub-check below is one of those exact failures, made mechanical.
+
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+# "nine .md plugin files", "3 specialist agents", "fourteen specialists",
+# "nine specialist .md definitions", "14 defined". Case-insensitive.
+AGENT_COUNT_RE = re.compile(
+    r"\b(\d{1,2}|" + "|".join(_NUMBER_WORDS) + r")\s+"
+    r"(?:specialist(?:s|\s+agents|\s+\.md\s+definitions)|specialized\s+agents|agents\b|"
+    r"\.md\s+plugin\s+files|defined\b)",
+    re.IGNORECASE,
+)
+# Counts that are not about the roster (e.g. "5 cross-agent turns") are the
+# reason this regex is anchored on roster nouns; "agents" alone is still broad,
+# so only lines that also mention the plugin, the roster, or "specialist" count.
+_ROSTER_CONTEXT_RE = re.compile(r"plugin|specialist|roster|defined|\.md", re.IGNORECASE)
+_HOOK_PATH_RE = re.compile(r"(?:\"\$CLAUDE_PROJECT_DIR\"?/|\$CLAUDE_PROJECT_DIR/)?([\w./-]+\.py)")
+ADR_STATUS_RE = re.compile(r"^status:\s*(\w+)", re.MULTILINE)
+ADR_CREATED_RE = re.compile(r"^created:\s*(\d{4}-\d{2}-\d{2})", re.MULTILINE)
+
+
+def _count_from_token(tok: str) -> int:
+    return int(tok) if tok.isdigit() else _NUMBER_WORDS[tok.lower()]
+
+
+def check_docs_truth(verbose: bool = False, today: datetime | None = None) -> list[Finding]:
+    """Docs must match the code they describe. Four deterministic sub-checks."""
+    findings: list[Finding] = []
+    today = today or datetime.now(timezone.utc)
+
+    # 1. Agent counts stated in prose must equal the plugin's agent files.
+    if PLUGIN_AGENTS_DIR.exists():
+        on_disk = len([p for p in PLUGIN_AGENTS_DIR.glob("*.md") if not p.name.startswith(".")])
+        for doc in (README_FILE, AGENTS_MD_FILE):
+            if not doc.exists():
+                continue
+            for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+                if not _ROSTER_CONTEXT_RE.search(line):
+                    continue
+                for m in AGENT_COUNT_RE.finditer(line):
+                    stated = _count_from_token(m.group(1))
+                    if stated != on_disk:
+                        findings.append(Finding(
+                            check="docs-truth", severity="HIGH",
+                            file=f"{doc.name}:{lineno}",
+                            evidence=f"says \"{m.group(0)}\" but plugins/neural-bridge-core/agents/ holds {on_disk}",
+                            suggestion=f"Change the count to {on_disk} or stop stating it in prose",
+                        ))
+        log_line(verbose, f"docs-truth: agent-count phrases checked against {on_disk} on disk")
+
+    # 2. The plugin version must agree between plugin.json and marketplace.json.
+    try:
+        manifest = json.loads(PLUGIN_MANIFEST_FILE.read_text(encoding="utf-8"))
+        market = json.loads(MARKETPLACE_FILE.read_text(encoding="utf-8"))
+        entry = next((p for p in market.get("plugins", []) if p.get("name") == manifest.get("name")), None)
+        if entry is None:
+            findings.append(Finding(
+                check="docs-truth", severity="HIGH", file=str(MARKETPLACE_FILE.relative_to(REPO_ROOT)),
+                evidence=f"no plugin entry named {manifest.get('name')!r}",
+                suggestion="Add the plugin to marketplace.json or fix the name",
+            ))
+        elif entry.get("version") != manifest.get("version"):
+            findings.append(Finding(
+                check="docs-truth", severity="HIGH", file=str(MARKETPLACE_FILE.relative_to(REPO_ROOT)),
+                evidence=f"marketplace says {entry.get('version')} but plugin.json says {manifest.get('version')}",
+                suggestion="Bump both in the same commit",
+            ))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        findings.append(Finding(
+            check="docs-truth", severity="MEDIUM", file=".claude-plugin/marketplace.json",
+            evidence=f"could not compare plugin versions: {type(exc).__name__}: {exc}",
+            suggestion="Ensure both manifests exist and are valid JSON",
+        ))
+
+    # 3. ADRs left "proposed" past the stale window need a decision.
+    if DECISIONS_DIR.exists():
+        for adr in sorted(DECISIONS_DIR.glob("*.md")):
+            text = adr.read_text(encoding="utf-8")
+            sm = ADR_STATUS_RE.search(text)
+            cm = ADR_CREATED_RE.search(text)
+            if not sm or sm.group(1).lower() != "proposed" or not cm:
+                continue
+            created = datetime.strptime(cm.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            age = (today - created).days
+            if age > ADR_STALE_DAYS:
+                findings.append(Finding(
+                    check="docs-truth", severity="MEDIUM", file=str(adr.relative_to(REPO_ROOT)),
+                    evidence=f"status: proposed for {age} days (created {cm.group(1)})",
+                    suggestion="Set status to accepted, rejected, or superseded; a proposal this old is a decision in practice",
+                ))
+
+    # 4. Hook commands must resolve from any working directory.
+    if SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            settings = {}
+        for event, groups in (settings.get("hooks") or {}).items():
+            for group in groups or []:
+                for hook in group.get("hooks") or []:
+                    cmd = hook.get("command") or ""
+                    if hook.get("type") != "command" or not cmd:
+                        continue
+                    for m in _HOOK_PATH_RE.finditer(cmd):
+                        rel = m.group(1)
+                        if rel.startswith("/"):
+                            continue
+                        anchored = "$CLAUDE_PROJECT_DIR" in cmd
+                        if not anchored:
+                            findings.append(Finding(
+                                check="docs-truth", severity="HIGH", file=".claude/settings.json",
+                                evidence=f"{event} hook command is cwd-relative: {cmd!r}",
+                                suggestion='Anchor it: python3 "$CLAUDE_PROJECT_DIR/<path>" so a stray cd cannot disable every hook',
+                            ))
+                        if not (REPO_ROOT / rel).exists():
+                            findings.append(Finding(
+                                check="docs-truth", severity="HIGH", file=".claude/settings.json",
+                                evidence=f"{event} hook references {rel}, which does not exist",
+                                suggestion="Restore the script or remove the hook entry",
+                            ))
+    return findings
+
 
 def check_frontmatter(verbose: bool = False) -> list[Finding]:
     """Required fields present, slug matches filename."""
@@ -478,6 +617,8 @@ def main() -> int:
         findings.extend(check_frontmatter(verbose=args.verbose))
     if "agents-roster" in checks:
         findings.extend(check_agents_roster(verbose=args.verbose))
+    if "docs-truth" in checks:
+        findings.extend(check_docs_truth(verbose=args.verbose))
     if "imperative-language" in checks:
         findings.extend(check_imperative_language(since, args.model, args.timeout, verbose=args.verbose))
 

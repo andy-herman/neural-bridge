@@ -1,14 +1,14 @@
 ---
 type: adr
 project: Neural Bridge
-status: proposed
+status: accepted
 created: 2026-05-08
 tags: [neural-bridge, decision]
 ---
 
 # ADR-0001: Stay fully OSS, no Kashef PDF
 
-**Status:** Proposed (agent-drafted, awaiting human review)
+**Status:** Accepted. Accepted 2026-09-22 (truth pass): implemented in practice since day one; the repo is MIT and public and every source cited in the docs is public.
 **Date:** 2026-05-08
 **Tracks:** Issue #1 — andy-herman/neural-bridge
 

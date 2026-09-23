@@ -1,14 +1,14 @@
 ---
 type: adr
 project: Neural Bridge
-status: proposed
+status: accepted
 created: 2026-05-08
 tags: [neural-bridge, decision]
 ---
 
 # ADR-0002: Ship Architecture A first, graduate to B after two weeks of real use
 
-**Status:** Proposed (agent-drafted, awaiting human review)
+**Status:** Accepted. Accepted 2026-09-22 (truth pass): A shipped 2026-05 and has run since. The planned two-week re-evaluation of B never happened; the Discord daemon became the orchestrator and no dashboard or supervisor was built. Treat B as superseded by the daemon unless daily use demands otherwise.
 **Date:** 2026-05-08
 **Tracks:** Issue #3 — andy-herman/neural-bridge
 

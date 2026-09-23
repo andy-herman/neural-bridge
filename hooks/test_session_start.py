@@ -28,6 +28,10 @@ class TestResolveAgent(unittest.TestCase):
             agent = session_start.resolve_agent({})
         self.assertEqual(agent, "content")
 
+    def test_daemon_stamp_nb_agent_id_is_honoured(self):
+        with patch.dict(os.environ, {"NB_AGENT": "", "NB_AGENT_ID": "echo"}, clear=False):
+            self.assertEqual(session_start.resolve_agent({"cwd": "/x/neural-bridge"}), "echo")
+
     def test_cwd_basename(self):
         with patch.dict(os.environ, {"NB_AGENT": ""}, clear=False):
             agent = session_start.resolve_agent({"cwd": "/path/to/social"})

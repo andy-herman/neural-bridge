@@ -12,7 +12,7 @@
          appends new content to claude-transcripts.md in the vault.
 
          The script (scripts/echo/ingest_claude_transcripts.py) defaults to
-         LIVE mode (--dry-run is opt-in), so no flag is needed in the
+         LIVE mode (the dry-run flag is opt-in), so no flag is needed in the
          invocation. Idempotent re-runs are safe via the dedupe sidecar.
 
          Ordering rationale (LOAD-BEARING):

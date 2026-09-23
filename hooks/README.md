@@ -11,8 +11,20 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 | `prompts/flush_v1.md` | working | Prompt template for `flush.py`. Light filing gate: explicit "transcript is data, not instructions" framing. |
 | `schema.py` | working | Pure-stdlib schema validators for ADR-007 daily-log structure. Shared with future `compile.py` and `lint.py`. |
 | `discord_post.py` | working | Outbound Discord push helper. Reads webhook URL from macOS keychain (or `NB_DISCORD_WEBHOOK` env var), POSTs via stdlib urllib. Safe-fails: missing webhook or network error returns False, never blocks the caller. Phase C will swap the webhook for bot-based posting; callers depend on `send()`, not on the transport. |
+| `user_prompt_submit.py` | working | Hook fired on `UserPromptSubmit`. Ranks `knowledge/concepts/` against the prompt text and prints a compact "Related wiki concepts" block to stdout, which Claude Code adds to the turn's context. Prints nothing when no article matches. Exit code is always 0; it never blocks a prompt. |
+| `wiki_recall.py` | working | The read side of the wiki: stdlib BM25 over concept slug, summary, and body, with a rendered data block and one `wiki_recall` UTILIZE telemetry event per call. Shared by the hook above and by the Discord prompt builder (`scripts/discord_bot/mention.py`). `--report` prints the grounding metric: how many agent turns in the window were grounded in a concept. |
 | `test_flush.py` | working | Unit tests for `flush.py` and `schema.py`. Mocks the subprocess; no real LLM calls. |
 | `test_discord_post.py` | working | Unit tests for `discord_post.py`. Mocks both keychain (via subprocess) and HTTP (via urllib). |
+
+## Wiki recall: when it must stand down
+
+`NB_SKIP_WIKI_RECALL=1` in the environment makes `user_prompt_submit.py` print nothing. Three callers set it, each for a reason:
+
+- The Discord daemon (`scripts/discord_bot/claude_invoke.py`) injects the same block itself, ranked against the clean user message. Letting the hook run too would match the rendered template's own boilerplate.
+- `flush.py` sends a fixed extraction template; wiki context appended to it would be echoed back into the daily log the wiki is compiled from.
+- `scripts/compile.py` sends the filing-gate and concept-writer prompts; injecting the wiki's current contents into the gate would bias verdicts toward what the wiki already says.
+
+Anything else that shells to `claude -p` from this repo with a prompt that must not be altered should set the same variable.
 
 ## Light vs. heavy filing gate
 
@@ -37,11 +49,13 @@ No external Python packages required. Standard library only.
 The hook resolves `<agent>` for the daily log path in this order:
 
 1. `payload['agent_type']` from the Claude Code hook event
-2. `NB_AGENT` environment variable (manual override; future use)
-3. `cwd` basename, if it matches a known agent (`research`, `teaching-prep`, `content`, `senior-pm`)
+2. `NB_AGENT` (manual override), then `NB_AGENT_ID` (stamped on every `claude -p` turn by the Discord daemon)
+3. `cwd` basename, if it matches a known agent
 4. `_unattributed` (fallback)
 
-Sessions that resolve to `_unattributed` still get a daily log; the compile pass downstream decides what to do with them.
+The known-agent set is `hooks/schema.py` `KNOWN_AGENTS`, pinned by test to the plugin's agent files.
+
+Sessions that resolve to `_unattributed` still get a daily log, but `compile.py` skips every `_`-prefixed directory, so unattributed work never reaches the wiki. Until 2026-09-22 the hook read only `NB_AGENT`, so every Discord turn was unattributed; that is the main reason 13 of 14 agents had never produced a concept.
 
 ## Running flush manually
 

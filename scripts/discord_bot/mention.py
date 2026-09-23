@@ -14,6 +14,19 @@ from pathlib import Path
 from .claude_invoke import sanitize_untrusted_text
 from . import honcho_client
 from . import memory_telemetry as _mem
+from . import progress_log as _progress
+
+# The wiki's read side lives with the hooks (stdlib-only, shared with the
+# UserPromptSubmit hook). Import failure degrades to "no wiki context" and is
+# counted by the telemetry the module itself emits, so it cannot hide.
+try:
+    import sys as _sys
+    _HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
+    if _HOOKS_DIR not in _sys.path:
+        _sys.path.insert(0, _HOOKS_DIR)
+    import wiki_recall as _wiki
+except Exception:  # pragma: no cover - exercised only when the repo layout breaks
+    _wiki = None
 
 _logger = logging.getLogger("nb_discord.mention")
 
@@ -375,6 +388,31 @@ def _luna_notes_block() -> str:
     )
 
 
+def _progress_block(agent_id: str) -> str:
+    """Recent progress.md entries for this agent, or "" when there are none.
+
+    A missing file is recorded as ok with chars=0, not as a failure: it means
+    no non-empty session has closed for this agent since the log shipped.
+    Only a read error is ok=False. See progress_log.py for why (the
+    lessons_digest lesson).
+    """
+    try:
+        text, status = _progress.read_recent(agent_id)
+    except Exception as exc:  # the reader never raises, but a turn must not depend on that
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=False,
+                    detail=f"{type(exc).__name__}: {exc}"[:160])
+        return ""
+    if status in ("missing", "empty"):
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=True,
+                    chars=0, detail=f"progress.md {status}")
+        return ""
+    if status != "ok":
+        _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=False, detail=status)
+        return ""
+    _mem.record(_mem.RETRIEVE, _progress.STORE, agent_id=agent_id, ok=True, chars=len(text))
+    return _progress.render_block(agent_id, sanitize_untrusted_text(text, "progress-log"))
+
+
 # ----------- Echo profile auto-inject (Phase 5) -----------
 #
 # Echo (the self-knowledge agent) maintains profile files at
@@ -596,6 +634,20 @@ def format_discord_history(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+WIKI_RECALL_BUDGET_CHARS = 1800
+
+
+def _wiki_recall_block(agent_id: str, message_content: str) -> str:
+    """Ranked concept articles for this message, or "" when none match."""
+    if _wiki is None:
+        _mem.record(_mem.UTILIZE, "wiki_recall", agent_id=agent_id, ok=False,
+                    detail="hooks/wiki_recall.py not importable")
+        return ""
+    block, _hits = _wiki.recall(message_content or "", agent_id=agent_id,
+                                budget_chars=WIKI_RECALL_BUDGET_CHARS)
+    return block
+
+
 def build_mention_prompt(
     template: str,
     *,
@@ -609,6 +661,12 @@ def build_mention_prompt(
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
     sanitized_definition = sanitize_untrusted_text(agent_definition, "agent-definition")
+    # Related wiki concepts, ranked against the clean user message rather than
+    # the rendered template (which would match on its own boilerplate). Goes
+    # in as a data block near the top so the shared substrate is visible before
+    # the agent's own stores. Records one UTILIZE event per turn either way;
+    # see hooks/wiki_recall.py for why an empty result is still "ok".
+    wiki_block = _wiki_recall_block(agent_id, message_content)
     rendered = (
         template
         .replace("{agent_id}", agent_id)
@@ -618,6 +676,9 @@ def build_mention_prompt(
         .replace("{message}", sanitized_message)
         .replace("{conversation_log_path}", conversation_log_path)
     )
+    if wiki_block:
+        rendered = wiki_block + rendered
+
     # Echo's voice profile auto-injected for voice-mirroring agents
     # (content, social, luna). Lets them reference Andy's voice without a
     # tool call. Phase 5 of the Echo build.
@@ -625,6 +686,13 @@ def build_mention_prompt(
         echo_prefix = _echo_voice_block()
         if echo_prefix:
             rendered = echo_prefix + rendered
+
+    # Every agent: the append-only progress log, the narrative half of the
+    # consolidated note store (docs/MEMORY_CONSOLIDATION.md, Step 1). Prepended
+    # before notes.md so it reads *behind* the notes in the final prompt.
+    progress_prefix = _progress_block(agent_id)
+    if progress_prefix:
+        rendered = progress_prefix + rendered
 
     # Luna gets her own working-memory file auto-injected on top of Echo's
     # voice profile. Echo gives her stylistic mirror; her notes give her

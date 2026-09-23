@@ -85,8 +85,68 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     override), it should not propagate into every subprocess where a tool
     call might surface it. flush.py uses the keychain directly via
     discord_post.send(), so the env var is unnecessary here regardless.
+
+    Also sets NB_SKIP_WIKI_RECALL=1: the flush prompt is a fixed extraction
+    template and must not have wiki concepts appended to it by the
+    UserPromptSubmit hook, or the summary starts echoing the wiki back into
+    the daily log it is supposed to feed.
     """
-    return {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env["NB_SKIP_WIKI_RECALL"] = "1"
+    return env
+
+
+def _telemetry(agent: str, *, ok: bool, chars: int = 0, detail: str = "") -> None:
+    """Record one WRITE event for store "flush_daily_log". Never raises.
+
+    Until 2026-09 flush emitted no telemetry, so the memory canary could not
+    tell a flush that had stopped from a fleet that was idle. This is the
+    write half of Layer 4 becoming countable.
+    """
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import memory_telemetry as mem
+        mem.record(mem.WRITE, "flush_daily_log", agent_id=agent, ok=ok, chars=chars, detail=detail)
+    except Exception:
+        return
+
+
+def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -> tuple[bool, str]:
+    """Append this session's entry to the agent's vault progress.md.
+
+    The narrative half of the consolidated note store
+    (docs/MEMORY_CONSOLIDATION.md, Step 1). Never raises; returns (ok, reason).
+    Skipped for unattributed sessions and on machines without the vault.
+    """
+    if agent == schema.UNATTRIBUTED:
+        return False, "unattributed"
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import progress_log
+        entry = progress_log.render_entry(
+            session_id=session_id,
+            decisions=data.get("decisions", []),
+            findings=data.get("findings", []),
+            open_questions=data.get("open_questions", []),
+            source=hook_event,
+        )
+        if not entry:
+            # Nothing narrative to record (e.g. a session that only proposed
+            # concepts). Not a failure of the write path.
+            ok, reason = True, "nothing to log"
+        else:
+            ok, reason = progress_log.append_entry(agent, entry)
+        try:
+            from scripts.discord_bot import memory_telemetry as mem
+            mem.record(mem.WRITE, progress_log.STORE, agent_id=agent, ok=ok,
+                       chars=len(entry) if ok else 0, detail=reason)
+        except Exception:
+            pass
+        return ok, reason
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
@@ -307,10 +367,14 @@ def main() -> int:
         write_failed(args.agent, args.session_id, last_raw, last_err)
         prefix = last_err.split(":", 1)[0] if last_err else "unknown"
         write_queue(args.agent, args.session_id, f"failed:{prefix}")
+        _telemetry(args.agent, ok=False, detail=f"failed:{prefix}")
         return 0
 
     if schema.is_empty_session(parsed):
         write_queue(args.agent, args.session_id, "skipped:empty")
+        # An empty session is a legitimate outcome (gate votes, one-line
+        # sessions), not a failure of the write path, so it counts as ok.
+        _telemetry(args.agent, ok=True, chars=0, detail="skipped:empty")
         return 0
 
     ended_at = utc_iso()
@@ -330,6 +394,8 @@ def main() -> int:
     )
     append_session(args.agent, block, session_n)
     write_queue(args.agent, args.session_id, "flushed")
+    _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
+    _progress_append(args.agent, parsed, args.session_id, args.hook_event)
 
     if not args.no_discord:
         header = f"**Flush** | agent: `{args.agent}` | {ended_at}"
