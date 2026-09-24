@@ -11,6 +11,15 @@ Tracks: issue #8
 Designed to NEVER block the parent CLI shutdown. Failures are recorded
 in _queue.log; flush.py runs out-of-band so a slow LLM call never
 delays Claude Code from exiting cleanly.
+
+Opt-out: every `claude -p` call fires this hook too, including the ones
+this repo makes to itself. Without a stop rule each of those would spawn a
+flush model call whose output nothing reads (a compile gate vote) or, worse,
+whose own `claude -p` fires the hook again (flush summarising its own
+extraction call, recursively, until the growing prompt overflows argv).
+`NB_SKIP_FLUSH=1` in the environment, or the
+`NB_AGENT=compile` marker, makes the hook write a breadcrumb and exit
+without spawning flush. See flush_opt_out().
 """
 
 from __future__ import annotations
@@ -29,6 +38,35 @@ FLUSH_SCRIPT = REPO_ROOT / "hooks" / "flush.py"
 
 sys.path.insert(0, str(REPO_ROOT / "hooks"))
 from schema import KNOWN_AGENTS, UNATTRIBUTED  # noqa: E402
+
+SKIP_FLUSH_ENV = "NB_SKIP_FLUSH"
+COMPILE_MARKER = "compile"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def flush_opt_out(env: "os._Environ[str] | dict[str, str] | None" = None) -> str | None:
+    """Return a breadcrumb status if this session must not spawn flush, else None.
+
+    Two signals, checked in this order:
+
+      1. NB_SKIP_FLUSH=1 (generic). Set by scripts/compile.py on every gate
+         and concept-writer call, and by hooks/flush.py on its own extraction
+         call so a flush never summarises a flush. Anything else in this repo
+         that shells to `claude -p` and does not want a daily-log entry for
+         that call should set it.
+      2. NB_AGENT=compile (the marker compile.py has always stamped). Kept as
+         a second trigger so a compile run is skipped even if the env is
+         assembled by hand without the generic flag.
+
+    A skipped session leaves a `skipped:*` line in _queue.log, so the audit
+    trail still shows the hook ran; it just did not spend a model call.
+    """
+    env = os.environ if env is None else env
+    if env.get(SKIP_FLUSH_ENV, "").strip().lower() in _TRUTHY:
+        return f"skipped:{SKIP_FLUSH_ENV}"
+    if env.get("NB_AGENT", "").strip().lower() == COMPILE_MARKER:
+        return "skipped:compile_session"
+    return None
 
 
 def resolve_agent(payload: dict) -> str:
@@ -117,6 +155,10 @@ def main() -> int:
     hook_event = payload.get("hook_event_name", "SessionEnd")
     agent = resolve_agent(payload)
 
+    skip = flush_opt_out()
+    if skip:
+        write_breadcrumb(agent, session_id, skip)
+        return 0
     if not transcript_path:
         write_breadcrumb(agent, session_id, "failed:no_transcript_path")
         return 0

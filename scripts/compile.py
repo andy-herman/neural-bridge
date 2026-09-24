@@ -340,12 +340,17 @@ def strip_code_fences(text: str) -> str:
 def _subprocess_env_for_compile_claude() -> dict[str, str]:
     """Environment for compile.py-spawned `claude -p` subprocesses.
 
-    Sets NB_AGENT=compile as a marker on the spawned session. "compile" is
-    deliberately not in schema.KNOWN_AGENTS, so the SessionEnd hook files
-    these sessions under daily-logs/_unattributed/, which
-    find_daily_log_files() skips: the compiler never ingests summaries of
-    its own gate calls. (An earlier version of this docstring claimed the
-    opposite; the code never did that.)
+    Sets NB_SKIP_FLUSH=1 so the SessionEnd hook that fires at the end of
+    every gate and concept-writer call does not spawn flush.py. Until
+    2026-09-23 each of those calls cost a second model call to summarise a
+    single gate vote into daily-logs/_unattributed/, which nothing reads.
+
+    Also sets NB_AGENT=compile as a marker on the spawned session. "compile"
+    is deliberately not in schema.KNOWN_AGENTS: if a flush ever does run for
+    one of these sessions it files under _unattributed/, which
+    find_daily_log_files() skips, so the compiler never ingests summaries of
+    its own gate calls. The SessionEnd hook also treats the marker itself as
+    a skip signal, so either variable alone is enough.
 
     Sets NB_NO_DISCORD=1 so flush.py writes the daily-log entry but
     skips the Discord post — a 70-candidate dry-run otherwise floods
@@ -358,6 +363,7 @@ def _subprocess_env_for_compile_claude() -> dict[str, str]:
     """
     env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
     env["NB_AGENT"] = "compile"
+    env["NB_SKIP_FLUSH"] = "1"
     env["NB_NO_DISCORD"] = "1"
     # The filing gate and concept writer must see exactly the prompt they were
     # calibrated against. Without this the repo's UserPromptSubmit hook would

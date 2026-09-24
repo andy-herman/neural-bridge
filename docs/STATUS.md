@@ -15,7 +15,7 @@ A four-agent audit found that the memory layer, the substrate's stated reason to
 - Five memory stores still overlap for facts about Andy (notes.md, progress.md, Honcho, daily logs via SessionStart, conversation archive). The consolidation doc's Step 4 decides Honcho; retiring the SessionStart daily-log injection in favour of progress.md is the next candidate.
 - `feat/proactive-surface-on-relevance` on origin is orphan history from May whose idea (inject related prior turns) is now covered by `wiki_recall`; the branch can be deleted.
 - ADR-001's auto-memory ingestion (`compile.py` reading `~/.claude/memory/`) was decided in May and never implemented.
-- Each gate vote spawned by `compile.py` still triggers a flush model call into `_unattributed/`, which nothing reads (flagged on PR #162 for a decision).
+- ~~Each gate vote spawned by `compile.py` still triggers a flush model call into `_unattributed/`, which nothing reads.~~ Resolved 2026-09-23: `session_end.py` honours `NB_SKIP_FLUSH=1` (and the `NB_AGENT=compile` marker); `compile.py` sets it on every gate call and `flush.py` on its own extraction call. The latter closed a second, worse case found while fixing the first: hooks fire for nested `claude -p` sessions, so a flush was summarising its own extraction call, recursively.
 
 ## 2026-07-09 — Docs truth pass
 
