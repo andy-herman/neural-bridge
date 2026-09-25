@@ -305,6 +305,14 @@ if __name__ == "__main__":
 class TestWikiRecallInjection(unittest.TestCase):
     TEMPLATE = "AGENT={agent_id}\nMSG={message}\n"
 
+    def setUp(self):
+        # These tests assert on the exact prompt, so the research agent's real
+        # progress log must not ride along when the vault exists on this machine.
+        from scripts.discord_bot import mention
+        progress_patch = patch.object(mention._progress, "read_recent", return_value=("", "missing"))
+        progress_patch.start()
+        self.addCleanup(progress_patch.stop)
+
     def _build(self, message: str) -> str:
         return build_mention_prompt(
             self.TEMPLATE, agent_id="research", agent_definition="def",
