@@ -2,8 +2,13 @@
 
 Walks `~/.claude/projects/<project-id>/<session-id>.jsonl` for projects on
 the whitelist, extracts user turns, and appends them to
-`~/Documents/Luna Master/Andy Profile/claude-transcripts.md`. Dedupes by
+`~/Documents/Luna Master/Andy Profile/.claude-transcripts.md`. Dedupes by
 session-id + line number via a sidecar file so re-runs are idempotent.
+
+The corpus is a dotfile on purpose. Obsidian skips hidden files, so it never
+indexes it and Obsidian Sync never uploads it. As a visible 9 MB note it ran
+Obsidian's indexer out of memory and crashed the vault on every launch
+(2026-09-25).
 
 Whitelist semantics: opt-in by project-id. Andy edits
 `Luna Master/Andy Profile/.transcript-whitelist.txt`. Default whitelist
@@ -17,6 +22,9 @@ Filter rules:
 - Skip system-injected wrappers (`<task-notification>`, `<system-reminder>`,
   `<ide_selection>`, `<local-command-stdout>`, `<command-...>`)
 - Skip the standard "Caveat:" boilerplate that local-command sessions inject
+- Skip prompts Andy's own automation sends through `claude -p` (flush.py hook,
+  Luna check-ins, Honcho peer cards, weekly lessons). They land as user turns
+  but aren't his voice.
 
 Usage:
     python -m scripts.echo.ingest_claude_transcripts            # actual ingest
@@ -24,7 +32,7 @@ Usage:
     python -m scripts.echo.ingest_claude_transcripts --verbose  # log per-session counts
 
 After it runs, Echo's next corpus pass will see the new content in
-`claude-transcripts.md`.
+`.claude-transcripts.md`.
 """
 
 from __future__ import annotations
@@ -38,7 +46,7 @@ from pathlib import Path
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 VAULT_PROFILE_DIR = Path.home() / "Documents" / "Luna Master" / "Andy Profile"
 WHITELIST_PATH = VAULT_PROFILE_DIR / ".transcript-whitelist.txt"
-OUTPUT_PATH = VAULT_PROFILE_DIR / "claude-transcripts.md"
+OUTPUT_PATH = VAULT_PROFILE_DIR / ".claude-transcripts.md"  # dotfile so Obsidian doesn't index it
 DEDUPE_SIDECAR = VAULT_PROFILE_DIR / ".transcript-ingested.txt"
 
 # Projects on the default whitelist if no whitelist file exists yet.
@@ -61,6 +69,12 @@ SYSTEM_PREFIXES = (
     "<bash-input>",
     "<bash-stdout>",
     "<bash-stderr>",
+    # Prompts Andy's own automation sends via `claude -p`. They land as user
+    # turns but made up ~90% of the corpus by 2026-09-25.
+    "# Flush prompt",
+    "## Honcho peer card",
+    "You are Luna, Andy's executive assistant.",
+    "# Weekly lessons-learned summarization prompt",
 )
 
 # Truncate any single user turn beyond this. Long pastes get marked.
@@ -189,7 +203,7 @@ def render_entry(turn: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ingest Claude transcripts into Echo's corpus.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Plan only — don't write to claude-transcripts.md or dedupe sidecar.")
+                        help="Plan only — don't write to .claude-transcripts.md or dedupe sidecar.")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Per-session counts and progress.")
     args = parser.parse_args(argv)
