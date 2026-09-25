@@ -275,6 +275,14 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self._orig_queue = flush.QUEUE_LOG
         flush.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
         flush.QUEUE_LOG = flush.DAILY_LOGS_DIR / "_queue.log"
+        # main() appends to the agent's vault progress.md. Point it at a vault
+        # that does not exist, or on any machine that has the real one these
+        # tests write "Chose X" into Agents/research/progress.md (they did,
+        # 2026-09-25). Tests that exercise the append patch it again locally.
+        progress_patch = patch("scripts.discord_bot.progress_log.AGENTS_BASE",
+                               self.tmp_path / "no-vault")
+        progress_patch.start()
+        self.addCleanup(progress_patch.stop)
         self.transcript = self.tmp_path / "transcript.jsonl"
         self.transcript.write_text('{"role":"user","content":"hi"}\n', encoding="utf-8")
 

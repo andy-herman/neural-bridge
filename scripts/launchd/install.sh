@@ -108,8 +108,19 @@ install_agent() {
     fi
 }
 
+# NB_INSTALL_SKIP: space-separated labels to leave alone. auto_reload.sh
+# passes its own label, because re-bootstrapping the job that is running this
+# script kills it mid-install: the one reload before 2026-09-25 stopped at
+# "unloading first..." and never installed the agents after it in this list.
+skip=" ${NB_INSTALL_SKIP:-} "
+
 failed=0
 for label in "${AGENTS[@]}"; do
+    if [[ "${skip}" == *" ${label} "* ]]; then
+        echo "Skipping ${label} (NB_INSTALL_SKIP)"
+        echo ""
+        continue
+    fi
     if ! install_agent "${label}"; then
         failed=$((failed + 1))
     fi
