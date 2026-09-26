@@ -1,9 +1,10 @@
 # Memory consolidation: design, held ready
 
-**Status: partially executed (2026-09-22).** Steps 1, 2, and 3 are done and
-Step 5 is decided. Steps 4 and the G2 decision wait on telemetry that only
-exists on the Mac Mini; `python -m scripts.memory_canary --gates --days 30`
-answers each remaining gate in one command. See "Execution record" at the end.
+**Status: executed except G2 (2026-09-25).** Steps 1 to 5 are done or
+decided. G2 (voice profile for three agents or Luna only) is instrumented and
+waits on attributed reads; Step 6 is the re-measure. `python -m
+scripts.memory_canary --gates --days 30` answers each gate in one command. See
+"Execution record" at the end.
 
 Phase 0 of the roadmap calls for collapsing the memory stack into "one durable
 progress log plus one bounded, human-readable note store, re-read at session
@@ -191,6 +192,69 @@ every Discord turn was flushed as `_unattributed`, which `compile.py` skips.
 
 Stores after this pass: `notes.md` (curated, injected), `progress.md`
 (narrative, injected), `repo_wiki` (compiled concepts, injected on relevance),
-`honcho` (injected, pending G3), `echo_profile` (injected, pending G2),
+`honcho` (injected, kept per G3), `echo_profile` (injected, pending G2),
 `conversation_log` and `semantic_index` (retrieval-only). `session_store` is
 not memory.
+
+### 2026-09-25: deployed, the write path repaired, Step 4 decided
+
+**The 2026-09-22 work had never run on the Mac.** The auto-reload watcher had
+exited 1 on every tick since 2026-05-13 (fixed in #164), so #162 and #163 sat
+undeployed until today. Once deployed, the canary showed `flush_daily_log`
+FAILING, which exposed two defects that had kept the write side of the whole
+pipeline dead:
+
+- **flush ran on the wrong route.** It is the SessionEnd hook of every agent
+  turn and inherits that turn's environment, which points at the copilot-api
+  proxy. Its model is `claude-sonnet-5`, and Claude 5 models fail through
+  Claude Code on the proxy: 400, "does not support assistant message
+  prefill" (copilot-api's log held 456 of these). So no agent turn has ever
+  produced a daily log or a progress entry, and compile had nothing to read.
+- **The direct route was poisoned by `~/.hermes/.env`.** Since 2026-08-16 the
+  Telegram bridges load it, and its `ANTHROPIC_API_KEY` has no credit. Any key
+  or base URL overrides the Claude Code login, so a direct call spawned under
+  it failed with "Credit balance is too low".
+
+`hooks/claude_env.py` now owns the route policy, and every call pins its route
+whatever it inherited. Andy chose to keep the memory pipeline off Max limits,
+so flush, compile and lint now run on the copilot-api proxy on
+`claude-opus-4.8` (`PIPELINE_MODEL`), the fleet's own route and model; tests
+fail if a pipeline model is one the proxy rejects. The fleet's proxy branch
+forces its placeholder key instead of letting an inherited one win, and the
+loop engineer's direct branch strips inherited keys. Verified end to end:
+flush, run inside a simulated agent turn with a foreign base URL and the
+`.env` key both inherited, made a real call on the proxy and wrote a correct
+progress entry (decision, three findings, open question) from a synthetic
+research session.
+
+The filing gate was calibrated on `claude-sonnet-5` (#158), so the model change
+was checked with `scripts/eval_filing_gate.py` (votes=3, 15 cases) on
+`claude-opus-4.8`: 14/15 passed, `attack_admitted` 0 and `false_admit` 0, so
+no injection, poison, thin or self-promoting case got in. `benign_blocked` 1:
+`borderline-attack-catalog` was quarantined instead of promoted, the safe
+direction and a tuning signal only. No Sonnet 5 run was ever recorded, so
+there is no baseline to diff against; this run is now the baseline.
+
+- **Step 4 decided: keep Honcho injected (G3).** Peer card non-empty in 194 of
+  197 retrieves (98.5%, 2026-08-15 to 2026-09-25), above the 90% bar. On
+  content, the card is mostly facts `notes.md` does not hold (employer, next
+  role, expertise, sponsor, the career strategist), and it is the only
+  about-Andy context for the twelve agents that are not Luna, so it does not
+  restate the note store.
+- **G2 still open, now answerable.** All 37 `echo_voice` reads on record carry
+  no agent, so the gate could not be decided; it used to print "keep for all
+  three" anyway. Reads are now attributed, unattributed ones no longer vote,
+  and the gate reports "undecided" until attributed reads exist. Decide after
+  30 days of them.
+- **G4 no longer reports "dead" for a window with no evidence.** It now calls
+  the wiki dead only when agent turns ran under the code that reads it
+  (`progress_log` retrieves, logged beside every wiki read) and none read it.
+  Otherwise it says "undecided".
+- **Step 6, what to watch.** After the next real agent turns, the daily canary
+  should show `flush_daily_log` and `progress_log` healthy and `--gates` should
+  list agents under progress_log adoption. The first nightly compile after a
+  flushed turn should turn `compile_concepts` healthy. If flush fails again,
+  the canary's FAIL line now carries the head of the API error (it used to
+  show only `exit_1`), and the full output is in
+  `daily-logs/<agent>/_failed/<session>.txt`.
+
