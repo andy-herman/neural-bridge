@@ -38,7 +38,8 @@ This note follows the standard weekly review template: status, decisions, risks,
 The tomatoes finally split after the heavy rain, so the last of them went into a sauce with the basil that survived the aphids. Next year the beds along the fence need more afternoon shade and a drip line on a timer.
 """
 
-# The sentence both notes share: discounted as boilerplate, so quoting it is fine.
+# The sentence both notes share. The guard does not discount text that also
+# appears in unmarked notes, so quoting it is blocked like any marked passage.
 BOILERPLATE = ("This note follows the standard weekly review template: status, decisions, risks, "
                "next checkpoint, and owners for each open action item.")
 
@@ -83,9 +84,8 @@ class SyntheticGuard:
     as a context manager or from setUpModule/tearDownModule.
     """
 
-    def __init__(self, marked=None, unmarked=None, marking_phrases=None, policy_folders=()):
+    def __init__(self, marked=None, marking_phrases=None, policy_folders=()):
         self.marked = list(marked) if marked is not None else [("tag", MARKED_NOTE)]
-        self.unmarked = list(unmarked) if unmarked is not None else [UNMARKED_NOTE]
         self.marking_phrases = list(marking_phrases or [MARKING_PHRASE, MARKING_TAG])
         self.policy_folders = list(policy_folders)
         self._tmp: tempfile.TemporaryDirectory | None = None
@@ -114,8 +114,7 @@ class SyntheticGuard:
         return self
 
     def rebuild(self) -> dict:
-        return og.build_index(self.marked, self.unmarked, og.load_policy(), og.load_or_create_key(),
-                              self.index_path)
+        return og.build_index(self.marked, og.load_policy(), og.load_or_create_key(), self.index_path)
 
     @property
     def index_path(self) -> Path:

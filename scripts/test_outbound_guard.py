@@ -121,8 +121,10 @@ class TestControls(unittest.TestCase):
         self.assertTrue(v.allowed)
         self.assertEqual((v.shingle_hits, v.marking_hits), (0, 0))
 
-    def test_boilerplate_shared_with_unmarked_notes_is_discounted(self):
-        self.assertTrue(_check(BOILERPLATE).allowed)
+    def test_marked_text_that_also_sits_in_an_unmarked_note_stays_protected(self):
+        # No discount: the leak check dropped shingles found in unmarked notes,
+        # but agents write unmarked notes, so a discount would launder quotes.
+        self.assertFalse(_check(BOILERPLATE).allowed)
 
     def test_marking_words_apart_pass(self):
         self.assertTrue(_check("Zephyrine sent the internal memo only on Friday.").allowed)
@@ -305,21 +307,36 @@ class TestPolicyAndKey(unittest.TestCase):
 
 
 def _stub_gate():
-    """A stand-in for Gemma GRC's gate: frontmatter `marked: <category>` marks a note."""
+    """A stand-in for Gemma GRC's gate: frontmatter `marked: <category>` marks a
+    note, and clean() resolves [[target|alias]] links to their alias, as
+    vault_ingest.clean() does."""
+    import re
+
     def gate_note(raw):
         for line in raw.splitlines():
             if line.startswith("marked: "):
                 return False, line.split(": ", 1)[1].strip(), None
         return True, None, "unlabelled"
-    return SimpleNamespace(gate_note=gate_note, read_note=lambda p: p.read_text(encoding="utf-8"),
-                           clean=lambda raw: "\n".join(l for l in raw.splitlines() if not l.startswith("marked: ")))
+
+    def clean(raw):
+        body = "\n".join(l for l in raw.splitlines() if not l.startswith("marked: "))
+        return re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]", r"\1", body)
+
+    return SimpleNamespace(gate_note=gate_note, read_note=lambda p: p.read_text(encoding="utf-8"), clean=clean)
+
+
+# Invented, link-dense marked text: every few words is an aliased wikilink.
+LINKED_NOTE = ("marked: label\nThe [[Harbour Survey Index|harbour]] survey found the [[Gauge Log|tidal gauges]] "
+               "drift every winter after the [[Storm Notes|storms]] shift the silt banks toward the eastern "
+               "[[Channel Markers|channel markers]], so the [[Pilot Rota|pilots]] now check them twice a month.")
 
 
 class TestBuildFromVault(unittest.TestCase):
     def setUp(self):
-        self.guard = SyntheticGuard(policy_folders=["Committee Drafts"]).install()
+        self.guard = SyntheticGuard(policy_folders=["committee drafts"]).install()  # case differs on disk
         self.vault = self.guard.root / "vault"
         self._note("Work/memo.md", "marked: tag\n" + MARKED_NOTE)
+        self._note("Work/linked.md", LINKED_NOTE)
         self._note("Committee Drafts/item.md", "Unmarked by the gate but inside a policy folder. " + FILLER)
         self._note("Notes/garden.md", "Unmarked. The garden note. " + BOILERPLATE)
         self._note(".trash/old.md", "marked: tag\nThe quick brown fox jumps over the lazy dog while the "
@@ -336,8 +353,9 @@ class TestBuildFromVault(unittest.TestCase):
 
     def test_walk_marks_gate_hits_and_policy_folders(self):
         counts = og.build_from_vault(vault=self.vault, gate=_stub_gate())
-        self.assertEqual(counts["marked_by_category"], {"policy-folder": 1, "tag": 1})
-        self.assertEqual(counts["notes_scanned"], 3)  # .trash is skipped, as in leak_scan.py
+        self.assertEqual(counts["marked_by_category"], {"label": 1, "policy-folder": 1, "tag": 1})
+        self.assertEqual(counts["notes_scanned"], 4)  # .trash is skipped, as in leak_scan.py
+        self.assertEqual(counts["policy_folder_notes"], [1])
         og._CACHE.clear()
         gate_hit = _check(marked_excerpt(20))
         self.assertFalse(gate_hit.allowed)
@@ -348,7 +366,35 @@ class TestBuildFromVault(unittest.TestCase):
         trash = ("quick brown fox jumps over the lazy dog while the patient heron waits beside the "
                  "silver pond for a careless minnow")
         self.assertTrue(_check(trash).allowed)  # 20 words that would block if .trash were indexed
-        self.assertTrue(_check(BOILERPLATE).allowed)
+        self.assertFalse(_check(BOILERPLATE).allowed)  # also in an unmarked note: still protected
+
+    def test_an_agent_quoting_a_marked_note_does_not_unprotect_it(self):
+        # The daemon archives Discord turns into unmarked vault notes. A quote
+        # landing there must not clear the passage at the next rebuild.
+        self._note("Agents/luna/conversations/2026-09-25.md", "Luna: here is the memo, " + marked_excerpt(40))
+        og.build_from_vault(vault=self.vault, gate=_stub_gate())
+        og._CACHE.clear()
+        v = _check(marked_excerpt(40))  # not planted: FILLER is marked in this vault
+        self.assertFalse(v.allowed)
+        self.assertEqual(v.shingle_hits, 29)
+
+    def test_raw_markdown_and_rendered_quotes_both_block(self):
+        og.build_from_vault(vault=self.vault, gate=_stub_gate())
+        og._CACHE.clear()
+        raw = LINKED_NOTE.split("\n", 1)[1]
+        rendered = _stub_gate().clean(raw)
+        for form in (raw, rendered):
+            with self.subTest(form=form[:30]):
+                self.assertFalse(_check(planted(form)).allowed)
+
+    def test_policy_folder_matching_nothing_fails_the_build_without_naming_it(self):
+        self.guard.policy_file.write_text(json.dumps({"marking_phrases": [MARKING_PHRASE],
+                                                      "policy_folders": ["Committee Drafts", "Nowhere Folder"]}),
+                                          encoding="utf-8")
+        with self.assertRaises(og.BuildError) as ctx:
+            og.build_from_vault(vault=self.vault, gate=_stub_gate())
+        self.assertIn("2 of 2", str(ctx.exception))
+        self.assertNotIn("nowhere", str(ctx.exception).lower())
 
     def test_missing_vault_refuses(self):
         with self.assertRaises(og.BuildError):
@@ -526,9 +572,42 @@ class TestCheckPush(unittest.TestCase):
         self._commit("notes.md", "fine\n", "fine")
         self.assertFalse(og.check_push(self._run_git, surface="test", extra=marked_excerpt(20)).allowed)
 
+    def test_content_only_in_a_merge_commit_is_screened(self):
+        self._commit("a.md", "fine\n", "a")
+        _git(self.work, "checkout", "-b", "side")
+        self._commit("b.md", "also fine\n", "b")
+        _git(self.work, "checkout", "feature")
+        _git(self.work, "merge", "--no-ff", "--no-commit", "side")
+        (self.work / "c.md").write_text(planted(marked_excerpt(20)) + "\n", encoding="utf-8")
+        _git(self.work, "add", "--", "c.md")
+        ok, _ = _git(self.work, "commit", "-m", "merge side")
+        self.assertTrue(ok)
+        self.assertFalse(og.check_push(self._run_git, surface="test").allowed)
+
+    def test_commits_already_on_another_remote_still_count(self):
+        _git(self.guard.root, "-c", "init.defaultBranch=main", "init", "--bare", "backup.git")
+        _git(self.work, "remote", "add", "backup", str(self.guard.root / "backup.git"))
+        self._commit("notes.md", planted(marked_excerpt(20)) + "\n", "add")
+        ok, _ = _git(self.work, "push", "backup", "feature")
+        self.assertTrue(ok)  # on backup, not on origin: a push to origin still publishes it
+        self.assertFalse(og.check_push(self._run_git, surface="test").allowed)
+
+    def test_diff_attributes_cannot_hide_content(self):
+        (self.work / ".gitattributes").write_text("notes.md -diff\n", encoding="utf-8")
+        _git(self.work, "add", "--", ".gitattributes")
+        self._commit("notes.md", planted(marked_excerpt(20)) + "\n", "add")
+        self.assertFalse(og.check_push(self._run_git, surface="test").allowed)
+
     def test_git_failure_blocks(self):
         v = og.check_push(lambda args: (False, ""), surface="test")
         self.assertEqual((v.allowed, v.reason), (False, "error:git"))
+
+    def test_git_exception_blocks(self):
+        def undecodable(args):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        v = og.check_push(undecodable, surface="test")
+        self.assertEqual((v.allowed, v.reason), (False, "error:git"))
+        self.assertIn("could not screen", v.describe())
 
 
 class TestRefresh(unittest.TestCase):

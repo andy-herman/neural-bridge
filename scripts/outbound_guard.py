@@ -10,12 +10,19 @@ does, on both routes, and fails closed.
 Method (the vault leak check's, in Gemma GRC scripts/leak_scan.py): every note
 the corpus gate marks (non-public classification labels, private or
 confidential flags and tags, handling banners), plus every note under the
-private policy folders, is cut into 12-word shingles. Shingles that also occur
-in unmarked notes are dropped as shared boilerplate. Outbound text is blocked
-when it shares THRESHOLD or more distinctive shingle occurrences with that
-index, which takes a verbatim run of about 14 words (shorter runs and
-paraphrase are below the floor), or when it contains a private marking phrase.
-A missing, stale, corrupt or mismatched index blocks everything.
+private policy folders, is cut into 12-word shingles, from both its raw
+markdown and its cleaned text. Outbound text is blocked when it shares
+THRESHOLD or more shingle occurrences with that index, which takes a verbatim
+run of about 14 words (shorter runs and paraphrase are below the floor), or
+when it contains a private marking phrase. A missing, stale, corrupt or
+mismatched index blocks everything.
+
+One deliberate difference from the leak check: shingles that also occur in
+unmarked notes are NOT discounted. Agents write unmarked notes (conversation
+archives, session notes), so a discount would let a single quote of a marked
+passage unprotect it at the next rebuild. Measured 2026-09-25, the discount
+covered 789 shingles, mostly copies in agent-written notes, and prevented no
+false positive on this repo or the published blog.
 
 Nothing sensitive lives in this repo or in the index:
   - The marking phrases and policy folders sit in a private policy file
@@ -46,6 +53,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from array import array
 from bisect import bisect_left
 from collections import Counter
@@ -75,6 +83,7 @@ MAGIC = b"NBOG1\n"
 SKIP_PARTS = (".trash", ".obsidian")     # as leak_scan.py
 
 CONTENT_REASONS = frozenset({"shingles", "marking", "shingles+marking"})
+INDEX_REASONS = frozenset({"no-index", "stale-index", "bad-index", "no-key", "key-mismatch"})
 
 if array("Q").itemsize != 8 or array("I").itemsize != 4:  # pragma: no cover
     raise ImportError("outbound_guard needs 8-byte 'Q' and 4-byte 'I' arrays")
@@ -183,9 +192,11 @@ class Verdict:
             cats = f" ({', '.join(self.categories)})" if self.categories else ""
             return (f"outbound guard blocked this text: {self.shingle_hits} shingle(s) from "
                     f"{self.notes_hit} marked note(s){cats}, {self.marking_hits} marking phrase(s){ref}")
-        age = f", index {self.index_age_hours:.1f}h old" if self.index_age_hours is not None else ""
-        return (f"outbound guard blocked this text: index unusable ({self.reason}{age}), failing closed; "
-                f"rebuild with `python scripts/outbound_guard.py build`{ref}")
+        if self.reason in INDEX_REASONS:
+            age = f", index {self.index_age_hours:.1f}h old" if self.index_age_hours is not None else ""
+            return (f"outbound guard blocked this text: index unusable ({self.reason}{age}), failing closed; "
+                    f"rebuild with `python scripts/outbound_guard.py build`{ref}")
+        return f"outbound guard could not screen this text ({self.reason}), failing closed{ref}"
 
     def record(self, surface: str) -> dict:
         return {"ts": _utc_now(), "surface": surface, "allowed": self.allowed, "reason": self.reason,
@@ -430,16 +441,22 @@ def readiness() -> Verdict:
 GitRunner = Callable[[list[str]], "tuple[bool, str]"]
 
 
-def pending_push_text(run_git: GitRunner) -> str | None:
-    """Everything a push of HEAD would publish that no remote has yet: commit
-    messages, file paths and added lines of every unpushed commit. None when
-    git cannot say, which callers must treat as blocked."""
-    ok, messages = run_git(["log", "--format=%B", "HEAD", "--not", "--remotes"])
-    if not ok:
-        return None
-    ok, patch = run_git(["log", "-p", "--no-renames", "--no-color", "--no-ext-diff", "--format=",
-                         "HEAD", "--not", "--remotes"])
-    if not ok:
+def pending_push_text(run_git: GitRunner, remote: str = "origin") -> str | None:
+    """Everything a push of HEAD to `remote` would publish that it does not
+    have yet: commit messages, file paths and added lines of every unpushed
+    commit, merge commits included (against their first parent), with
+    binary, -diff and textconv attributes overridden so no content hides.
+    None when git cannot say, which callers must treat as blocked."""
+    unpushed = ["HEAD", "--not", f"--remotes={remote}"]
+    try:
+        ok, messages = run_git(["log", "--format=%B", *unpushed])
+        if not ok:
+            return None
+        ok, patch = run_git(["log", "-p", "--text", "--no-textconv", "--no-ext-diff", "--no-renames",
+                             "--diff-merges=first-parent", "--no-color", "--format=", *unpushed])
+        if not ok:
+            return None
+    except Exception:  # e.g. undecodable output: cannot screen, so block
         return None
     parts = [messages]
     for line in patch.splitlines():
@@ -450,10 +467,10 @@ def pending_push_text(run_git: GitRunner) -> str | None:
     return "\n".join(parts)
 
 
-def check_push(run_git: GitRunner, *, surface: str, extra: str = "") -> Verdict:
+def check_push(run_git: GitRunner, *, surface: str, extra: str = "", remote: str = "origin") -> Verdict:
     """Screen what a push would publish (plus `extra`, e.g. the PR title and
     body) as one item. Call after the commit, before `git push`."""
-    text = pending_push_text(run_git)
+    text = pending_push_text(run_git, remote)
     if text is None:
         verdict = Verdict(False, "error:git")
         _audit(surface, verdict)
@@ -504,41 +521,33 @@ def load_or_create_key(path: Path | None = None) -> bytes:
     return key
 
 
-def build_index(marked: list[tuple[str, str]], unmarked: Iterable[str], policy: Policy,
-                key: bytes, out: Path, *, notes_scanned: int | None = None) -> dict:
-    """Write an index for `marked` notes, given as (gate category, cleaned text)
-    pairs, discounting shingles that also occur in the `unmarked` texts.
-    Returns counts only."""
+def build_index(marked: list[tuple[str, str | tuple[str, ...]]], policy: Policy, key: bytes, out: Path,
+                *, notes_scanned: int | None = None, extra_counts: dict | None = None) -> dict:
+    """Write an index for `marked` notes, given as (gate category, text) pairs.
+    The text may be a tuple of forms (e.g. cleaned and raw markdown); every
+    form's shingles are indexed. Returns counts only."""
     categories = sorted({cat for cat, _ in marked} | {"policy-folder"})
     if len(categories) > 256:
         raise BuildError("too many gate categories")
     cat_index = {cat: i for i, cat in enumerate(categories)}
     owner: dict[int, int] = {}
     note_cats = bytearray()
-    for note_id, (cat, text) in enumerate(marked):
+    for note_id, (cat, forms) in enumerate(marked):
         note_cats.append(cat_index[cat])
-        for d in _shingles(norm_words(text), key):
-            owner.setdefault(d, note_id)
-    shared: set[int] = set()
-    unmarked_notes = 0
-    for text in unmarked:
-        unmarked_notes += 1
-        for d in _shingles(norm_words(text), key):
-            if d in owner:
-                shared.add(d)
-    distinct = sorted(d for d in owner if d not in shared)
+        for form in ((forms,) if isinstance(forms, str) else forms):
+            for d in _shingles(norm_words(form), key):
+                owner.setdefault(d, note_id)
+    digests = sorted(owner)
     phrases = [" ".join(norm_words(p)) for p in policy.marking_phrases]
     marking = array("Q", sorted({_digest(key, p) for p in phrases}))
     built_at = time.time()
     counts = {
-        "notes_scanned": notes_scanned if notes_scanned is not None else len(marked) + unmarked_notes,
+        "notes_scanned": notes_scanned if notes_scanned is not None else len(marked),
         "marked_notes": len(marked),
         "marked_by_category": dict(sorted(Counter(cat for cat, _ in marked).items())),
-        "unmarked_notes": unmarked_notes,
-        "marked_shingles": len(owner),
-        "discounted": len(shared),
-        "distinctive": len(distinct),
+        "shingles": len(digests),
         "marking_phrases": len(marking),
+        **(extra_counts or {}),
     }
     header = {
         "format": FORMAT, "n": N, "threshold": THRESHOLD,
@@ -549,7 +558,7 @@ def build_index(marked: list[tuple[str, str]], unmarked: Iterable[str], policy: 
         "marking_lengths": sorted({len(p.split()) for p in phrases}),
         "counts": counts,
     }
-    _write_index(out, header, array("Q", distinct), array("I", (owner[d] for d in distinct)),
+    _write_index(out, header, array("Q", digests), array("I", (owner[d] for d in digests)),
                  bytes(note_cats), marking)
     return counts
 
@@ -568,44 +577,60 @@ def _import_gate():
     return vault_ingest
 
 
+def _fold(path: str) -> str:
+    """Case- and Unicode-form-insensitive path, for policy-folder matching."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
 def build_from_vault(*, vault: Path | None = None, policy: Policy | None = None,
                      out: Path | None = None, gate=None) -> dict:
     """Walk the vault as leak_scan.py does and write the index. `gate` must
-    offer gate_note(), read_note() and clean(); the default is Gemma GRC's."""
+    offer gate_note(), read_note() and clean(); the default is Gemma GRC's.
+
+    Each marked note is indexed from both its cleaned text (what a reader
+    sees) and its raw markdown (what a tool that reads the file sees), so
+    links and embeds cannot break a quoted run apart. A policy folder that
+    matches no note fails the build, so a typo cannot unprotect a folder.
+    """
     vault = Path(vault or vault_path())
     if not vault.is_dir():
         raise BuildError(f"vault not found at {vault}")
     policy = policy or load_policy()
     gate = gate or _import_gate()
     key = load_or_create_key()
-    marked: list[tuple[str, str]] = []
-    unmarked_paths: list[Path] = []
+    folders = [_fold(f) for f in policy.policy_folders]
+    folder_notes = [0] * len(folders)
+    marked: list[tuple[str, tuple[str, str]]] = []
     scanned = 0
     for path in sorted(vault.rglob("*.md")):
         rel = path.relative_to(vault)
         if any(part in SKIP_PARTS for part in rel.parts):
             continue
         scanned += 1
+        in_folders = [i for i, f in enumerate(folders) if _fold(rel.as_posix()).startswith(f)]
+        for i in in_folders:
+            folder_notes[i] += 1
         raw = gate.read_note(path)
         ok, reason, _ = gate.gate_note(raw)
         if not ok:
-            marked.append((str(reason).split(":")[0], gate.clean(raw)))
-        elif rel.as_posix().startswith(policy.policy_folders):
-            marked.append(("policy-folder", gate.clean(raw)))
-        else:
-            unmarked_paths.append(path)
+            marked.append((str(reason).split(":")[0], (gate.clean(raw), raw)))
+        elif in_folders:
+            marked.append(("policy-folder", (gate.clean(raw), raw)))
     if not scanned:
         raise BuildError(f"no notes found under {vault}")
+    empty = [str(i + 1) for i, n in enumerate(folder_notes) if n == 0]
+    if empty:  # by position, not name: the names are private
+        raise BuildError(f"policy folder(s) {', '.join(empty)} of {len(folders)} matched no notes; "
+                         f"check the policy file")
     if not marked:
         raise BuildError("no marked notes found; refusing to build an index that would clear everything")
-    unmarked = (gate.clean(gate.read_note(p)) for p in unmarked_paths)
-    return build_index(marked, unmarked, policy, key, out or state_dir() / INDEX_FILE,
-                       notes_scanned=scanned)
+    return build_index(marked, policy, key, out or state_dir() / INDEX_FILE, notes_scanned=scanned,
+                       extra_counts={"policy_folder_notes": folder_notes})
 
 
 def refresh(timeout: int = BUILD_TIMEOUT) -> tuple[bool, str]:
-    """Rebuild in a child process, which keeps the vault walk's memory (a few
-    hundred MB at peak) out of long-running callers. Returns (ok, one line)."""
+    """Rebuild in a child process, which keeps the vault walk (and Gemma GRC's
+    modules) out of long-running callers. Returns (ok, one line)."""
     try:
         proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "build"],
                               capture_output=True, text=True, timeout=timeout,
@@ -662,9 +687,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # the type only: a message could quote a note
             print(f"outbound guard build failed: {type(exc).__name__}", file=sys.stderr)
             return 1
-        print(f"outbound guard index built: {c['marked_notes']} marked notes, {c['distinctive']} "
-              f"distinctive shingles ({c['discounted']} discounted), {c['marking_phrases']} marking "
-              f"phrases, {c['notes_scanned']} notes scanned")
+        print(f"outbound guard index built: {c['marked_notes']} marked notes, {c['shingles']} shingles, "
+              f"{c['marking_phrases']} marking phrases, {c['notes_scanned']} notes scanned")
         return 0
     if args.cmd == "status":
         s = status()

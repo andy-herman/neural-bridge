@@ -15,61 +15,73 @@ screened outbound text for marked material. A read-only leak check on
 
 ## What it blocks
 
-The method is the vault leak check's, reused unchanged:
+The method is the vault leak check's, with one deliberate change:
 
 1. Every vault note that the corpus gate marks is cut into 12-word shingles.
    The gate is Gemma GRC's `gate_note()`: non-public classification labels,
    private or confidential flags and tags, and handling banners. Notes under
-   private policy folders are added to the marked set too.
-2. Shingles that also occur in unmarked notes are dropped as shared
-   boilerplate. What remains is the distinctive set.
-3. An outbound item is blocked when it shares **3 or more** distinctive
-   shingle occurrences with that set, which takes a verbatim run of about 14
-   words. It is also blocked when it contains any private marking phrase.
-   Matching ignores case, punctuation, markdown and line breaks, so
-   reformatting a passage does not hide it.
-4. **Fail closed.** A missing index blocks everything. So does a stale one
+   private policy folders are added to the marked set too. Both the raw
+   markdown and the cleaned text are indexed, so a quote copied with its
+   links still matches.
+2. An outbound item is blocked when it shares **3 or more** shingle
+   occurrences with that set, which takes a verbatim run of about 14 words.
+   It is also blocked when it contains any private marking phrase. Matching
+   ignores case, punctuation, markdown and line breaks, so reformatting a
+   passage does not hide it.
+3. **Fail closed.** A missing index blocks everything. So does a stale one
    (older than 24 hours), a corrupt one, or one built with a different hash
    key.
+
+**The change: no discount.** The leak check dropped shingles that also occur
+in unmarked notes, treating them as shared boilerplate. That is safe for a
+one-off audit and unsafe for a live guard. Agents write unmarked notes all the
+time (conversation archives, session notes), so one quote of a marked passage
+would unprotect it at the next hourly rebuild. Measured on 2026-09-25, the
+discount covered 789 shingles, three quarters of them copies in AI-written
+session notes. It prevented no false positive on this repo or on the
+published blog.
 
 ### Validation, 2026-09-25, real vault, counts only
 
 | Control | Result |
 |---|---|
-| 20-word excerpts from marked notes, planted in filler | 30/30 blocked |
-| 40-word excerpts | 29/30 blocked |
-| 14-word excerpts (the floor) | 28/30 blocked |
+| 40-word excerpts from marked notes, planted in filler | 30/30 blocked |
+| 20-word excerpts | 30/30 blocked, and 10/10 for every gate category |
+| 14-word excerpts (the floor) | 30/30 blocked |
 | 13-word excerpts (below the floor) | 0/30 blocked |
 | Whole marked notes | all blocked |
 | Every marking phrase, in four formats each | all blocked |
 | 20-word excerpts from unmarked notes | 0/200 blocked |
-| Every tracked text file in this repo | 0/296 blocked |
+| Every tracked text file in this repo | 0/297 blocked |
+| Every tracked text file in the published blog | 0/219 blocked |
 
-The few misses at 14 and 40 words fall in text that also appears verbatim in
-an unmarked note. The method discounts that text by design (0.8% of marked
-shingles). Across 600 further random excerpts, one missed, for that reason.
 A check takes about 2 ms for an issue body and about 120 ms for a 35,000-word
-PR.
+PR. A rebuild takes about 2 seconds.
 
 ### What it does not catch
 
 - Paraphrase, and verbatim runs shorter than about 14 words.
-- Text that also appears verbatim in an unmarked note (see above).
 - A note marked since the last index rebuild (at most an hour on the daemon's
   schedule).
-- Anything outside the two routes: Discord and Telegram messages, the loop
-  engineer (not installed; it pushes through its own code), and anything
-  pushed by hand.
-- Binary files in a push.
+- Anything outside the two routes: Discord and Telegram messages (except the
+  compile summary, which carries the same screened lines as `log.md`), the
+  loop engineer (not installed; it pushes through its own code), direct agent
+  edits to tracked `knowledge/` files outside `concepts/` and `quarantine/`,
+  and anything pushed by hand.
+
+The opposite trade-off, from dropping the discount: public text that also
+sits inside a marked note is blocked too. An example is a regulation
+paragraph that a private note also quotes. When that happens, rephrase, or
+check it and publish by hand.
 
 ## Where it runs
 
 | Route | Code | What is screened |
 |---|---|---|
-| Wiki | `compile.py` | Each concept, quarantine and connection file, and the new lines of `log.md` and `index.md`. Dry runs screen the same text, so they preview what a live run would block. |
+| Wiki | `compile.py` | Each concept, quarantine and connection file, and the new lines of `log.md` and `index.md`. The Discord run summary carries the same screened lines. Dry runs screen the same text, so they preview what a live run would block. |
 | GitHub | `github_client.py` | Issue title and body, comments, closing comments, issue body edits. `/triage` now posts its comment through here too. |
-| GitHub | `pr_proposals.py` | The whole proposal (branch, commit message, title, body, file paths and contents) when it is staged, again before execution touches the working tree, and finally everything the push would publish (every unpushed commit) plus the PR text, between the commit and `git push`. |
-| GitHub | `agent_builder.py` | Every agent-supplied field before any git or file change, then the push itself, between the commit and `git push`. |
+| GitHub | `pr_proposals.py` | The whole proposal (branch, commit message, title, body, file paths and contents) when it is staged, and again before execution touches the working tree. Finally, between the commit and `git push`: everything the push to origin would publish (every unpushed commit, merges included, with `-diff` and binary attributes overridden) plus the PR text. It commits only its own paths. |
+| GitHub | `agent_builder.py` | Every agent-supplied field before any git or file change, then the push itself, between the commit and `git push`. It stages and commits only the files it writes. |
 
 When something is blocked, nothing is published:
 
@@ -79,7 +91,9 @@ When something is blocked, nothing is published:
   digest-only placeholder.
 - **compile, guard unusable:** The whole run exits 1 before any model call,
   writes nothing, and leaves `last_run_at` alone. Those logs are then compiled
-  on the next healthy run instead of being skipped.
+  on the next healthy run instead of being skipped. If the guard fails
+  partway through a run, the run stops: what already landed is kept, and
+  `last_run_at` stays put.
 - **GitHub:** The gh call never runs, and the Discord reply carries the
   counts. A refused push keeps the local branch, unpushed, for inspection.
 
@@ -87,7 +101,7 @@ When something is blocked, nothing is published:
 
 | What | Where | Notes |
 |---|---|---|
-| Private policy | `~/.config/neural-bridge/outbound-guard.json` | Mode 600, outside the repo, never committed. Holds `marking_phrases` and `policy_folders`. Read only when the index is built. |
+| Private policy | `~/.config/neural-bridge/outbound-guard.json` | Mode 600, outside the repo, never committed. Holds `marking_phrases` and `policy_folders`. Read only when the index is built. Folder matching ignores case, and a folder that matches no note fails the build. |
 | Hash key | `~/.config/neural-bridge/outbound-guard.key` | Mode 600. Created on the first build. |
 | Index | `data/outbound_guard/index.bin` | Gitignored, mode 600. Keyed blake2b 8-byte digests and counts; no text. |
 | Audit log | `data/outbound_guard/audit.jsonl` | One line per check: surface, verdict, counts, digest. No text. |
@@ -114,7 +128,7 @@ Policy file shape (placeholder values):
 ## Operations
 
 - **Refresh.** The daemon rebuilds the index at startup and then hourly, in a
-  child process (about 6 seconds). `compile.py` rebuilds any index older than
+  child process (about 2 seconds). `compile.py` rebuilds any index older than
   an hour before it runs. A failed rebuild is logged, and the last good index
   is used until it ages out, after which everything is refused.
 - **Rebuild by hand:** `.venv/bin/python scripts/outbound_guard.py build`
@@ -131,16 +145,24 @@ Policy file shape (placeholder values):
 
 ## Tests
 
-- `scripts/test_outbound_guard.py`: positive and negative controls
-  (40/20/14-word excerpts block, 13 words passes, boilerplate is discounted,
-  marking phrases block in any format), every fail-closed case, and checks
-  that no index file, audit line or message carries text. It also covers the
-  CLI, push screening against a real temporary git remote, and Gemma GRC's
-  real corpus gate on a synthetic vault (skipped when gemma-grc is absent).
+- `scripts/test_outbound_guard.py` covers:
+  - Positive and negative controls: 40, 20 and 14-word excerpts block, 13
+    words passes, and marking phrases block in any format.
+  - The laundering case: an agent-written note quoting a marked passage must
+    not unprotect it.
+  - Raw-markdown quotes, and every fail-closed case.
+  - That no index file, audit line or message carries text.
+  - The CLI, and Gemma GRC's real corpus gate on a synthetic vault (skipped
+    when gemma-grc is absent).
+  - Push screening against a real temporary git remote: merges, a second
+    remote, and `-diff` attributes.
 - `scripts/discord_bot/test_outbound_guard_wiring.py`: every daemon GitHub
-  path, and the refresh loop.
-- `scripts/test_compile.py` (`TestOutboundGuardWiring`): every write under
-  `knowledge/`, and the refusal to run with an unusable guard.
+  path, the refresh loop, no echo of refused text, and `execute_proposal`
+  end to end on a real temporary repo.
+- `scripts/test_compile.py` (`TestOutboundGuardWiring`) covers:
+  - Every write under `knowledge/`, and the Discord summary.
+  - The refusal to run with an unusable guard, and the stop when the guard
+    fails mid-run.
 
 Every fixture is invented (`scripts/outbound_guard_testing.py`), because this
 repo is public. Test modules that reach guarded code install a synthetic index
