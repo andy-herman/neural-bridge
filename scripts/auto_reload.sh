@@ -5,6 +5,8 @@
 # Triggers a daemon reload when files in any of these paths changed since the
 # last poll:
 #   - scripts/discord_bot/*       (the daemon code itself)
+#   - scripts/outbound_guard.py, scripts/fleet_heartbeat.py
+#                                 (top-level modules the daemon imports)
 #   - hooks/*                     (KNOWN_AGENTS + flush logic loaded at session boundaries)
 #   - plugins/neural-bridge-core/agents/*  (charter changes)
 #   - scripts/launchd/*           (plist edits — install.sh re-bootstraps)
@@ -179,7 +181,7 @@ DAEMON_RELEVANT=0
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-        scripts/discord_bot/*|scripts/telegram_bot/*|scripts/luna/*|scripts/env_file.py|hooks/*|plugins/neural-bridge-core/agents/*|scripts/launchd/*)
+        scripts/discord_bot/*|scripts/telegram_bot/*|scripts/luna/*|scripts/env_file.py|scripts/outbound_guard.py|scripts/fleet_heartbeat.py|hooks/*|plugins/neural-bridge-core/agents/*|scripts/launchd/*)
             DAEMON_RELEVANT=1
             break
             ;;
