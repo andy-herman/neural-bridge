@@ -226,6 +226,22 @@ class TestAgentBuilder(unittest.TestCase):
                 gh.assert_not_called()
                 self.assertEqual(list(ab.AGENTS_DIR.iterdir()), [])
 
+    def test_only_the_files_it_wrote_are_staged(self):
+        calls = []
+
+        def fake_git(args, cwd=None, timeout=30):
+            calls.append(args)
+            return True, ""
+
+        with mock.patch.object(ab, "_git", side_effect=fake_git), \
+             mock.patch.object(ab, "_gh", return_value=(True, "https://github.com/x/y/pull/9")):
+            result = ab.execute_create_agent(_agent_action(), "x/y")
+        self.assertTrue(result.ok, result.error)
+        adds = [a for a in calls if a[0] == "add"]
+        self.assertEqual(adds, [["add", "--", str(ab.AGENTS_DIR / "zz-guard-test.md"), str(ab.SESSION_END),
+                                 str(ab.SCHEMA_PY), str(ab.MARKETPLACE_JSON), str(ab.PLUGIN_JSON)]])
+        self.assertIn(["push", "-u", "origin", "feat/agent-zz-guard-test"], calls)
+
     def test_push_is_screened_after_commit_and_refused(self):
         calls = []
 

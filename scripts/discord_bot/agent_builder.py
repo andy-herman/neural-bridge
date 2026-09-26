@@ -350,8 +350,13 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
         except (ValueError, FileNotFoundError) as exc:
             skipped.append(f"agents.json update failed: {exc}")
 
-    # git add / commit / push.
-    ok, msg = _git(["add", "-A"])
+    # git add / commit / push. Stage only the files this action wrote: `git
+    # add -A` would sweep anything else in the daemon's checkout (run logs,
+    # drafts, local notes) into a branch that is public once pushed.
+    touched = [target, SESSION_END, SCHEMA_PY, MARKETPLACE_JSON, PLUGIN_JSON]
+    if agents_json_updated:
+        touched.append(AGENTS_JSON)
+    ok, msg = _git(["add", "--", *(str(path) for path in touched)])
     if not ok:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git add failed: {msg}")
     agents_json_line = (
