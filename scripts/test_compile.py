@@ -1623,6 +1623,49 @@ class TestOutboundGuardWiring(unittest.TestCase):
         self.assertIn("BLOCKED-OUTBOUND log line withheld", log_text)
         self.assertNothingMarkedPublished()
 
+    def test_discord_summary_carries_only_screened_lines(self):
+        def reason(prompt):
+            return f"Rejected because it repeats {marked_excerpt(20)}" if "leaky-concept" in prompt else "not durable"
+
+        sent = []
+        with patch("compile.subprocess.run", side_effect=_gate("REJECT", reason)), \
+             patch("compile.discord_post.send", side_effect=sent.append), \
+             patch.object(sys, "argv", ["compile.py", "--no-dry-run", "--votes", "1"]):
+            self.assertEqual(cmp.main(), 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("BLOCKED-OUTBOUND log line withheld", sent[0])
+        self.assertIn("REJECT clean-concept: not durable", sent[0])
+        for word in SECRET_WORDS + ("leaky-concept",):
+            self.assertNotIn(word, sent[0].lower())
+
+    def test_guard_failing_mid_run_stops_and_keeps_last_run_at(self):
+        self._write_log(["alpha-concept: The first harmless summary", "beta-concept: The second harmless summary"])
+        cmp.COMPILE_STATE_FILE.write_text(json.dumps(
+            {"last_run_at": "2026-01-01T00:00:00Z", "compiled_concepts": {}}), encoding="utf-8")
+        real_enforce = og.enforce
+        calls = {"concept": 0}
+
+        def index_ages_out_after_alpha(text, *, surface):
+            if surface == "wiki:concept":
+                calls["concept"] += 1
+                if calls["concept"] == 3:  # beta's first check: alpha took two
+                    raise og.OutboundBlocked(og.Verdict(False, "stale-index", index_age_hours=24.5))
+            return real_enforce(text, surface=surface)
+
+        original_log = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")), \
+             patch.object(cmp.outbound_guard, "enforce", side_effect=index_ages_out_after_alpha), \
+             patch.object(cmp, "_telemetry") as tel:
+            rc = self._run_main("--no-dry-run", "--no-rich-body", "--since", "2026-01-01")
+        self.assertEqual(rc, 1)
+        state = json.loads(cmp.COMPILE_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["last_run_at"], "2026-01-01T00:00:00Z")  # not advanced
+        self.assertEqual(sorted(state["compiled_concepts"]), ["alpha-concept"])  # what landed is kept
+        self.assertEqual([p.stem for p in cmp.CONCEPTS_DIR.glob("*.md")], ["alpha-concept"])
+        self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original_log)
+        self.assertFalse(tel.call_args.kwargs["ok"])
+        self.assertIn("mid_run:stale-index", tel.call_args.kwargs["detail"])
+
     def test_unavailable_guard_refuses_the_whole_run(self):
         original_log = cmp.WIKI_LOG.read_text(encoding="utf-8")
         with patch.dict(os.environ, {og.ENV_DIR: str(self.tmp_path / "no-guard-state")}), \

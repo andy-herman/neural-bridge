@@ -386,7 +386,9 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
         f"{'4' if agents_json_updated else '5'}. Generate invite URL with the new client_id and authorize\n"
         f"{'5' if agents_json_updated else '6'}. Reload daemon: ./scripts/launchd/install.sh"
     )
-    ok, msg = _git(["commit", "-m", commit_msg])
+    # Commit only those paths, too: anything else already staged in the shared
+    # checkout (a parallel terminal's work) stays out of the agent's commit.
+    ok, msg = _git(["commit", "-m", commit_msg, "--", *(str(path) for path in touched)])
     if not ok:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git commit failed: {msg}")
 

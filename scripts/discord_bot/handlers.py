@@ -545,6 +545,8 @@ async def _execute_action_batch(
                 )
                 if r.ok:
                     results.append(f"✅ Created #{r.issue_number}: `{action['title'][:60]}` → {r.issue_url}")
+                elif (r.error or "").startswith("outbound guard"):
+                    results.append(f"❌ create_issue: `{r.error}`")  # no title echo: it may be the marked text
                 else:
                     results.append(f"❌ create_issue (`{action['title'][:40]}…`): `{r.error}`")
             elif atype == "comment":
@@ -1141,6 +1143,8 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
                 if r.ok:
                     filed_issues.append((item, r.issue_number, r.issue_url))
                     log(f"SQUAD_DISCUSS issue filed #{r.issue_number} ({item.owner}: {item.action[:40]!r})")
+                elif (r.error or "").startswith("outbound guard"):
+                    log(f"SQUAD_DISCUSS issue REFUSED for an action item ({item.owner}): {r.error}")
                 else:
                     log(f"SQUAD_DISCUSS issue file FAILED for action ({item.owner}: {item.action[:40]!r}): {r.error}")
             except Exception as exc:

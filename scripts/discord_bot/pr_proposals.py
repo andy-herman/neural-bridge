@@ -516,7 +516,9 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
         ok, msg = _git(cwd, ["add", "--", rel_path])
         if not ok:
             return ExecutionResult(ok=False, error=f"git add {rel_path} failed: {msg}")
-    ok, msg = _git(cwd, ["commit", "-m", proposal.commit_message])
+    # Commit only these paths: anything else already staged in the shared
+    # checkout (a parallel terminal's work) stays out of the agent's commit.
+    ok, msg = _git(cwd, ["commit", "-m", proposal.commit_message, "--", *sorted(proposal_paths)])
     if not ok:
         return ExecutionResult(ok=False, error=f"git commit failed: {msg}")
     # Last check before anything is public: exactly what the push would

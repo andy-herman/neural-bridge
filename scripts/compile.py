@@ -30,8 +30,10 @@ screens for poisoning, not confidentiality. Every write under knowledge/
 (concept, quarantine, connection, and the new lines of log.md and index.md)
 first passes scripts/outbound_guard.py, which blocks text from marked vault
 notes and fails closed. Dry runs screen the same text, so they preview what a
-live run would block. A blocked candidate is logged by source session and
-digest only, never by slug or text.
+live run would block. In knowledge/log.md and the Discord summary (which
+carry the same screened lines), a blocked candidate is named by source session
+and digest only, never by slug or text. If the guard itself fails mid-run, the
+run stops without advancing last_run_at.
 
 Usage:
   python3 scripts/compile.py                     # dry-run by default
@@ -784,8 +786,10 @@ LOG_DATE_HEADING_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
 INDEX_CONCEPTS_HEADING_RE = re.compile(r"^## Concepts\s*$", re.MULTILINE)
 
 
-def _screened_log_bullets(run_summary: str, action_lines: list[str]) -> tuple[list[str], int]:
-    """The bullets append_to_log may publish, screened by the outbound guard.
+def _screened_log_bullets(run_summary: str, action_lines: list[str],
+                          dry_run: bool = False) -> tuple[list[str], int]:
+    """The run's bullets as they may leave the machine, screened by the
+    outbound guard. knowledge/log.md and the Discord summary both use them.
 
     Only the new lines are screened (log.md accumulates). They go through as
     one item; if that is blocked, each action line is screened on its own and
@@ -795,21 +799,38 @@ def _screened_log_bullets(run_summary: str, action_lines: list[str]) -> tuple[li
     anything at all.
     """
     bullets = ["- " + run_summary] + [f"  {line}" for line in action_lines]
-    verdict = outbound_guard.check("\n".join(bullets), surface="wiki:log")
+    verdict = outbound_guard.check("\n".join(bullets), surface=_surface("log", dry_run))
     if verdict.allowed:
         return bullets, 0
     if verdict.reason not in outbound_guard.CONTENT_REASONS:
         raise outbound_guard.OutboundBlocked(verdict)
     kept, withheld = ["- " + run_summary], 0
     for line in action_lines:
-        line_verdict = outbound_guard.check(line, surface="wiki:log-line")
+        line_verdict = outbound_guard.check(line, surface=_surface("log-line", dry_run))
         if line_verdict.allowed:
             kept.append(f"  {line}")
         else:
             withheld += 1
             kept.append(f"  - BLOCKED-OUTBOUND log line withheld [ref {line_verdict.ref}]")
-    outbound_guard.enforce("\n".join(kept), surface="wiki:log")
+    outbound_guard.enforce("\n".join(kept), surface=_surface("log", dry_run))
     return kept, withheld
+
+
+def _append_log_bullets(bullets: list[str]) -> None:
+    """Write already-screened bullets under today's heading in knowledge/log.md."""
+    if not WIKI_LOG.exists():
+        return  # log.md is hand-curated; respect its absence
+    today = utc_today()
+    text = WIKI_LOG.read_text(encoding="utf-8")
+
+    headings = list(LOG_DATE_HEADING_RE.finditer(text))
+    if headings and headings[-1].group(1) == today:
+        # Append under existing today section.
+        body = text.rstrip() + "\n" + "\n".join(bullets) + "\n"
+    else:
+        # New dated block.
+        body = text.rstrip() + f"\n\n## {today}\n\n" + "\n".join(bullets) + "\n"
+    WIKI_LOG.write_text(body, encoding="utf-8")
 
 
 def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> int:
@@ -827,18 +848,8 @@ def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> i
         return 0
     if not WIKI_LOG.exists():
         return 0  # log.md is hand-curated; respect its absence
-    new_bullets, withheld = _screened_log_bullets(run_summary, action_lines)
-    today = utc_today()
-    text = WIKI_LOG.read_text(encoding="utf-8")
-
-    headings = list(LOG_DATE_HEADING_RE.finditer(text))
-    if headings and headings[-1].group(1) == today:
-        # Append under existing today section.
-        body = text.rstrip() + "\n" + "\n".join(new_bullets) + "\n"
-    else:
-        # New dated block.
-        body = text.rstrip() + f"\n\n## {today}\n\n" + "\n".join(new_bullets) + "\n"
-    WIKI_LOG.write_text(body, encoding="utf-8")
+    bullets, withheld = _screened_log_bullets(run_summary, action_lines)
+    _append_log_bullets(bullets)
     return withheld
 
 
@@ -1153,6 +1164,9 @@ def main() -> int:
         f"Agent scope: {args.agent or 'ALL'}",
         "",
     ]
+    suffix = "-dry-run" if args.dry_run else ""
+    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
+    guard_down: outbound_guard.Verdict | None = None  # guard failed for a reason other than content
 
     for cand in candidates:
         if cand.slug in state["compiled_concepts"] and not args.dry_run:
@@ -1196,9 +1210,12 @@ def main() -> int:
             try:
                 outbound_guard.enforce(text, surface=_surface("concept", args.dry_run))
             except outbound_guard.OutboundBlocked as blocked:
+                if blocked.verdict.reason not in outbound_guard.CONTENT_REASONS:
+                    guard_down = blocked.verdict
+                    break
                 counts["blocked_outbound"] += 1
                 run_log_lines.append(_blocked_line("concept", cand, blocked.verdict))
-                log_line(args.verbose, f"BLOCKED-OUTBOUND {cand.slug}: {blocked.verdict.describe()}")
+                log_line(args.verbose, run_log_lines[-1])
                 continue
 
             # Phase B: never-overwrite. If a concept already exists, archive
@@ -1217,8 +1234,12 @@ def main() -> int:
                     archived.rename(CONCEPTS_DIR / f"{cand.slug}.md")
                     counts["archived"] -= 1
                     run_log_lines.pop()
+                if blocked.verdict.reason not in outbound_guard.CONTENT_REASONS:
+                    guard_down = blocked.verdict
+                    break
                 counts["blocked_outbound"] += 1
                 run_log_lines.append(_blocked_line("concept", cand, blocked.verdict))
+                log_line(args.verbose, run_log_lines[-1])
                 continue
             counts[PROMOTE] += 1
             promoted_slugs.append(cand.slug)
@@ -1235,9 +1256,12 @@ def main() -> int:
             try:
                 target = write_quarantine(cand, gate, dry_run=args.dry_run)
             except outbound_guard.OutboundBlocked as blocked:
+                if blocked.verdict.reason not in outbound_guard.CONTENT_REASONS:
+                    guard_down = blocked.verdict
+                    break
                 counts["blocked_outbound"] += 1
                 run_log_lines.append(_blocked_line("quarantine", cand, blocked.verdict))
-                log_line(args.verbose, f"BLOCKED-OUTBOUND {cand.slug}: {blocked.verdict.describe()}")
+                log_line(args.verbose, run_log_lines[-1])
                 continue
             counts[QUARANTINE] += 1
             run_log_lines.append(f"- QUARANTINE {cand.slug} -> {target.relative_to(REPO_ROOT)} ({gate['reason']})")
@@ -1251,6 +1275,22 @@ def main() -> int:
         else:  # REJECT
             counts[REJECT] += 1
             run_log_lines.append(f"- REJECT {cand.slug}: {gate['reason']} (checks: {', '.join(gate['checks_triggered'])})")
+
+    if guard_down is not None:
+        # The guard stopped clearing anything mid-run (e.g. the index aged
+        # out). Keep what already landed, but leave last_run_at where it was,
+        # so the remaining candidates are compiled on the next healthy run
+        # instead of being skipped for good.
+        print(f"error: {guard_down.describe()}. Stopped mid-run; last_run_at left unchanged.",
+              file=sys.stderr)
+        run_log_lines.append(f"- STOPPED: outbound guard unusable mid-run ({guard_down.reason})")
+        if not args.dry_run:
+            write_compile_state(state)
+            _telemetry(ok=False, chars=counts[PROMOTE] + counts[QUARANTINE],
+                       detail=f"outbound_guard_unavailable_mid_run:{guard_down.reason}")
+        DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
+        run_log_path.write_text("\n".join(run_log_lines) + "\n", encoding="utf-8")
+        return 1
 
     state["last_run_at"] = utc_iso()
     if not args.dry_run:
@@ -1291,14 +1331,22 @@ def main() -> int:
     if counts["blocked_outbound"]:
         summary += f" blocked_outbound={counts['blocked_outbound']}"
 
+    # One screening for everything that leaves the machine: knowledge/log.md
+    # (public) and the Discord summary (third party) carry the same lines.
+    # The local run log in docs/compile/ (gitignored) keeps the full detail.
     log_action_lines = [line for line in run_log_lines if line.startswith("- ")]
     try:
-        withheld = append_to_log(summary, log_action_lines, dry_run=args.dry_run)
-        if withheld:
-            run_log_lines.append(f"- NOTE {withheld} line(s) withheld from knowledge/log.md by the outbound guard")
+        bullets, withheld = _screened_log_bullets(summary, log_action_lines, dry_run=args.dry_run)
     except outbound_guard.OutboundBlocked as blocked:
+        bullets, withheld = None, 0
         run_log_lines.append(f"- BLOCKED-OUTBOUND knowledge/log.md update: {blocked.verdict.describe()}")
         print(f"warning: knowledge/log.md not updated: {blocked.verdict.describe()}", file=sys.stderr)
+    if bullets is not None and not args.dry_run:
+        _append_log_bullets(bullets)
+    if withheld:
+        run_log_lines.append(f"- NOTE {withheld} line(s) withheld from knowledge/log.md and Discord "
+                             f"by the outbound guard")
+    public_action_lines = [b.strip() for b in bullets[1:]] if bullets else []
     try:
         refresh_index(promoted_slugs, dry_run=args.dry_run)
     except outbound_guard.OutboundBlocked as blocked:
@@ -1314,13 +1362,9 @@ def main() -> int:
         gate_ran = landed + counts[REJECT] > 0
         _telemetry(ok=gate_ran or counts["errors"] == 0, chars=landed, detail=summary)
 
-    # Compute the run-log path before the Discord block: the summary references
-    # it when there are more than 10 action lines, and the file itself is written
-    # further down. Defining it here keeps both uses in agreement and avoids a
-    # NameError on runs with >10 candidates and Discord enabled (the default).
-    suffix = "-dry-run" if args.dry_run else ""
-    run_log_path = DRY_RUN_DIR / f"{utc_today()}-compile-run{suffix}.md"
-
+    # run_log_path is computed before the loop: the summary references it when
+    # there are more than 10 action lines, and the file itself is written
+    # further down (and by the mid-run stop above).
     if not args.no_discord:
         mode = "dry-run" if args.dry_run else "live"
         header = f"**Compile run** | {utc_today()} | {mode}"
@@ -1330,12 +1374,12 @@ def main() -> int:
             f"`PROMOTE={counts[PROMOTE]}` `QUARANTINE={counts[QUARANTINE]}` `REJECT={counts[REJECT]}` "
             f"`errors={counts['errors']}` `skipped={counts['skipped_already_compiled']}`",
         ]
-        # First 10 actions for visibility; rest live in the run log on disk.
-        action_lines = [line for line in run_log_lines if line.startswith("- ")][:10]
+        # First 10 screened actions for visibility; the rest live in the run log on disk.
+        action_lines = public_action_lines[:10]
         if action_lines:
             body_lines.append("")
             body_lines.extend(action_lines)
-        if len([line for line in run_log_lines if line.startswith("- ")]) > 10:
+        if len(public_action_lines) > 10:
             body_lines.append(f"_...and more. See `{run_log_path.relative_to(REPO_ROOT)}` for full log._")
         message = discord_post.truncate_for_discord("\n".join(body_lines))
         discord_post.send(message)

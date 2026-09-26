@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -165,8 +166,8 @@ class TestPRProposals(unittest.TestCase):
             calls.append(args)
             if args[0] == "show-ref":
                 return False, "no such ref"
-            if args[0] == "log":  # something unexpected in the unpushed commits
-                return True, LEAK
+            if args[0] == "log" and "-p" in args:  # an unexpected added line in the unpushed commits
+                return True, "diff --git a/x b/x\n+++ b/x\n" + "\n".join(f"+{w}" for w in LEAK.split(". "))
             return True, ""
 
         with mock.patch.object(pp, "_git", side_effect=fake_git), \
@@ -175,8 +176,70 @@ class TestPRProposals(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("nothing pushed", result.error)
         self.assertNotIn("push", [a[0] for a in calls])
-        self.assertIn(["commit", "-m", "docs: notes"], calls)
+        self.assertIn(["commit", "-m", "docs: notes", "--", "src/notes.md"], calls)
         self.assertEqual(calls[-1], ["checkout", "main"])
+
+
+class TestPRProposalAgainstARealRepo(unittest.TestCase):
+    """execute_proposal end to end on a temporary repo and remote; only gh is mocked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.remote, self.work = root / "remote.git", root / "work"
+        self._git(root, "-c", "init.defaultBranch=main", "init", "--bare", str(self.remote))
+        self._git(root, "-c", "init.defaultBranch=main", "init", str(self.work))
+        for key, value in (("user.name", "t"), ("user.email", "t@example.invalid"),
+                           ("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")):
+            self._git(self.work, "config", key, value)
+        self._git(self.work, "remote", "add", "origin", str(self.remote))
+        (self.work / "README.md").write_text("hello\n", encoding="utf-8")
+        self._git(self.work, "add", "README.md")
+        self._git(self.work, "commit", "-m", "initial")
+        self._git(self.work, "push", "-u", "origin", "main")
+        self._orig = repos_mod.REPOS["neural-bridge-blog"]
+        repos_mod.REPOS["neural-bridge-blog"] = repos_mod.Repo(
+            repo_id="neural-bridge-blog", gh_slug="andy-herman/neural-bridge-blog",
+            local_path=self.work, default_branch="main",
+        )
+
+    def tearDown(self):
+        repos_mod.REPOS["neural-bridge-blog"] = self._orig
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _git(cwd, *args):
+        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    def _proposal(self, branch):
+        return pp.PRProposal(proposal_id="e2e00001", agent_id="luna", channel_id=1,
+                             repo=repos_mod.REPOS["neural-bridge-blog"], branch=branch,
+                             files=[("src/notes.md", FILLER)], commit_message="docs: notes",
+                             pr_title="docs: notes", pr_body="body")
+
+    def test_clean_proposal_pushes_only_its_own_paths(self):
+        (self.work / "private.txt").write_text("a parallel terminal's staged work\n", encoding="utf-8")
+        self._git(self.work, "add", "private.txt")
+        with mock.patch.object(pp, "_gh", return_value=(True, "https://github.com/x/y/pull/1")):
+            result = pp.execute_proposal(self._proposal("luna/e2e"))
+        self.assertTrue(result.ok, result.error)
+        pushed = self._git(self.remote, "ls-tree", "-r", "--name-only", "luna/e2e").split()
+        self.assertEqual(sorted(pushed), ["README.md", "src/notes.md"])
+        self.assertIn("A  private.txt", self._git(self.work, "status", "--short"))  # still staged, not pushed
+        self.assertEqual(self._git(self.work, "branch", "--show-current").strip(), "main")
+
+    def test_unpushed_local_commit_with_marked_text_stops_the_push(self):
+        (self.work / "local.md").write_text(LEAK + "\n", encoding="utf-8")
+        self._git(self.work, "add", "local.md")
+        self._git(self.work, "commit", "-m", "local work, never pushed")
+        with mock.patch.object(pp, "_gh", side_effect=AssertionError("no PR may open")):
+            result = pp.execute_proposal(self._proposal("luna/e2e-blocked"))
+        self.assertFalse(result.ok)
+        self.assertIn("nothing pushed", result.error)
+        self.assertNotIn("luna/e2e-blocked", self._git(self.remote, "branch", "--list"))
+        self.assertEqual(self._git(self.work, "branch", "--show-current").strip(), "main")
 
 
 def _agent_action(**over) -> dict:
@@ -237,9 +300,11 @@ class TestAgentBuilder(unittest.TestCase):
              mock.patch.object(ab, "_gh", return_value=(True, "https://github.com/x/y/pull/9")):
             result = ab.execute_create_agent(_agent_action(), "x/y")
         self.assertTrue(result.ok, result.error)
-        adds = [a for a in calls if a[0] == "add"]
-        self.assertEqual(adds, [["add", "--", str(ab.AGENTS_DIR / "zz-guard-test.md"), str(ab.SESSION_END),
-                                 str(ab.SCHEMA_PY), str(ab.MARKETPLACE_JSON), str(ab.PLUGIN_JSON)]])
+        paths = [str(ab.AGENTS_DIR / "zz-guard-test.md"), str(ab.SESSION_END), str(ab.SCHEMA_PY),
+                 str(ab.MARKETPLACE_JSON), str(ab.PLUGIN_JSON)]
+        self.assertEqual([a for a in calls if a[0] == "add"], [["add", "--", *paths]])
+        commit = next(a for a in calls if a[0] == "commit")
+        self.assertEqual(commit[3:], ["--", *paths])  # only these paths, whatever else is staged
         self.assertIn(["push", "-u", "origin", "feat/agent-zz-guard-test"], calls)
 
     def test_push_is_screened_after_commit_and_refused(self):
@@ -247,8 +312,8 @@ class TestAgentBuilder(unittest.TestCase):
 
         def fake_git(args, cwd=None, timeout=30):
             calls.append(args)
-            if args[0] == "log":  # e.g. an unrelated file swept into the commit
-                return True, LEAK
+            if args[0] == "log" and "-p" in args:  # e.g. a local unpushed commit carrying marked text
+                return True, "diff --git a/x b/x\n+++ b/x\n+" + LEAK
             return True, ""
 
         with mock.patch.object(ab, "_git", side_effect=fake_git), \
@@ -258,6 +323,21 @@ class TestAgentBuilder(unittest.TestCase):
         self.assertIn("nothing pushed", result.error)
         self.assertNotIn("push", [a[0] for a in calls])
         self.assertEqual(calls[-1], ["checkout", "main"])
+
+
+class TestHandlerReplies(unittest.TestCase):
+    def test_refused_issue_title_is_not_echoed_to_discord(self):
+        from types import SimpleNamespace
+        from scripts.discord_bot import handlers
+
+        action = {"action": "create_issue", "title": marked_excerpt(20), "body": "see title"}
+        with _no_subprocess():
+            results, _ = asyncio.run(handlers._execute_action_batch(
+                [action], SimpleNamespace(default_repo="x/y"), agent_id="research", channel_id=1))
+        self.assertEqual(len(results), 1)
+        self.assertIn("outbound guard blocked", results[0])
+        for word in SECRET_WORDS + ("routing", "pilot"):
+            self.assertNotIn(word, results[0].lower())
 
 
 class TestDaemonRefreshLoop(unittest.TestCase):
