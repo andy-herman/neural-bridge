@@ -418,6 +418,87 @@ class TestBuildFromVault(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.guard.state_dir.iterdir() if p.name.endswith(".tmp")), [])
 
 
+class TestPublicExemption(unittest.TestCase):
+    """Text already on a public repo's origin branch is exempt; nothing else is."""
+
+    def setUp(self):
+        self.guard = SyntheticGuard().install()
+        self.vault = self.guard.root / "vault"
+        (self.vault / "Work").mkdir(parents=True)
+        (self.vault / "Work" / "memo.md").write_text("marked: tag\n" + MARKED_NOTE, encoding="utf-8")
+        self.repo = self.guard.root / "public-repo"
+        _git(self.guard.root, "-c", "init.defaultBranch=main", "init", str(self.repo))
+        self.published = marked_excerpt(20)
+        self.other = marked_excerpt(20, start_word="recommendation")
+        self._commit("post.md", f"A public post that cites the memo: {self.published}\n")
+        self._publish()
+
+    def tearDown(self):
+        self.guard.remove()
+        og._CACHE.clear()
+
+    def _commit(self, name, text):
+        (self.repo / name).write_text(text, encoding="utf-8")
+        _git(self.repo, "add", "--", name)
+        _git(self.repo, "commit", "-m", name)
+
+    def _publish(self):
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")  # as if pushed
+
+    def _build(self, repos):
+        with mock.patch.dict(os.environ, {og.ENV_PUBLIC: os.pathsep.join(str(r) for r in repos)}):
+            counts = og.build_from_vault(vault=self.vault, gate=_stub_gate())
+        og._CACHE.clear()
+        return counts
+
+    def test_published_text_is_exempt_and_the_rest_stays_protected(self):
+        counts = self._build([self.repo])
+        self.assertEqual((counts["public_files"], counts["public_exempt"]), ([1], 9))
+        self.assertTrue(_check(self.published).allowed)
+        self.assertFalse(_check(self.other).allowed)
+        self.assertFalse(_check(MARKED_NOTE).allowed)
+
+    def test_only_origins_published_content_counts(self):
+        unpushed = marked_excerpt(20, start_word="Finance")
+        uncommitted = marked_excerpt(20, start_word="Open")
+        self._commit("local.md", unpushed + "\n")  # committed, never pushed
+        (self.repo / "post.md").write_text(uncommitted + "\n", encoding="utf-8")  # working tree only
+        self._build([self.repo])
+        self.assertFalse(_check(unpushed).allowed)
+        self.assertFalse(_check(uncommitted).allowed)
+        self.assertTrue(_check(self.published).allowed)  # origin still has it
+
+    def test_missing_clone_or_origin_ref_exempts_nothing(self):
+        counts = self._build([self.guard.root / "no-such-clone"])
+        self.assertEqual((counts["public_files"], counts["public_exempt"]), ([None], 0))
+        _git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        counts = self._build([self.repo])
+        self.assertEqual(counts["public_files"], [None])
+        self.assertFalse(_check(self.published).allowed)
+
+    def test_marking_phrases_are_never_exempt(self):
+        self._commit("tagged.md", f"Published by mistake: {MARKING_PHRASE}\n")
+        self._publish()
+        self._build([self.repo])
+        self.assertEqual(_check(f"again: {MARKING_PHRASE}").reason, "marking")
+
+    def test_binary_files_are_skipped(self):
+        (self.repo / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00" + marked_excerpt(20, "Open").encode())
+        _git(self.repo, "add", "--", "logo.png")
+        _git(self.repo, "commit", "-m", "png")
+        self._publish()
+        counts = self._build([self.repo])
+        self.assertEqual(counts["public_files"], [1])
+        self.assertFalse(_check(marked_excerpt(20, "Open")).allowed)
+
+    def test_default_list_is_this_repo_and_the_blog(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(og.ENV_PUBLIC, None)
+            self.assertEqual(og.public_repos(),
+                             [og.REPO_ROOT, Path.home() / "Development" / "neural-bridge-blog"])
+        self.assertEqual(og.public_repos(), [])  # SyntheticGuard sets it empty
+
+
 class TestCLI(unittest.TestCase):
     def setUp(self):
         self.guard = SyntheticGuard().install()

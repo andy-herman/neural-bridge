@@ -24,6 +24,15 @@ passage unprotect it at the next rebuild. Measured 2026-09-25, the discount
 covered 789 shingles, mostly copies in agent-written notes, and prevented no
 false positive on this repo or the published blog.
 
+What IS exempt: text already published on the default branch of the public
+repos (this repo and the blog, as each local clone's origin ref shows them).
+Republishing it cannot leak anything new, and without the exemption a public
+citation that a marked note happens to repeat (a NIST document title and URL,
+say) would block every later post that cites it. Only origin's committed
+content counts, never the working tree or unpushed commits, and agents can
+only add to it through routes this guard screens. Marking phrases are never
+exempt.
+
 Nothing sensitive lives in this repo or in the index:
   - The marking phrases and policy folders sit in a private policy file
     outside the repo (default ~/.config/neural-bridge/outbound-guard.json,
@@ -74,10 +83,13 @@ ENV_DIR = "NB_OUTBOUND_GUARD_DIR"        # index and audit log
 ENV_POLICY = "NB_OUTBOUND_GUARD_POLICY"  # private policy JSON; the key file sits beside it
 ENV_VAULT = "NB_OUTBOUND_GUARD_VAULT"
 ENV_GATE = "NB_OUTBOUND_GUARD_GATE"      # directory holding Gemma GRC's vault_ingest.py
+ENV_PUBLIC = "NB_OUTBOUND_GUARD_PUBLIC_REPOS"  # os.pathsep-separated clones; set but empty means none
 
 INDEX_FILE = "index.bin"
 AUDIT_FILE = "audit.jsonl"
 AUDIT_MAX_BYTES = 5 * 1024 * 1024
+PUBLIC_MAX_BYTES = 5_000_000             # skip larger published files, as leak_scan.py does
+PUBLIC_REFS = ("refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master")
 FORMAT = 1
 MAGIC = b"NBOG1\n"
 SKIP_PARTS = (".trash", ".obsidian")     # as leak_scan.py
@@ -110,6 +122,14 @@ def vault_path() -> Path:
 
 def gate_dir() -> Path:
     return Path(os.environ.get(ENV_GATE) or Path.home() / "Development" / "gemma-grc" / "scripts")
+
+
+def public_repos() -> list[Path]:
+    """Local clones of the public repos whose published text is exempt."""
+    raw = os.environ.get(ENV_PUBLIC)
+    if raw is None:
+        return [REPO_ROOT, Path.home() / "Development" / "neural-bridge-blog"]
+    return [Path(p) for p in raw.split(os.pathsep) if p]
 
 
 # ---------- errors ----------
@@ -522,10 +542,12 @@ def load_or_create_key(path: Path | None = None) -> bytes:
 
 
 def build_index(marked: list[tuple[str, str | tuple[str, ...]]], policy: Policy, key: bytes, out: Path,
-                *, notes_scanned: int | None = None, extra_counts: dict | None = None) -> dict:
+                *, public: Iterable[str] = (), notes_scanned: int | None = None,
+                extra_counts: dict | None = None) -> dict:
     """Write an index for `marked` notes, given as (gate category, text) pairs.
     The text may be a tuple of forms (e.g. cleaned and raw markdown); every
-    form's shingles are indexed. Returns counts only."""
+    form's shingles are indexed, except shingles that occur in the `public`
+    texts (already published). Returns counts only."""
     categories = sorted({cat for cat, _ in marked} | {"policy-folder"})
     if len(categories) > 256:
         raise BuildError("too many gate categories")
@@ -537,7 +559,10 @@ def build_index(marked: list[tuple[str, str | tuple[str, ...]]], policy: Policy,
         for form in ((forms,) if isinstance(forms, str) else forms):
             for d in _shingles(norm_words(form), key):
                 owner.setdefault(d, note_id)
-    digests = sorted(owner)
+    exempt: set[int] = set()
+    for text in public:
+        exempt.update(d for d in _shingles(norm_words(text), key) if d in owner)
+    digests = sorted(d for d in owner if d not in exempt)
     phrases = [" ".join(norm_words(p)) for p in policy.marking_phrases]
     marking = array("Q", sorted({_digest(key, p) for p in phrases}))
     built_at = time.time()
@@ -546,6 +571,7 @@ def build_index(marked: list[tuple[str, str | tuple[str, ...]]], policy: Policy,
         "marked_notes": len(marked),
         "marked_by_category": dict(sorted(Counter(cat for cat, _ in marked).items())),
         "shingles": len(digests),
+        "public_exempt": len(exempt),
         "marking_phrases": len(marking),
         **(extra_counts or {}),
     }
@@ -582,6 +608,50 @@ def _fold(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
+def _git_bytes(repo: Path, args: list[str], stdin: bytes | None = None) -> bytes | None:
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], input=stdin, capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def public_texts(repo: Path) -> list[str] | None:
+    """Text files on a public repo's published default branch: origin's ref,
+    never the working tree or unpushed commits. None when the clone or its
+    origin ref is missing (then nothing from it is exempt)."""
+    ref = next((r for r in PUBLIC_REFS if _git_bytes(repo, ["rev-parse", "--verify", "--quiet", f"{r}^{{commit}}"])), None)
+    listing = _git_bytes(repo, ["ls-tree", "-r", "-z", "--full-tree", ref]) if ref else None
+    if listing is None:
+        return None
+    shas = []
+    for entry in listing.split(b"\0"):
+        meta, _, _path = entry.partition(b"\t")
+        parts = meta.split(b" ")
+        if len(parts) == 3 and parts[1] == b"blob" and parts[0] in (b"100644", b"100755"):
+            shas.append(parts[2])
+    batch = _git_bytes(repo, ["cat-file", "--batch"], stdin=b"\n".join(shas) + b"\n") if shas else b""
+    if batch is None:
+        return None
+    texts, pos = [], 0
+    while pos < len(batch):
+        header_end = batch.index(b"\n", pos)
+        header = batch[pos:header_end].split(b" ")
+        if len(header) != 3:  # "<sha> missing", e.g. in a partial clone
+            pos = header_end + 1
+            continue
+        size = int(header[2])
+        body = batch[header_end + 1:header_end + 1 + size]
+        pos = header_end + 1 + size + 1
+        if size > PUBLIC_MAX_BYTES or b"\0" in body[:8000]:
+            continue
+        try:
+            texts.append(body.decode("utf-8"))
+        except UnicodeDecodeError:
+            continue
+    return texts
+
+
 def build_from_vault(*, vault: Path | None = None, policy: Policy | None = None,
                      out: Path | None = None, gate=None) -> dict:
     """Walk the vault as leak_scan.py does and write the index. `gate` must
@@ -591,6 +661,8 @@ def build_from_vault(*, vault: Path | None = None, policy: Policy | None = None,
     sees) and its raw markdown (what a tool that reads the file sees), so
     links and embeds cannot break a quoted run apart. A policy folder that
     matches no note fails the build, so a typo cannot unprotect a folder.
+    Text already published in the public repos is exempt (public_texts); a
+    clone that cannot be read only means less is exempt.
     """
     vault = Path(vault or vault_path())
     if not vault.is_dir():
@@ -624,8 +696,15 @@ def build_from_vault(*, vault: Path | None = None, policy: Policy | None = None,
                          f"check the policy file")
     if not marked:
         raise BuildError("no marked notes found; refusing to build an index that would clear everything")
-    return build_index(marked, policy, key, out or state_dir() / INDEX_FILE, notes_scanned=scanned,
-                       extra_counts={"policy_folder_notes": folder_notes})
+    public: list[str] = []
+    public_files: list[int | None] = []
+    for repo in public_repos():
+        texts = public_texts(repo)
+        public_files.append(None if texts is None else len(texts))
+        public.extend(texts or ())
+    return build_index(marked, policy, key, out or state_dir() / INDEX_FILE, public=public,
+                       notes_scanned=scanned,
+                       extra_counts={"policy_folder_notes": folder_notes, "public_files": public_files})
 
 
 def refresh(timeout: int = BUILD_TIMEOUT) -> tuple[bool, str]:
@@ -687,8 +766,9 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # the type only: a message could quote a note
             print(f"outbound guard build failed: {type(exc).__name__}", file=sys.stderr)
             return 1
-        print(f"outbound guard index built: {c['marked_notes']} marked notes, {c['shingles']} shingles, "
-              f"{c['marking_phrases']} marking phrases, {c['notes_scanned']} notes scanned")
+        print(f"outbound guard index built: {c['marked_notes']} marked notes, {c['shingles']} shingles "
+              f"({c['public_exempt']} already public, exempt), {c['marking_phrases']} marking phrases, "
+              f"{c['notes_scanned']} notes scanned")
         return 0
     if args.cmd == "status":
         s = status()
