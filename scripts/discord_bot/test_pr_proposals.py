@@ -499,6 +499,24 @@ class TestExecuteProposalPostPushCheckout(unittest.TestCase):
     after a successful push so the auto-reload watcher resumes pulling. Issue
     #126 was about documenting this; the implementation lives in this PR."""
 
+    def setUp(self):
+        # execute_proposal writes the proposal's files for real (only git and
+        # gh are mocked), so point the repo at a temp dir. Without this each
+        # run wrote src/about.astro into the real neural-bridge-blog checkout.
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = repos_mod.REPOS["neural-bridge-blog"]
+        repos_mod.REPOS["neural-bridge-blog"] = repos_mod.Repo(
+            repo_id="neural-bridge-blog",
+            gh_slug="andy-herman/neural-bridge-blog",
+            local_path=Path(self._tmp.name),
+            default_branch="main",
+        )
+
+    def tearDown(self):
+        repos_mod.REPOS["neural-bridge-blog"] = self._orig
+        self._tmp.cleanup()
+
     def _make_proposal(self) -> PRProposal:
         repo = repos_mod.REPOS["neural-bridge-blog"]
         return PRProposal(
