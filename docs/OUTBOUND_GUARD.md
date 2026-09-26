@@ -41,6 +41,16 @@ discount covered 789 shingles, three quarters of them copies in AI-written
 session notes. It prevented no false positive on this repo or on the
 published blog.
 
+**What is exempt: text already published.** A shingle that already appears on
+the default branch of this repo or of the blog is left out of the index.
+Republishing it cannot leak anything new. Without the exemption, a public
+citation that a marked note happens to repeat (a NIST document title and URL,
+say) would block every later post that cites it. Only origin's committed
+content counts, as each local clone's `origin/main` shows it; the working tree
+and unpushed commits never do. Agents can only add to that content through
+routes this guard screens, so the exemption cannot launder a quote the way the
+discount could. Marking phrases are never exempt.
+
 ### Validation, 2026-09-25, real vault, counts only
 
 | Control | Result |
@@ -56,7 +66,21 @@ published blog.
 | Every tracked text file in the published blog | 0/219 blocked |
 
 A check takes about 2 ms for an issue body and about 120 ms for a 35,000-word
-PR. A rebuild takes about 2 seconds.
+PR. A rebuild takes a few seconds.
+
+A second pass on 2026-09-26 followed the policy gaining more folders. Before
+the exemption, 4 of the 219 blog files were blocked: three on public NIST
+citation lines that a marked note also holds, one on a 14-word published
+phrase. After it, the results were:
+
+| Control | Result |
+|---|---|
+| 20-word excerpts from each added folder | 10/10 blocked |
+| 13-word excerpts from each added folder | 0/10 blocked |
+| Every tracked text file in this repo | 0/301 blocked |
+| Every tracked text file in the published blog | 0/219 blocked |
+
+Only 13 shingles were exempt as already public.
 
 ### What it does not catch
 
@@ -70,9 +94,10 @@ PR. A rebuild takes about 2 seconds.
   and anything pushed by hand.
 
 The opposite trade-off, from dropping the discount: public text that also
-sits inside a marked note is blocked too. An example is a regulation
-paragraph that a private note also quotes. When that happens, rephrase, or
-check it and publish by hand.
+sits inside a marked note is blocked too, until it has been published once.
+An example is a regulation paragraph or a citation that a private note also
+quotes. The first time, rephrase, or check it and publish by hand; after
+that, the exemption above covers it.
 
 ## Where it runs
 
@@ -106,6 +131,7 @@ When something is blocked, nothing is published:
 | Index | `data/outbound_guard/index.bin` | Gitignored, mode 600. Keyed blake2b 8-byte digests and counts; no text. |
 | Audit log | `data/outbound_guard/audit.jsonl` | One line per check: surface, verdict, counts, digest. No text. |
 | Corpus gate | `~/Development/gemma-grc/scripts/vault_ingest.py` | `gate_note()`, `read_note()`, `clean()`. |
+| Public repos | this clone and `~/Development/neural-bridge-blog` | Text on each clone's `origin/main` is exempt. A clone or ref that cannot be read just means nothing from it is exempt. |
 
 The marking phrases and policy folders are kept out of this repo on purpose.
 Naming them here would itself disclose what kind of material the vault holds.
@@ -114,7 +140,9 @@ words, so unkeyed digests of them could be reversed by guessing.
 
 Environment overrides, used by the tests: `NB_OUTBOUND_GUARD_DIR` (index and
 audit log), `NB_OUTBOUND_GUARD_POLICY` (policy file; the key sits beside it),
-`NB_OUTBOUND_GUARD_VAULT`, and `NB_OUTBOUND_GUARD_GATE`.
+`NB_OUTBOUND_GUARD_VAULT`, `NB_OUTBOUND_GUARD_GATE`, and
+`NB_OUTBOUND_GUARD_PUBLIC_REPOS` (clones separated by `:`; set but empty means
+none).
 
 Policy file shape (placeholder values):
 
@@ -128,9 +156,13 @@ Policy file shape (placeholder values):
 ## Operations
 
 - **Refresh.** The daemon rebuilds the index at startup and then hourly, in a
-  child process (about 2 seconds). `compile.py` rebuilds any index older than
+  child process (a few seconds). `compile.py` rebuilds any index older than
   an hour before it runs. A failed rebuild is logged, and the last good index
   is used until it ages out, after which everything is refused.
+- **Exemptions follow the clones' origin refs as last fetched.** The
+  auto-reload watcher fetches this repo every two minutes. The blog clone's
+  `origin/main` only moves when that clone is fetched, so a newly published
+  post counts as public from the next fetch and rebuild.
 - **Rebuild by hand:** `.venv/bin/python scripts/outbound_guard.py build`
 - **Health:** `.venv/bin/python scripts/outbound_guard.py status`
 - **Screen a draft before posting it yourself:**
@@ -150,6 +182,9 @@ Policy file shape (placeholder values):
     words passes, and marking phrases block in any format.
   - The laundering case: an agent-written note quoting a marked passage must
     not unprotect it.
+  - The public exemption: text on a public clone's origin branch is exempt,
+    while local commits, working-tree edits, binary files, missing clones and
+    marking phrases never are.
   - Raw-markdown quotes, and every fail-closed case.
   - That no index file, audit line or message carries text.
   - The CLI, and Gemma GRC's real corpus gate on a synthetic vault (skipped

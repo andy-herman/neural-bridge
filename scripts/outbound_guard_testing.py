@@ -1,10 +1,11 @@
 """Synthetic outbound-guard state for tests.
 
 The repo is public, so every "marked" note, marking phrase and folder name here
-is invented. Nothing in this module reads the real vault, the real policy file
-or the real index: SyntheticGuard points the guard's environment variables at a
-throwaway directory, and aims the vault and corpus-gate locations at paths that
-do not exist, so an accidental rebuild fails instead of reading real notes.
+is invented. Nothing in this module reads the real vault, the real policy file,
+the real index or the real public clones: SyntheticGuard points the guard's
+environment variables at a throwaway directory, empties the public-repo list,
+and aims the vault and corpus-gate locations at paths that do not exist, so an
+accidental rebuild fails instead of reading real notes.
 
 Tokens in the synthetic notes carry no inner punctuation (no hyphens or
 apostrophes), so N whitespace tokens are exactly N normalized words and an
@@ -106,6 +107,7 @@ class SyntheticGuard:
             og.ENV_POLICY: str(self.policy_file),
             og.ENV_VAULT: str(self.root / "no-vault-here"),
             og.ENV_GATE: str(self.root / "no-gate-here"),
+            og.ENV_PUBLIC: "",  # no public repos: never read the real clones
         }
         for name, value in env.items():
             self._saved[name] = os.environ.get(name)

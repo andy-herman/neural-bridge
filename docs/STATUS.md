@@ -4,6 +4,8 @@
 
 Agents read the Obsidian vault, and two routes publish what they write: the wiki (`knowledge/` is tracked in this public repo) and GitHub (issues, comments, PR branches). Nothing screened either route for confidentiality markings; the filing gate screens for poisoning only. `scripts/outbound_guard.py` now does, fail closed, on both routes. It blocks text that shares a verbatim run of about 14 words with a marked vault note, or that carries a private marking phrase. It reuses the method of the 2026-09-25 vault leak check, which found no leak, with one change. The leak check discounted text also found in unmarked notes; the guard does not, because agents write unmarked notes and a single quote would otherwise unprotect a passage. The index holds keyed hashes only. The policy (marking phrases, policy folders) lives outside the repo. Every check is audited with counts and digests only. See [OUTBOUND_GUARD.md](OUTBOUND_GUARD.md).
 
+Follow-up, 2026-09-26: text already published on the default branch of this repo or the blog is exempt from the index, because republishing it cannot leak anything. The private policy had gained more folders, which made four published blog posts match. Three matched on public NIST citation lines and one on a published 14-word phrase.
+
 A related fix: `create_agent` committed with `git add -A`, which would have swept every untracked file in the daemon's checkout into a public branch. It now stages only the files it writes. `docs/echo-synthesis/` is gitignored too, since its run logs carry the raw synthesis output.
 
 ## 2026-09-22 — Memory layer repair (PR #162)
