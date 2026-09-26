@@ -415,6 +415,21 @@ class TestMainWithMockedGate(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertEqual(env.get("NB_AGENT"), "compile")
 
+    def test_gate_subprocess_env_pins_the_proxy_whatever_it_inherits(self):
+        # A hand run from a desktop session inherits the app's base URL; a
+        # shell that loaded ~/.hermes/.env carries a credit-less API key.
+        inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+                     "ANTHROPIC_API_KEY": "sk-ant-no-credit"}
+        with patch.dict(os.environ, inherited, clear=False):
+            os.environ.pop("NB_COPILOT_API_BASE", None)
+            env = cmp._subprocess_env_for_compile_claude()
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4141")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "copilot-proxy")
+
+    def test_default_model_is_one_the_proxy_serves(self):
+        import claude_env
+        self.assertTrue(claude_env.proxy_supports(cmp.DEFAULT_MODEL), cmp.DEFAULT_MODEL)
+
     def test_gate_subprocess_env_tells_the_session_end_hook_to_stand_down(self):
         # Every gate vote is a claude -p session and fires SessionEnd; without
         # this each vote cost a second model call to summarise itself into

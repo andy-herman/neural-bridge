@@ -16,6 +16,15 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
+from pathlib import Path
+
+# The route policy is shared with the hooks (flush runs inside these
+# sessions), so it lives with them; see hooks/claude_env.py.
+_HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+import claude_env  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-4.8"  # copilot-api id (dotted); fleet runs Opus 4.8 via Copilot
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
@@ -37,7 +46,12 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     The flush.py daily-log write to disk still happens — only the
     outbound Discord push is suppressed. Audit trail preserved.
     """
-    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    # Start from a copy with every Anthropic routing variable removed, so the
+    # route below is the only one in play. Anything inherited (the desktop
+    # app's base URL, ~/.hermes/.env's credit-less API key) would otherwise
+    # win silently. See hooks/claude_env.py.
+    env = claude_env.direct_env(os.environ)
+    env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_NO_DISCORD"] = "1"
     # The daemon injects related wiki concepts itself (mention.py), ranked
     # against the clean user message. Tell the repo's UserPromptSubmit hook to
@@ -65,13 +79,12 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     # keeps the default.
     if route_via_proxy and not os.environ.get("NB_CLAUDE_DIRECT"):
         # Force the base URL so an ambient ANTHROPIC_BASE_URL (e.g. a shell that
-        # points at api.anthropic.com) can't silently bypass the proxy.
-        env["ANTHROPIC_BASE_URL"] = os.environ.get("NB_COPILOT_API_BASE", "http://localhost:4141")
-        env.setdefault("ANTHROPIC_API_KEY", "copilot-proxy")
-    else:
-        # Opting out means opting out of an inherited base URL too — otherwise a
-        # shell that exports one would quietly send this call somewhere else.
-        env.pop("ANTHROPIC_BASE_URL", None)
+        # points at api.anthropic.com) can't silently bypass the proxy, and
+        # force the placeholder key: a real key from ~/.hermes/.env used to win
+        # over it via setdefault and was sent to the proxy on every turn.
+        env = claude_env.proxy_env(env)
+    # Otherwise direct: env already carries no routing variables, so the call
+    # reaches Anthropic on the Claude Code login.
     return env
 
 
@@ -120,6 +133,7 @@ def call_claude_sync(
     resume: bool = False,
     effort: str | None = None,
     agent_id: str | None = None,
+    mcp_config: str | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
@@ -153,6 +167,10 @@ def call_claude_sync(
         args.extend(["--effort", effort])
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
+    if mcp_config:
+        # Private MCP servers are loaded per call, only for turns that were
+        # granted them (see private_tools.py), never from user-wide config.
+        args.extend(["--mcp-config", mcp_config])
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
@@ -190,6 +208,7 @@ async def call_claude(
     resume: bool = False,
     effort: str | None = None,
     agent_id: str | None = None,
+    mcp_config: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -198,6 +217,6 @@ async def call_claude(
         lambda: call_claude_sync(
             prompt, model, timeout, allowed_tools, add_dirs,
             session_id=session_id, resume=resume, effort=effort,
-            agent_id=agent_id,
+            agent_id=agent_id, mcp_config=mcp_config,
         ),
     )

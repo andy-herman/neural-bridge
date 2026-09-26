@@ -344,6 +344,26 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertNotIn("NB_DISCORD_WEBHOOK", env)
 
+    def test_subprocess_env_pins_the_proxy_whatever_it_inherits(self):
+        # flush inherits the ended session's environment: the proxy inside an
+        # agent turn, the desktop app's URL inside a desktop session, a
+        # credit-less key under ~/.hermes/.env. It must land on the proxy.
+        inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+                     "ANTHROPIC_API_KEY": "sk-ant-no-credit", "ANTHROPIC_TOKEN": "t",
+                     "ANTHROPIC_AUTH_TOKEN": "t", "NB_AGENT_ID": "research"}
+        with patch.dict(os.environ, inherited, clear=False):
+            os.environ.pop("NB_COPILOT_API_BASE", None)
+            env = flush._subprocess_env_for_claude()
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4141")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "copilot-proxy")
+        self.assertNotIn("ANTHROPIC_TOKEN", env)
+        self.assertEqual(env.get("NB_AGENT_ID"), "research")
+
+    def test_default_model_is_one_the_proxy_serves(self):
+        # Until 2026-09-25 this was claude-sonnet-5, which the proxy rejects.
+        import claude_env
+        self.assertTrue(claude_env.proxy_supports(flush.DEFAULT_MODEL), flush.DEFAULT_MODEL)
+
     def test_subprocess_env_stops_flush_from_flushing_itself(self):
         # The extraction call is a claude -p session; SessionEnd fires for it
         # (nested hooks verified 2026-09-23). Without this flag the hook would
@@ -366,7 +386,8 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
             tel.assert_called_once()
             self.assertEqual(tel.call_args.args[0], "research")
             self.assertEqual(tel.call_args.kwargs["ok"], ok)
-            self.assertEqual(tel.call_args.kwargs["detail"], detail)
+            # Failures carry the error head after the prefix (see flush.main).
+            self.assertTrue(tel.call_args.kwargs["detail"].startswith(detail), tel.call_args.kwargs["detail"])
 
     def test_progress_entry_is_written_at_session_close(self):
         valid = json.dumps({"decisions": ["Chose X"], "findings": ["Found Y"],
@@ -460,6 +481,22 @@ class TestSecurityFindings(unittest.TestCase):
         self.assertNotIn("NB_DISCORD_WEBHOOK", env)
         # Other env vars still pass through
         self.assertIn("PATH", env)
+
+
+
+class TestCallClaudeErrorDetail(unittest.TestCase):
+    def test_reports_the_api_error_from_stdout_not_the_cli_warning(self):
+        # The 2026-09-25 outage showed only "exit_1" plus a CLI warning about
+        # connectors, while the real 400 sat on stdout.
+        class _Result:
+            returncode = 1
+            stdout = 'API Error: 400 {"error":{"message":"This model does not support assistant message prefill."}}'
+            stderr = "claude.ai connectors are disabled because ANTHROPIC_API_KEY is set"
+
+        with patch("flush.subprocess.run", return_value=_Result()):
+            ok, _, err = flush.call_claude("p", "m", 5)
+        self.assertFalse(ok)
+        self.assertTrue(err.startswith("exit_1:API Error: 400"), err)
 
 
 if __name__ == "__main__":

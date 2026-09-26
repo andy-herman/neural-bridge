@@ -83,13 +83,17 @@ sys.path.insert(0, str(HOOKS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))  # for `scripts.*`; appended so it shadows nothing
+import claude_env  # noqa: E402
 import discord_post  # noqa: E402
 import model_invoke  # noqa: E402
 import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
 from scripts import outbound_guard  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-5"  # main's #158 re-baseline
+# Copilot proxy since 2026-09-25 (Andy: keep the pipeline off Max). The filing
+# gate was calibrated on claude-sonnet-5 (#158); rerun scripts/eval_filing_gate.py
+# after any model change before trusting its verdicts.
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL
 COMPILER_VERSION = "1.3"  # bumped: multi-vote filing gate (memory-poisoning defense)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
@@ -373,8 +377,15 @@ def _subprocess_env_for_compile_claude() -> dict[str, str]:
     Strips NB_DISCORD_WEBHOOK in case it was set in the parent env —
     defense in depth so a webhook URL cannot leak into a child
     process's environment.
+
+    Always routes through the copilot-api proxy (see hooks/claude_env.py),
+    whatever it inherited. Before 2026-09-25 the route depended on the caller:
+    the nightly launchd run reached the Max login, a hand run from a desktop
+    session inherited the app's base URL, and a shell that loaded
+    ~/.hermes/.env sent a credit-less API key.
     """
-    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env = claude_env.proxy_env(os.environ)
+    env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_AGENT"] = "compile"
     env["NB_SKIP_FLUSH"] = "1"
     env["NB_NO_DISCORD"] = "1"

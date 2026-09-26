@@ -374,6 +374,10 @@ async def _handle_mention_inner(client, message, config: BotConfig) -> None:
                 history=history,
                 conversation_log_path=str(conversation_log_path(agent_id, message)),
                 prompt_prefix=ingest_block or "",
+                # Private tools only for a turn Andy started himself, never
+                # for an agent handoff (see private_tools.py).
+                owner_invoked=(not message.author.bot
+                               and is_authorized(str(message.author.id), config)),
             ),
             log=log,
         )

@@ -252,7 +252,7 @@ class TestConsolidationGates(unittest.TestCase):
         g = gates([])
         self.assertEqual(g["G2"]["answer"], "no data")
         self.assertEqual(g["G3"]["answer"], "no data")
-        self.assertEqual(g["G4"]["answer"], "dead: no reads and no compile runs")
+        self.assertEqual(g["G4"]["answer"], "undecided: no agent turns and no compile runs in the window")
         self.assertEqual(g["progress_log"]["answer"], "none yet")
 
     def test_g2_luna_only_versus_all_three(self):
@@ -262,6 +262,24 @@ class TestConsolidationGates(unittest.TestCase):
         mixed = only + [self._ev("echo_voice", mem.RETRIEVE, agent="content")]
         self.assertEqual(gates(mixed)["G2"]["answer"], "keep for all three")
         self.assertEqual(gates(mixed)["G2"]["by_agent"], {"luna": 3, "content": 1})
+
+    def test_g2_ignores_unattributed_reads(self):
+        # Pre-2026-09-25 reads carry no agent; they must not vote.
+        from scripts.memory_canary import gates
+        legacy = [self._ev("echo_voice", mem.RETRIEVE, agent=None)] * 37
+        self.assertEqual(gates(legacy)["G2"]["answer"], "undecided: no read carries an agent yet")
+        mixed = legacy + [self._ev("echo_voice", mem.RETRIEVE, agent="luna")]
+        self.assertEqual(gates(mixed)["G2"]["answer"], "luna only")
+
+    def test_g4_dead_only_when_agents_ran_without_reading(self):
+        from scripts.memory_canary import gates
+        # Traffic from before the read path existed is not evidence.
+        old = [self._ev("honcho_peer_card", mem.RETRIEVE, chars=500)] * 3
+        self.assertEqual(gates(old)["G4"]["answer"],
+                         "undecided: no agent turns and no compile runs in the window")
+        turns = [self._ev("progress_log", mem.RETRIEVE, chars=0)] * 3
+        self.assertEqual(gates(turns)["G4"]["answer"],
+                         "dead: agents ran but never read the wiki, and compile never ran")
 
     def test_g3_threshold(self):
         from scripts.memory_canary import G3_KEEP_RATE, gates
