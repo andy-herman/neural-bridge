@@ -17,6 +17,11 @@ it short-circuits cleanly.
 
 The Discord-side work (create application, store token, invite bot,
 update agents.json) stays manual — those steps involve secrets.
+
+Outbound guard: the repo is public and the pushed branch is public at once.
+scripts/outbound_guard.py screens every agent-supplied field before any git
+or file change, and screens exactly what the push would publish (plus the PR
+title and body) between the commit and `git push`.
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ import re
 import subprocess as sp
 from dataclasses import dataclass
 from pathlib import Path
+
+from scripts import outbound_guard
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
@@ -280,6 +287,15 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
             error=f"agent file already exists at plugins/neural-bridge-core/agents/{agent_id}.md",
         )
 
+    # Outbound guard on every agent-supplied field, before any git or file
+    # change: they all land in the public repo, commit message and PR body.
+    verdict = outbound_guard.check(
+        "\n".join([render_plugin_file(action), action["display_name"], action["description"]]),
+        surface="github:create_agent",
+    )
+    if not verdict.allowed:
+        return CreateAgentResult(ok=False, agent_id=agent_id, error=verdict.describe())
+
     # Branch off main.
     branch_name = f"feat/agent-{agent_id}"
     ok, _ = _git(["checkout", "main"])
@@ -368,11 +384,8 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
     ok, msg = _git(["commit", "-m", commit_msg])
     if not ok:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git commit failed: {msg}")
-    ok, msg = _git(["push", "-u", "origin", branch_name])
-    if not ok:
-        return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git push failed: {msg}")
 
-    # Open the PR.
+    # The PR text is built before the push so the last guard check covers it.
     invite_url = (
         f"https://discord.com/oauth2/authorize?client_id={client_id}"
         f"&scope=bot+applications.commands&permissions=380104608832"
@@ -407,7 +420,24 @@ def execute_create_agent(action: dict, repo: str) -> CreateAgentResult:
         f"{'4' if agents_json_updated else '5'}. **Reload:** `./scripts/launchd/install.sh`\n"
         f"{'5' if agents_json_updated else '6'}. **Smoke test:** `@{agent_id} ...` in `#neural-bridge`."
     )
-    ok, msg = _gh(["pr", "create", "--title", f"feat(agent): add {agent_id} specialist", "--body", pr_body])
+    pr_title = f"feat(agent): add {agent_id} specialist"
+
+    # Last check before anything is public: exactly what the push would
+    # publish (every unpushed commit), plus the PR title and body.
+    verdict = outbound_guard.check_push(_git, surface="github:push:create_agent",
+                                        extra=f"{pr_title}\n{pr_body}")
+    if not verdict.allowed:
+        _git(["checkout", "main"])
+        return CreateAgentResult(
+            ok=False, agent_id=agent_id, branch=branch_name,
+            error=f"{verdict.describe()}; nothing pushed, local branch {branch_name} kept unpushed for inspection",
+        )
+    ok, msg = _git(["push", "-u", "origin", branch_name])
+    if not ok:
+        return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"git push failed: {msg}")
+
+    # Open the PR.
+    ok, msg = _gh(["pr", "create", "--title", pr_title, "--body", pr_body])
     if not ok:
         return CreateAgentResult(ok=False, agent_id=agent_id, branch=branch_name, error=f"gh pr create failed: {msg}")
     pr_url = msg.strip()

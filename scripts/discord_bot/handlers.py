@@ -1336,13 +1336,14 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         f"{failures_md}"
     )
 
-    # Use gh issue comment to post
-    import subprocess as sp
+    # Post through github_client so the comment passes the outbound guard
+    # (the model's reason and quality flags can quote whatever it read).
     try:
-        sp.run(
-            ["gh", "issue", "comment", str(issue_number), "--repo", config.default_repo, "--body", comment_body],
-            capture_output=True, text=True, timeout=30, stdin=sp.DEVNULL, check=False,
+        comment_result = await comment_issue(
+            repo=config.default_repo, issue_number=issue_number, body=comment_body,
         )
+        if not comment_result.ok:
+            log(f"TRIAGE comment FAILED (non-fatal): issue=#{issue_number} error={comment_result.error}")
     except Exception as exc:
         log(f"TRIAGE comment FAILED (non-fatal): {type(exc).__name__}: {exc}")
 

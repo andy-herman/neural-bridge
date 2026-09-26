@@ -37,6 +37,11 @@ knowledge/agents/*/*
 # recall.py local vector DB — machine-local, never synced or committed
 data/recall/
 
+# Outbound guard index and audit log (scripts/outbound_guard.py): keyed hashes
+# and counts only, machine-local. The private policy and the hash key live
+# outside the repo, in ~/.config/neural-bridge/.
+data/outbound_guard/
+
 # compile.py / lint.py outputs — run-time, not tracked
 docs/compile/*
 !docs/compile/.gitkeep

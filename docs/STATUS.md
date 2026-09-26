@@ -1,5 +1,9 @@
 # Build Status
 
+## 2026-09-25: Outbound guard
+
+Agents read the Obsidian vault, and two routes publish what they write: the wiki (`knowledge/` is tracked in this public repo) and GitHub (issues, comments, PR branches). Nothing screened either route for confidentiality markings; the filing gate screens for poisoning only. `scripts/outbound_guard.py` now does, fail closed, on both routes. It blocks text that shares a verbatim run of about 14 words with a marked vault note, or that carries a private marking phrase. It reuses the method of the 2026-09-25 vault leak check, which found no leak. The index holds keyed hashes only. The policy (marking phrases, policy folders) lives outside the repo. Every check is audited with counts and digests only. See [OUTBOUND_GUARD.md](OUTBOUND_GUARD.md).
+
 ## 2026-09-22 — Memory layer repair (PR #162)
 
 A four-agent audit found that the memory layer, the substrate's stated reason to exist, had not compounded since 2026-05-10: one compile pass ever produced content, nothing read the wiki at query time, and the failures that caused it were silent. PR #162 repairs it in four steps.

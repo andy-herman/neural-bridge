@@ -25,6 +25,14 @@ Phase C (this change): the filing gate runs as N independent passes
 consensus; downgrade any disagreement to QUARANTINE. This hardens shared
 memory against a single unlucky judgment admitting poisoned content.
 
+Outbound guard: knowledge/ is tracked in a public repo, and the filing gate
+screens for poisoning, not confidentiality. Every write under knowledge/
+(concept, quarantine, connection, and the new lines of log.md and index.md)
+first passes scripts/outbound_guard.py, which blocks text from marked vault
+notes and fails closed. Dry runs screen the same text, so they preview what a
+live run would block. A blocked candidate is logged by source session and
+digest only, never by slug or text.
+
 Usage:
   python3 scripts/compile.py                     # dry-run by default
   python3 scripts/compile.py --no-dry-run        # actually write to concepts/
@@ -71,10 +79,13 @@ FLUSH_SCRIPT = HOOKS_DIR / "flush.py"
 
 sys.path.insert(0, str(HOOKS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))  # for `scripts.*`; appended so it shadows nothing
 import discord_post  # noqa: E402
 import model_invoke  # noqa: E402
 import schema  # noqa: E402
 from fleet_heartbeat import log_event as fleet_log_event  # noqa: E402
+from scripts import outbound_guard  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-5"  # main's #158 re-baseline
 COMPILER_VERSION = "1.3"  # bumped: multi-vote filing gate (memory-poisoning defense)
@@ -580,6 +591,22 @@ def _vote_verdicts(gate: dict) -> list[str] | None:
 
 # ---------- output writing ----------
 
+def _surface(kind: str, dry_run: bool) -> str:
+    """Outbound-guard surface name for a wiki write (what the audit log records)."""
+    return f"wiki:{kind}" + (":dry-run" if dry_run else "")
+
+
+def _blocked_line(kind: str, candidate: ConceptCandidate, verdict: outbound_guard.Verdict) -> str:
+    """Run-log line for a write the outbound guard stopped.
+
+    Run-log action lines are published to knowledge/log.md, so this names the
+    source session and the verdict's counts and digest, never the slug or text.
+    """
+    src = candidate.sources[0]
+    return (f"- BLOCKED-OUTBOUND {kind} from {src['source_log']} session {src['session_n']}: "
+            f"{verdict.describe()}")
+
+
 def _frontmatter(
     candidate: ConceptCandidate,
     verdict: str,
@@ -624,9 +651,13 @@ def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool,
     If `rendered_text` is provided, use it verbatim (Phase B path: rich article
     body produced by the concept writer). Otherwise fall back to the Phase A
     stub (slug + summary + footer).
+
+    Raises outbound_guard.OutboundBlocked, writing nothing, when the text
+    carries marked vault text.
     """
     if rendered_text is None:
         rendered_text = stub_concept_article(candidate, gate)
+    outbound_guard.enforce(rendered_text, surface=_surface("concept", dry_run))
 
     if dry_run:
         DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -639,7 +670,11 @@ def write_concept(candidate: ConceptCandidate, gate: dict, dry_run: bool,
 
 
 def write_quarantine(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> Path:
-    """Write a QUARANTINE'd concept for human review."""
+    """Write a QUARANTINE'd concept for human review.
+
+    knowledge/quarantine/ is tracked too, so the same outbound guard applies:
+    raises outbound_guard.OutboundBlocked, writing nothing, on marked text.
+    """
     votes_section = ""
     votes = gate.get("votes")
     if votes:
@@ -661,6 +696,7 @@ def write_quarantine(candidate: ConceptCandidate, gate: dict, dry_run: bool) -> 
     fm = _frontmatter(candidate, QUARANTINE, gate["reason"], gate["checks_triggered"],
                       gate_votes=_vote_verdicts(gate))
     text = fm + "\n" + body
+    outbound_guard.enforce(text, surface=_surface("quarantine", dry_run))
 
     if dry_run:
         DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -748,21 +784,52 @@ LOG_DATE_HEADING_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
 INDEX_CONCEPTS_HEADING_RE = re.compile(r"^## Concepts\s*$", re.MULTILINE)
 
 
-def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> None:
+def _screened_log_bullets(run_summary: str, action_lines: list[str]) -> tuple[list[str], int]:
+    """The bullets append_to_log may publish, screened by the outbound guard.
+
+    Only the new lines are screened (log.md accumulates). They go through as
+    one item; if that is blocked, each action line is screened on its own and
+    every blocked one becomes a digest-only placeholder, and the result is
+    screened again. Returns (bullets, lines withheld). Raises OutboundBlocked
+    when even that does not clear, which includes a guard that cannot clear
+    anything at all.
+    """
+    bullets = ["- " + run_summary] + [f"  {line}" for line in action_lines]
+    verdict = outbound_guard.check("\n".join(bullets), surface="wiki:log")
+    if verdict.allowed:
+        return bullets, 0
+    if verdict.reason not in outbound_guard.CONTENT_REASONS:
+        raise outbound_guard.OutboundBlocked(verdict)
+    kept, withheld = ["- " + run_summary], 0
+    for line in action_lines:
+        line_verdict = outbound_guard.check(line, surface="wiki:log-line")
+        if line_verdict.allowed:
+            kept.append(f"  {line}")
+        else:
+            withheld += 1
+            kept.append(f"  - BLOCKED-OUTBOUND log line withheld [ref {line_verdict.ref}]")
+    outbound_guard.enforce("\n".join(kept), surface="wiki:log")
+    return kept, withheld
+
+
+def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> int:
     """Append a dated section to knowledge/log.md.
 
     If today's date already has a section, append bullets under it.
     Otherwise add a new `## YYYY-MM-DD` block at the bottom.
     Skipped entirely in dry-run.
+
+    The new lines pass the outbound guard first (_screened_log_bullets).
+    Returns how many action lines it withheld; raises OutboundBlocked, writing
+    nothing, when the update cannot be cleared.
     """
     if dry_run:
-        return
+        return 0
     if not WIKI_LOG.exists():
-        return  # log.md is hand-curated; respect its absence
+        return 0  # log.md is hand-curated; respect its absence
+    new_bullets, withheld = _screened_log_bullets(run_summary, action_lines)
     today = utc_today()
     text = WIKI_LOG.read_text(encoding="utf-8")
-
-    new_bullets = ["- " + run_summary] + [f"  {line}" for line in action_lines]
 
     headings = list(LOG_DATE_HEADING_RE.finditer(text))
     if headings and headings[-1].group(1) == today:
@@ -772,6 +839,7 @@ def append_to_log(run_summary: str, action_lines: list[str], dry_run: bool) -> N
         # New dated block.
         body = text.rstrip() + f"\n\n## {today}\n\n" + "\n".join(new_bullets) + "\n"
     WIKI_LOG.write_text(body, encoding="utf-8")
+    return withheld
 
 
 def refresh_index(promoted_slugs: list[str], dry_run: bool) -> None:
@@ -779,6 +847,8 @@ def refresh_index(promoted_slugs: list[str], dry_run: bool) -> None:
 
     Idempotent: existing entries are not duplicated. The placeholder
     `_None yet..._` line is replaced on first promotion. Skipped in dry-run.
+    The new lines pass the outbound guard first; raises OutboundBlocked,
+    writing nothing, if they do not clear.
     """
     if dry_run or not promoted_slugs:
         return
@@ -803,6 +873,7 @@ def refresh_index(promoted_slugs: list[str], dry_run: bool) -> None:
     new_slugs = [s for s in promoted_slugs if s not in existing]
     if not new_slugs:
         return
+    outbound_guard.enforce("\n".join(f"- [[{s}]]" for s in new_slugs), surface="wiki:index")
 
     new_lines = [f"- [[{s}]]" for s in sorted(set(existing) | set(new_slugs))]
     rebuilt_section = "\n\n" + "\n".join(new_lines) + "\n\n"
@@ -900,15 +971,18 @@ def write_connection(conn: Connection, dry_run: bool) -> Path | None:
 
     Idempotent: if the target file exists, returns None without overwriting
     (connections accumulate; we never replace an existing one).
-    Skipped entirely in dry-run.
+    Skipped entirely in dry-run. Raises OutboundBlocked, writing nothing,
+    if the outbound guard does not clear the text.
     """
     if dry_run:
         return None
     target = CONNECTIONS_DIR / f"{conn.slug_a}--{conn.slug_b}.md"
     if target.exists():
         return None  # idempotent
+    text = render_connection(conn)
+    outbound_guard.enforce(text, surface="wiki:connection")
     CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_connection(conn), encoding="utf-8")
+    target.write_text(text, encoding="utf-8")
     return target
 
 
@@ -1046,6 +1120,22 @@ def main() -> int:
             _telemetry(ok=True, chars=0, detail="no_candidates")
         return 0
 
+    # Outbound guard: refresh an index older than an hour, then refuse the
+    # whole run if the guard still cannot clear anything. Nothing is written
+    # and last_run_at stays put, so these logs are compiled on the next
+    # healthy run instead of being skipped, and no model calls are spent.
+    fresh_ok, fresh_detail = outbound_guard.ensure_fresh()
+    if not fresh_ok:
+        print(f"warning: outbound guard refresh failed: {fresh_detail}", file=sys.stderr)
+    log_line(args.verbose, f"outbound guard: {fresh_detail}")
+    ready = outbound_guard.readiness()
+    if not ready.allowed:
+        print(f"error: {ready.describe()}. Refusing to write under knowledge/; nothing changed.",
+              file=sys.stderr)
+        if not args.dry_run:
+            _telemetry(ok=False, chars=0, detail=f"outbound_guard_unavailable:{ready.reason}")
+        return 1
+
     template = FILING_GATE_PROMPT.read_text(encoding="utf-8")
     writer_template = (
         CONCEPT_WRITER_PROMPT.read_text(encoding="utf-8")
@@ -1054,7 +1144,7 @@ def main() -> int:
 
     counts = {PROMOTE: 0, QUARANTINE: 0, REJECT: 0, "errors": 0,
               "skipped_already_compiled": 0, "writer_failures": 0,
-              "archived": 0, "connections_written": 0}
+              "archived": 0, "connections_written": 0, "blocked_outbound": 0}
     promoted_slugs: list[str] = []
     promoted_candidates: list[ConceptCandidate] = []  # for connection writer
     run_log_lines: list[str] = [
@@ -1099,6 +1189,18 @@ def main() -> int:
                     log_line(args.verbose, f"writer ERROR for {cand.slug}: {werr} (falling back to stub)")
                     counts["writer_failures"] += 1
 
+            # Outbound guard before the archive step, so a blocked rewrite
+            # never displaces the concept already there. write_concept
+            # screens the same text again as it writes.
+            text = rendered if rendered is not None else stub_concept_article(cand, gate)
+            try:
+                outbound_guard.enforce(text, surface=_surface("concept", args.dry_run))
+            except outbound_guard.OutboundBlocked as blocked:
+                counts["blocked_outbound"] += 1
+                run_log_lines.append(_blocked_line("concept", cand, blocked.verdict))
+                log_line(args.verbose, f"BLOCKED-OUTBOUND {cand.slug}: {blocked.verdict.describe()}")
+                continue
+
             # Phase B: never-overwrite. If a concept already exists, archive
             # its current version to .history before writing the new one.
             archived = archive_existing_concept(cand.slug, dry_run=args.dry_run)
@@ -1106,7 +1208,7 @@ def main() -> int:
                 counts["archived"] += 1
                 run_log_lines.append(f"- ARCHIVE {cand.slug} -> {archived.relative_to(REPO_ROOT)}")
 
-            target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=rendered)
+            target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=text)
             counts[PROMOTE] += 1
             promoted_slugs.append(cand.slug)
             promoted_candidates.append(cand)
@@ -1119,7 +1221,13 @@ def main() -> int:
                     "sources": cand.sources,
                 }
         elif verdict == QUARANTINE:
-            target = write_quarantine(cand, gate, dry_run=args.dry_run)
+            try:
+                target = write_quarantine(cand, gate, dry_run=args.dry_run)
+            except outbound_guard.OutboundBlocked as blocked:
+                counts["blocked_outbound"] += 1
+                run_log_lines.append(_blocked_line("quarantine", cand, blocked.verdict))
+                log_line(args.verbose, f"BLOCKED-OUTBOUND {cand.slug}: {blocked.verdict.describe()}")
+                continue
             counts[QUARANTINE] += 1
             run_log_lines.append(f"- QUARANTINE {cand.slug} -> {target.relative_to(REPO_ROOT)} ({gate['reason']})")
             if not args.dry_run:
@@ -1143,7 +1251,12 @@ def main() -> int:
     if not args.no_connections and len(promoted_candidates) >= 2:
         connections = find_shared_session_pairs(promoted_candidates)
         for conn in connections:
-            target = write_connection(conn, dry_run=args.dry_run)
+            try:
+                target = write_connection(conn, dry_run=args.dry_run)
+            except outbound_guard.OutboundBlocked as blocked:
+                counts["blocked_outbound"] += 1
+                run_log_lines.append(f"- BLOCKED-OUTBOUND connection: {blocked.verdict.describe()}")
+                continue
             if target is not None:
                 counts["connections_written"] += 1
                 run_log_lines.append(
@@ -1164,10 +1277,22 @@ def main() -> int:
         summary += f" archived={counts['archived']} writer_failures={counts['writer_failures']}"
     if counts["connections_written"]:
         summary += f" connections={counts['connections_written']}"
+    if counts["blocked_outbound"]:
+        summary += f" blocked_outbound={counts['blocked_outbound']}"
 
     log_action_lines = [line for line in run_log_lines if line.startswith("- ")]
-    append_to_log(summary, log_action_lines, dry_run=args.dry_run)
-    refresh_index(promoted_slugs, dry_run=args.dry_run)
+    try:
+        withheld = append_to_log(summary, log_action_lines, dry_run=args.dry_run)
+        if withheld:
+            run_log_lines.append(f"- NOTE {withheld} line(s) withheld from knowledge/log.md by the outbound guard")
+    except outbound_guard.OutboundBlocked as blocked:
+        run_log_lines.append(f"- BLOCKED-OUTBOUND knowledge/log.md update: {blocked.verdict.describe()}")
+        print(f"warning: knowledge/log.md not updated: {blocked.verdict.describe()}", file=sys.stderr)
+    try:
+        refresh_index(promoted_slugs, dry_run=args.dry_run)
+    except outbound_guard.OutboundBlocked as blocked:
+        run_log_lines.append(f"- BLOCKED-OUTBOUND knowledge/index.md update: {blocked.verdict.describe()}")
+        print(f"warning: knowledge/index.md not updated: {blocked.verdict.describe()}", file=sys.stderr)
 
     print(summary)
 

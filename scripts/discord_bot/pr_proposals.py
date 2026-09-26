@@ -19,6 +19,12 @@ Why the explicit approval step: pushes are destructive enough (PR
 opens, CI runs, reviewers get pinged) that we don't trust the agent's
 self-assessment of "this looks ready." Andy stays in the loop.
 
+Outbound guard: branches are public the moment they are pushed, and agents
+read the vault. scripts/outbound_guard.py screens the whole proposal when it
+is staged (so Andy is never asked to approve a push the guard would refuse),
+again before execution touches the working tree, and finally screens exactly
+what the push would publish, after the commit and before `git push`.
+
 The store is in-memory only — proposals don't survive a daemon restart.
 If a proposal hasn't been approved within TTL_SECONDS, it's pruned and
 the next approval attempt finds nothing.
@@ -34,6 +40,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+from scripts import outbound_guard
 
 from .repos import Repo, agent_can_push_to, repo_for
 
@@ -110,6 +118,15 @@ class PRProposal:
 
     def is_expired(self, now: float | None = None) -> bool:
         return (now or time.time()) >= self.expires_at()
+
+
+def outbound_text(proposal: PRProposal) -> str:
+    """Everything the proposal would publish, as one item for the outbound
+    guard: branch, commit message, PR title and body, file paths and contents."""
+    parts = [proposal.branch, proposal.commit_message, proposal.pr_title, proposal.pr_body]
+    for path, content in proposal.files:
+        parts.extend((path, content))
+    return "\n".join(parts)
 
 
 # ---------- Validation ----------
@@ -230,6 +247,9 @@ def validate_open_pr_action(action: dict, *, agent_id: str, channel_id: int) -> 
         pr_title=pr_title,
         pr_body=pr_body,
     )
+    verdict = outbound_guard.check(outbound_text(proposal), surface=f"github:pr_proposal:{repo.gh_slug}")
+    if not verdict.allowed:
+        return ValidatedProposal(ok=False, error=f"open_pr_with_changes: {verdict.describe()}")
     return ValidatedProposal(ok=True, proposal=proposal)
 
 
@@ -418,6 +438,8 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
     """Run the full git/gh workflow. Synchronous — call from a thread.
 
     Steps:
+      0. Outbound guard on the whole proposal, before the working tree is
+         touched (the index may have been rebuilt since staging).
       1. Verify the working tree has no changes that collide with the
          proposal's file list. Unrelated dirty files are tolerated and
          logged.
@@ -426,7 +448,9 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
       4. Write files (mkdir -p for parent dirs).
       5. Surgical git add of just the proposal's paths + commit + push.
          We do NOT `git add -A`: that would sweep up unrelated dirty
-         files into the agent's commit.
+         files into the agent's commit. Between commit and push, the
+         outbound guard screens every unpushed commit plus the PR title
+         and body; a refusal pushes nothing and keeps the local branch.
       6. gh pr create.
       7. Return the local working tree to the default branch so the
          auto-reload watcher (PR #84) resumes pulling. Without this,
@@ -440,6 +464,12 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
     """
     cwd = proposal.repo.local_path
     proposal_paths = {p for p, _ in proposal.files}
+
+    # 0. Outbound guard, before anything in the working tree changes.
+    verdict = outbound_guard.check(outbound_text(proposal),
+                                   surface=f"github:pr_proposal:{proposal.repo.gh_slug}")
+    if not verdict.allowed:
+        return ExecutionResult(ok=False, error=verdict.describe())
 
     # 1. Working-tree collision check (intersection-based, not blanket).
     safe, err, non_colliding = _check_working_tree_collision(cwd, proposal_paths)
@@ -489,6 +519,20 @@ def execute_proposal(proposal: PRProposal) -> ExecutionResult:
     ok, msg = _git(cwd, ["commit", "-m", proposal.commit_message])
     if not ok:
         return ExecutionResult(ok=False, error=f"git commit failed: {msg}")
+    # Last check before anything is public: exactly what the push would
+    # publish (every unpushed commit), plus the PR title and body.
+    verdict = outbound_guard.check_push(
+        lambda args: _git(cwd, args),
+        surface=f"github:push:{proposal.repo.gh_slug}",
+        extra=f"{proposal.pr_title}\n{proposal.pr_body}",
+    )
+    if not verdict.allowed:
+        _git(cwd, ["checkout", proposal.repo.default_branch])
+        return ExecutionResult(
+            ok=False,
+            error=(f"{verdict.describe()}; nothing pushed, local branch {proposal.branch} "
+                   f"kept unpushed for inspection"),
+        )
     ok, msg = _git(cwd, ["push", "-u", "origin", proposal.branch])
     if not ok:
         return ExecutionResult(ok=False, error=f"git push failed: {msg}")

@@ -29,6 +29,20 @@ from scripts.discord_bot.pr_proposals import (  # noqa: E402
     is_cancel_text,
     validate_open_pr_action,
 )
+from scripts.outbound_guard_testing import SyntheticGuard  # noqa: E402
+
+# The code under test screens outbound text with scripts/outbound_guard.py. A
+# synthetic index keeps this module off the real index and audit log, and
+# gives CI (which has no index) one to use.
+_GUARD = SyntheticGuard()
+
+
+def setUpModule():
+    _GUARD.install()
+
+
+def tearDownModule():
+    _GUARD.remove()
 
 
 # ---------- approval / cancel text matching ----------
