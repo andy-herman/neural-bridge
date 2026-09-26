@@ -1208,7 +1208,18 @@ def main() -> int:
                 counts["archived"] += 1
                 run_log_lines.append(f"- ARCHIVE {cand.slug} -> {archived.relative_to(REPO_ROOT)}")
 
-            target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=text)
+            try:
+                target = write_concept(cand, gate, dry_run=args.dry_run, rendered_text=text)
+            except outbound_guard.OutboundBlocked as blocked:
+                # Only if the index was rebuilt between the two checks: put
+                # the archived version back so the concept is not left missing.
+                if archived is not None:
+                    archived.rename(CONCEPTS_DIR / f"{cand.slug}.md")
+                    counts["archived"] -= 1
+                    run_log_lines.pop()
+                counts["blocked_outbound"] += 1
+                run_log_lines.append(_blocked_line("concept", cand, blocked.verdict))
+                continue
             counts[PROMOTE] += 1
             promoted_slugs.append(cand.slug)
             promoted_candidates.append(cand)

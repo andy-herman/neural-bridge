@@ -1541,6 +1541,33 @@ class TestOutboundGuardWiring(unittest.TestCase):
         self.assertEqual(existing.read_text(encoding="utf-8"), "OLD VERSION\n")
         self.assertFalse(cmp.HISTORY_DIR.exists())
 
+    def test_refusal_between_the_two_checks_restores_the_archived_concept(self):
+        # The index can be rebuilt between the pre-archive check and the one
+        # inside write_concept; the old version must come back, not vanish.
+        self._write_log([f"clean-concept: {CLEAN_SUMMARY}"])
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+        existing = cmp.CONCEPTS_DIR / "clean-concept.md"
+        existing.write_text("OLD VERSION\n", encoding="utf-8")
+        real_enforce = og.enforce
+
+        def refuse_second_concept_check(text, *, surface):
+            if surface == "wiki:concept":
+                refuse_second_concept_check.n += 1
+                if refuse_second_concept_check.n == 2:
+                    raise og.OutboundBlocked(og.Verdict(False, "marking", marking_hits=1))
+            return real_enforce(text, surface=surface)
+        refuse_second_concept_check.n = 0
+
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")), \
+             patch.object(cmp.outbound_guard, "enforce", side_effect=refuse_second_concept_check):
+            rc = self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertEqual(rc, 0)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "OLD VERSION\n")
+        self.assertEqual(list(cmp.HISTORY_DIR.rglob("*.md")), [])
+        log_text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        self.assertIn("BLOCKED-OUTBOUND concept", log_text)
+        self.assertNotIn("ARCHIVE", log_text)
+
     def test_concept_writer_output_is_screened_too(self):
         self._write_log([f"clean-concept: {CLEAN_SUMMARY}"])
         responses = [json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []}),
