@@ -295,6 +295,27 @@ class TestCallClaude(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_BASE_URL", env)
         self.assertEqual(env.get("NB_NO_DISCORD"), "1")
 
+    def test_proxy_route_uses_the_placeholder_key_not_an_inherited_one(self):
+        # setdefault used to let ~/.hermes/.env's real key win over the
+        # placeholder and ride along to the proxy on every turn.
+        import os as _os
+        with patch.dict(_os.environ, {"ANTHROPIC_API_KEY": "sk-ant-real", "ANTHROPIC_TOKEN": "t"}, clear=False):
+            _os.environ.pop("NB_CLAUDE_DIRECT", None)
+            env = claude_invoke._subprocess_env()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "copilot-proxy")
+        self.assertNotIn("ANTHROPIC_TOKEN", env)
+
+    def test_direct_route_strips_inherited_keys_too(self):
+        # Opting out of the proxy means the Claude Code login. An inherited API
+        # key overrides that login, which is how direct calls under .env failed
+        # with "Credit balance is too low".
+        import os as _os
+        with patch.dict(_os.environ, {"ANTHROPIC_API_KEY": "sk-ant-no-credit",
+                                      "ANTHROPIC_BASE_URL": "http://x"}, clear=False):
+            env = claude_invoke._subprocess_env(route_via_proxy=False)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
     def test_effort_is_passed_when_valid(self):
         captured = {}
 

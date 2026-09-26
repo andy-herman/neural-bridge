@@ -34,10 +34,11 @@ QUEUE_LOG = DAILY_LOGS_DIR / "_queue.log"
 PROMPT_TEMPLATE = HOOKS_DIR / "prompts" / "flush_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
+import claude_env  # noqa: E402
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
 
@@ -99,8 +100,16 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     (which embeds the previous level's transcript) eventually outgrowing the
     argv limit and crashing a flush. Verified 2026-09-23 that hooks do fire
     for nested `claude -p` calls and that their transcripts exist.
+
+    Always routes through the copilot-api proxy on a model it serves (see
+    claude_env). This hook inherits the environment of the session that just
+    ended, and until 2026-09-25 it called claude-sonnet-5 on whatever route
+    that happened to be: the proxy inside an agent turn, which rejects Claude
+    5, so every flush of an agent turn failed with exit 1 and no daily log or
+    progress entry was ever written.
     """
-    env = {k: v for k, v in os.environ.items() if k != "NB_DISCORD_WEBHOOK"}
+    env = claude_env.proxy_env(os.environ)
+    env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_SKIP_WIKI_RECALL"] = "1"
     env["NB_SKIP_FLUSH"] = "1"
     return env
@@ -175,7 +184,11 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     except FileNotFoundError:
         return False, "", "claude_cli_not_found"
     if result.returncode != 0:
-        snippet = (result.stderr or "")[:200].replace("\n", " ")
+        # Claude Code prints the API's own error on stdout; stderr carries CLI
+        # warnings, which is all this used to report ("claude.ai connectors
+        # are disabled...") while the real 400 went unseen.
+        api_error = next((l for l in (result.stdout or "").splitlines() if l.startswith("API Error")), "")
+        snippet = (api_error or result.stderr or "")[:200].replace("\n", " ")
         return False, result.stdout, f"exit_{result.returncode}:{snippet}"
     return True, result.stdout, ""
 
@@ -377,7 +390,9 @@ def main() -> int:
         write_failed(args.agent, args.session_id, last_raw, last_err)
         prefix = last_err.split(":", 1)[0] if last_err else "unknown"
         write_queue(args.agent, args.session_id, f"failed:{prefix}")
-        _telemetry(args.agent, ok=False, detail=f"failed:{prefix}")
+        # The canary prints this detail, so carry the head of the real error
+        # rather than just the exit code; the full output is in _failed/.
+        _telemetry(args.agent, ok=False, detail=f"failed:{last_err[:160]}")
         return 0
 
     if schema.is_empty_session(parsed):
