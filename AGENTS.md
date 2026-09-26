@@ -94,5 +94,5 @@ If you're an AI agent working in this repo:
 1. Read this file first.
 2. Read [knowledge/index.md](knowledge/index.md) before answering any user query — it's the wiki entry point.
 3. **Read broadly, write narrow.** Read `knowledge/concepts/`, `knowledge/connections/`, AND every `knowledge/agents/<role>/` subdirectory to maintain cross-agent context. Write only to your own `knowledge/agents/<your-role>/` subdirectory.
-4. Don't write to `knowledge/concepts/` or `knowledge/quarantine/` directly; concepts go through the compile pass. This is mechanically enforced by a PreToolUse hook (`hooks/guard_concepts.py`), not just requested.
+4. Don't write anywhere under `knowledge/` except your own `knowledge/agents/<role>/`. Concepts and connections go through the compile pass, `quarantine/` is human-review-only, and compile refreshes `index.md` and `log.md`. This is mechanically enforced by a PreToolUse hook (`hooks/guard_concepts.py`), not just requested.
 5. Match the voice in existing files: tight, sourced, opinionated. No marketing-speak.

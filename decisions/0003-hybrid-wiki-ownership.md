@@ -8,7 +8,7 @@ tags: [neural-bridge, decision]
 
 # ADR-0003: Hybrid wiki ownership — shared concepts/, per-agent raw subdirs
 
-**Status:** Accepted. Accepted 2026-09-22 (truth pass): implemented and mechanically enforced by hooks/guard_concepts.py and scripts/compile.py.
+**Status:** Accepted. Accepted 2026-09-22 (truth pass): implemented and mechanically enforced by hooks/guard_concepts.py and scripts/compile.py. Enforcement widened 2026-09-26: the hook had covered only concepts/ and quarantine/, and now blocks every write under knowledge/ except knowledge/agents/, which includes connections/ as this decision foresaw.
 **Date:** 2026-05-08
 **Tracks:** Issue #5 — andy-herman/neural-bridge
 

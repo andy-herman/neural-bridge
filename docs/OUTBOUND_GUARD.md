@@ -89,9 +89,10 @@ Only 13 shingles were exempt as already public.
   schedule).
 - Anything outside the two routes: Discord and Telegram messages (except the
   compile summary, which carries the same screened lines as `log.md`), the
-  loop engineer (not installed; it pushes through its own code), direct agent
-  edits to tracked `knowledge/` files outside `concepts/` and `quarantine/`,
-  and anything pushed by hand.
+  loop engineer (not installed; it pushes through its own code), and anything
+  pushed by hand. Agents cannot edit tracked `knowledge/` files directly:
+  `hooks/guard_concepts.py` blocks every tool write under `knowledge/` except
+  `knowledge/agents/`.
 
 The opposite trade-off, from dropping the discount: public text that also
 sits inside a marked note is blocked too, until it has been published once.
