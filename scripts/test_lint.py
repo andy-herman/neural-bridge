@@ -376,3 +376,34 @@ class TestCheckDocsTruth(_BaseTmp):
     def test_registered_in_deterministic_checks(self):
         self.assertIn("docs-truth", L.DETERMINISTIC_CHECKS)
         self.assertIn("docs-truth", L.ALL_CHECKS)
+
+
+class TestImperativeCheckRoute(unittest.TestCase):
+    """The LLM check runs on the copilot-api proxy whatever environment lint
+    was started from."""
+
+    def test_claude_call_is_pinned_to_the_proxy(self):
+        import os
+        captured = {}
+
+        class _Result:
+            returncode = 0
+            stdout = '{"findings": []}'
+            stderr = ""
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _Result()
+
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+                                     "ANTHROPIC_API_KEY": "sk-ant-no-credit"}, clear=False), \
+             patch("lint.subprocess.run", side_effect=fake_run):
+            os.environ.pop("NB_COPILOT_API_BASE", None)
+            L.call_imperative_check("prompt", L.DEFAULT_MODEL, 30)
+        env = captured["env"]
+        self.assertIsNotNone(env, "lint must pass an explicit env to claude")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4141")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "copilot-proxy")
+
+    def test_default_model_is_one_the_proxy_serves(self):
+        self.assertTrue(L.claude_env.proxy_supports(L.DEFAULT_MODEL), L.DEFAULT_MODEL)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
+sys.path.insert(0, str(REPO_ROOT / "hooks"))
+import claude_env  # noqa: E402  (route policy for the LLM check; see hooks/claude_env.py)
 KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
 QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
@@ -48,7 +51,7 @@ SETTINGS_FILE = REPO_ROOT / ".claude" / "settings.json"
 # An ADR still "proposed" after this long is either accepted in practice or dead.
 ADR_STALE_DAYS = 60
 
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
 LINT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 60
 
@@ -454,6 +457,8 @@ def call_imperative_check(prompt: str, model: str, timeout: int) -> tuple[bool, 
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            # The copilot-api proxy, never an inherited base URL or API key.
+            env=claude_env.proxy_env(os.environ),
         )
     except subprocess.TimeoutExpired:
         return False, None, "timeout"

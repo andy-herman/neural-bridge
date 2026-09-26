@@ -195,14 +195,18 @@ def gates(events: list[dict]) -> dict[str, dict]:
         return [e for e in events if e.get("store") == store and e.get("stage") == stage]
 
     # G2: echo_voice retrieves by agent. Keep for 3 agents or 1?
+    # Reads logged before 2026-09-25 carry no agent. They are shown but never
+    # counted as a vote: 37 of them once read as "keep for all three".
     echo = _sel("echo_voice", mem.RETRIEVE)
     by_agent: dict[str, int] = {}
     for e in echo:
         by_agent[e.get("agent_id") or "?"] = by_agent.get(e.get("agent_id") or "?", 0) + 1
+    attributed = {a for a in by_agent if a != "?"}
     g2 = {"question": "keep echo_voice injected for content/social, or luna only?",
           "by_agent": by_agent,
           "answer": ("no data" if not echo else
-                     "luna only" if set(by_agent) <= {"luna"} else "keep for all three")}
+                     "undecided: no read carries an agent yet" if not attributed else
+                     "luna only" if attributed <= {"luna"} else "keep for all three")}
 
     # G3: honcho_peer_card non-empty rate. Keep as an injected layer?
     card = _sel("honcho_peer_card", mem.RETRIEVE)
@@ -219,10 +223,18 @@ def gates(events: list[dict]) -> dict[str, dict]:
     grounded = sum(1 for e in reads if e.get("ok") and int(e.get("chars", 0)) > 0)
     compiles = _sel("compile_concepts", mem.WRITE)
     last_compile = max((int(e.get("epoch", 0)) for e in compiles), default=0)
+    # "Agents ran under the code that reads the wiki": mention.py logs a
+    # progress_log retrieve on every turn, right beside the wiki read, and both
+    # shipped together. Older traffic (honcho, luna_notes) predates the read
+    # path, so counting it would call the wiki dead for turns that could never
+    # have read it.
+    turns = _sel("progress_log", mem.RETRIEVE)
     g4 = {"question": "is knowledge/concepts read at all, and does compile still run?",
           "reads": len(reads), "grounded": grounded, "compile_runs": len(compiles),
           "last_compile_epoch": last_compile,
-          "answer": ("dead: no reads and no compile runs" if not reads and not compiles else
+          "answer": (("dead: agents ran but never read the wiki, and compile never ran" if turns else
+                       "undecided: no agent turns and no compile runs in the window")
+                      if not reads and not compiles else
                      "alive: read but compile not running" if reads and not compiles else
                      "alive: compiling but never read" if compiles and not reads else
                      "alive")}
