@@ -12,6 +12,20 @@ PKG_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PKG_DIR.parent.parent))
 
 from scripts.discord_bot.github_client import create_issue_sync  # noqa: E402
+from scripts.outbound_guard_testing import SyntheticGuard  # noqa: E402
+
+# The code under test screens outbound text with scripts/outbound_guard.py. A
+# synthetic index keeps this module off the real index and audit log, and
+# gives CI (which has no index) one to use.
+_GUARD = SyntheticGuard()
+
+
+def setUpModule():
+    _GUARD.install()
+
+
+def tearDownModule():
+    _GUARD.remove()
 
 
 class _FakeProc:

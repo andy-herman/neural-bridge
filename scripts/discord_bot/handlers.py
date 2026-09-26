@@ -549,6 +549,8 @@ async def _execute_action_batch(
                 )
                 if r.ok:
                     results.append(f"✅ Created #{r.issue_number}: `{action['title'][:60]}` → {r.issue_url}")
+                elif (r.error or "").startswith("outbound guard"):
+                    results.append(f"❌ create_issue: `{r.error}`")  # no title echo: it may be the marked text
                 else:
                     results.append(f"❌ create_issue (`{action['title'][:40]}…`): `{r.error}`")
             elif atype == "comment":
@@ -1145,6 +1147,8 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
                 if r.ok:
                     filed_issues.append((item, r.issue_number, r.issue_url))
                     log(f"SQUAD_DISCUSS issue filed #{r.issue_number} ({item.owner}: {item.action[:40]!r})")
+                elif (r.error or "").startswith("outbound guard"):
+                    log(f"SQUAD_DISCUSS issue REFUSED for an action item ({item.owner}): {r.error}")
                 else:
                     log(f"SQUAD_DISCUSS issue file FAILED for action ({item.owner}: {item.action[:40]!r}): {r.error}")
             except Exception as exc:
@@ -1340,13 +1344,14 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
         f"{failures_md}"
     )
 
-    # Use gh issue comment to post
-    import subprocess as sp
+    # Post through github_client so the comment passes the outbound guard
+    # (the model's reason and quality flags can quote whatever it read).
     try:
-        sp.run(
-            ["gh", "issue", "comment", str(issue_number), "--repo", config.default_repo, "--body", comment_body],
-            capture_output=True, text=True, timeout=30, stdin=sp.DEVNULL, check=False,
+        comment_result = await comment_issue(
+            repo=config.default_repo, issue_number=issue_number, body=comment_body,
         )
+        if not comment_result.ok:
+            log(f"TRIAGE comment FAILED (non-fatal): issue=#{issue_number} error={comment_result.error}")
     except Exception as exc:
         log(f"TRIAGE comment FAILED (non-fatal): {type(exc).__name__}: {exc}")
 

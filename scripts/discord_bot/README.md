@@ -13,9 +13,9 @@ Neural Bridge Discord bot daemon (Phase C of #28). Multi-bot: one `discord.Clien
 | `claude_invoke.py` | `claude -p` subprocess wrapper + prompt-injection sanitizer |
 | `pm_intake.py` | PM intake state machine. In-memory, keyed by Discord thread ID. |
 | `thread_map.py` | Persistent issue↔thread mapping (`~/Library/Application Support/neural-bridge/issue_threads.json`, atomic writes) |
-| `github_client.py` | gh CLI wrapper for `create_issue` (PR-K adds comment / labels / close) |
+| `github_client.py` | gh CLI wrapper for `create_issue` (PR-K adds comment / labels / close). Every call that publishes text passes the outbound guard first ([docs/OUTBOUND_GUARD.md](../../docs/OUTBOUND_GUARD.md)); so do PR proposals and `create_agent` pushes |
 | `handlers.py` | Slash command handlers + on_message thread listener for PM intake |
-| `main.py` | Multi-bot entry: one `Client` per agent, slash commands on senior-pm only, message_content intent enabled on senior-pm only, all in one asyncio loop |
+| `main.py` | Multi-bot entry: one `Client` per agent, slash commands on senior-pm only, message_content intent enabled on senior-pm only, all in one asyncio loop. Rebuilds the outbound-guard index at startup and hourly |
 | `requirements.txt` | `discord.py>=2.3.0,<3.0` |
 | `test_*.py` | Unit tests for config, keychain, auth, sanitizer, pm_intake, thread_map, github_client |
 

@@ -38,6 +38,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 from fleet_heartbeat import set_state as fleet_set_state, log_event as fleet_log_event
+from scripts import outbound_guard
 
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .config import AgentConfig, BotConfig, load_config
@@ -247,6 +248,29 @@ class AgentClient(discord.Client):
             log(f"on_message (intake) error: {type(exc).__name__}: {exc}")
 
 
+async def outbound_guard_refresh_loop(interval: float = outbound_guard.REFRESH_AFTER_HOURS * 3600) -> None:
+    """Keep the outbound-guard index fresh: rebuild at startup, then every
+    `interval` seconds.
+
+    The rebuild runs in a child process (outbound_guard.refresh), so the vault
+    walk's memory never lands in the daemon. A failed rebuild is logged and the
+    guard keeps using the last good index until it ages out
+    (outbound_guard.MAX_AGE_HOURS); after that every GitHub action is refused.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            ok, detail = await loop.run_in_executor(None, outbound_guard.refresh)
+            log(f"outbound guard refresh {'ok' if ok else 'FAILED'}: {detail}")
+            if not ok:
+                fleet_log_event("outbound guard refresh failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"outbound guard refresh error: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(interval)
+
+
 def _resolve_token(agent: AgentConfig) -> str:
     token = get_token(agent.token_keychain_service)
     if not token:
@@ -315,17 +339,19 @@ async def run() -> None:
 
     log(f"starting {len(clients_and_tokens)} agents...")
     tick_task = asyncio.create_task(_heartbeat_tick())
+    guard_task = asyncio.create_task(outbound_guard_refresh_loop())
     try:
         await asyncio.gather(
             *[client.start(token) for client, token in clients_and_tokens],
             return_exceptions=False,
         )
     finally:
-        tick_task.cancel()
-        try:
-            await tick_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (tick_task, guard_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 def main() -> int:

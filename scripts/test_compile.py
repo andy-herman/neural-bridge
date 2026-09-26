@@ -16,8 +16,26 @@ from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
+sys.path.append(str(SCRIPTS_DIR.parent))
 
 import compile as cmp  # noqa: E402
+from scripts import outbound_guard as og  # noqa: E402
+from scripts.outbound_guard_testing import (  # noqa: E402
+    MARKING_PHRASE, SECRET_WORDS, SyntheticGuard, marked_excerpt,
+)
+
+# Every write path below runs through the outbound guard. A synthetic index
+# keeps these tests off the real index and audit log, and gives CI (which has
+# no index) something to clear against. See scripts/outbound_guard_testing.py.
+_GUARD = SyntheticGuard()
+
+
+def setUpModule():
+    _GUARD.install()
+
+
+def tearDownModule():
+    _GUARD.remove()
 
 
 SAMPLE_DAILY_LOG = """---
@@ -1440,6 +1458,256 @@ class TestMainDiscordManyCandidates(unittest.TestCase):
         # abort main() here, before this file (and the fleet heartbeat) existed.
         run_log = cmp.DRY_RUN_DIR / f"{cmp.utc_today()}-compile-run.md"
         self.assertTrue(run_log.exists())
+
+
+# ============================================================================
+# Outbound guard: nothing marked reaches knowledge/, and a broken guard
+# stops the run instead of degrading to unguarded writes
+# ============================================================================
+
+LEAKY_SUMMARY = "Notes on the depot pilot: " + marked_excerpt(20)
+CLEAN_SUMMARY = "How a sourdough starter is fed and judged"
+
+
+def _daily_log(concepts: list[str]) -> str:
+    """SAMPLE_DAILY_LOG's first session with a different proposed-concepts list."""
+    head = SAMPLE_DAILY_LOG.split("### Proposed concepts")[0]
+    return head + "### Proposed concepts\n\n" + "\n".join(f"- {c}" for c in concepts) + "\n"
+
+
+def _gate(verdict: str, reason="ok"):
+    """subprocess.run stand-in for the filing gate. `reason` may be a callable
+    taking the prompt, to vary the reason per candidate."""
+    def run(args, **kwargs):
+        why = reason(args[2]) if callable(reason) else reason
+
+        class _R:
+            stdout = json.dumps({"verdict": verdict, "reason": why, "checks_triggered": []})
+            stderr = ""
+            returncode = 0
+        return _R()
+    return run
+
+
+class TestOutboundGuardWiring(unittest.TestCase):
+    NAMES = ("REPO_ROOT", "DAILY_LOGS_DIR", "CONCEPTS_DIR", "HISTORY_DIR", "QUARANTINE_DIR",
+             "DRY_RUN_DIR", "COMPILE_STATE_FILE", "WIKI_LOG", "WIKI_INDEX", "CONNECTIONS_DIR")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        self._saved = {name: getattr(cmp, name) for name in self.NAMES}
+        cmp.REPO_ROOT = self.tmp_path
+        cmp.DAILY_LOGS_DIR = self.tmp_path / "daily-logs"
+        cmp.CONCEPTS_DIR = self.tmp_path / "knowledge" / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.QUARANTINE_DIR = self.tmp_path / "knowledge" / "quarantine"
+        cmp.DRY_RUN_DIR = self.tmp_path / "docs" / "compile"
+        cmp.COMPILE_STATE_FILE = self.tmp_path / ".compile_state.json"
+        cmp.WIKI_LOG = self.tmp_path / "knowledge" / "log.md"
+        cmp.WIKI_INDEX = self.tmp_path / "knowledge" / "index.md"
+        cmp.CONNECTIONS_DIR = self.tmp_path / "knowledge" / "connections"
+        cmp.WIKI_LOG.parent.mkdir(parents=True)
+        cmp.WIKI_LOG.write_text("---\ntype: log\n---\n\n# Log\n", encoding="utf-8")
+        cmp.WIKI_INDEX.write_text("---\ntype: index\n---\n\n# Index\n\n## Concepts\n\n_None yet._\n",
+                                  encoding="utf-8")
+        self._write_log([f"leaky-concept: {LEAKY_SUMMARY}", f"clean-concept: {CLEAN_SUMMARY}"])
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(cmp, name, value)
+        self.tmp.cleanup()
+
+    def _write_log(self, concepts: list[str]) -> None:
+        agent_dir = cmp.DAILY_LOGS_DIR / "research"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / "2026-09-25.md").write_text(_daily_log(concepts), encoding="utf-8")
+
+    def _run_main(self, *argv: str) -> int:
+        with patch.object(sys, "argv", ["compile.py", *argv, "--no-discord", "--votes", "1"]):
+            return cmp.main()
+
+    def assertNothingMarkedPublished(self):
+        published = "\n".join(p.read_text(encoding="utf-8")
+                              for p in (self.tmp_path / "knowledge").rglob("*.md")).lower()
+        self.assertNotIn("leaky-concept", published)  # blocked items are named by source, not slug
+        for word in SECRET_WORDS:
+            self.assertNotIn(word, published)
+
+    def test_blocked_promote_writes_nothing_and_leaves_the_candidate_open(self):
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")):
+            rc = self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertEqual(rc, 0)
+        self.assertEqual([p.stem for p in cmp.CONCEPTS_DIR.glob("*.md")], ["clean-concept"])
+        state = json.loads(cmp.COMPILE_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(state["compiled_concepts"]), ["clean-concept"])
+        log_text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        self.assertIn("BLOCKED-OUTBOUND concept from daily-logs/research/2026-09-25.md session 1", log_text)
+        self.assertIn("blocked_outbound=1", log_text)
+        self.assertIn("[[clean-concept]]", cmp.WIKI_INDEX.read_text(encoding="utf-8"))
+        self.assertNothingMarkedPublished()
+
+    def test_existing_concept_survives_a_blocked_rewrite(self):
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+        existing = cmp.CONCEPTS_DIR / "leaky-concept.md"
+        existing.write_text("OLD VERSION\n", encoding="utf-8")
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")):
+            self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertEqual(existing.read_text(encoding="utf-8"), "OLD VERSION\n")
+        self.assertFalse(cmp.HISTORY_DIR.exists())
+
+    def test_refusal_between_the_two_checks_restores_the_archived_concept(self):
+        # The index can be rebuilt between the pre-archive check and the one
+        # inside write_concept; the old version must come back, not vanish.
+        self._write_log([f"clean-concept: {CLEAN_SUMMARY}"])
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+        existing = cmp.CONCEPTS_DIR / "clean-concept.md"
+        existing.write_text("OLD VERSION\n", encoding="utf-8")
+        real_enforce = og.enforce
+
+        def refuse_second_concept_check(text, *, surface):
+            if surface == "wiki:concept":
+                refuse_second_concept_check.n += 1
+                if refuse_second_concept_check.n == 2:
+                    raise og.OutboundBlocked(og.Verdict(False, "marking", marking_hits=1))
+            return real_enforce(text, surface=surface)
+        refuse_second_concept_check.n = 0
+
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")), \
+             patch.object(cmp.outbound_guard, "enforce", side_effect=refuse_second_concept_check):
+            rc = self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertEqual(rc, 0)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "OLD VERSION\n")
+        self.assertEqual(list(cmp.HISTORY_DIR.rglob("*.md")), [])
+        log_text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        self.assertIn("BLOCKED-OUTBOUND concept", log_text)
+        self.assertNotIn("ARCHIVE", log_text)
+
+    def test_concept_writer_output_is_screened_too(self):
+        self._write_log([f"clean-concept: {CLEAN_SUMMARY}"])
+        responses = [json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []}),
+                     "Background: " + marked_excerpt(30) + "\n"]
+
+        def gate_then_writer(*args, **kwargs):
+            class _R:
+                stdout = responses.pop(0)
+                stderr = ""
+                returncode = 0
+            return _R()
+
+        with patch("compile.subprocess.run", side_effect=gate_then_writer):
+            rc = self._run_main("--no-dry-run")
+        self.assertEqual(rc, 0)
+        self.assertFalse(cmp.CONCEPTS_DIR.exists())
+        self.assertIn("BLOCKED-OUTBOUND concept", cmp.WIKI_LOG.read_text(encoding="utf-8"))
+        self.assertNothingMarkedPublished()
+
+    def test_blocked_quarantine_writes_nothing(self):
+        with patch("compile.subprocess.run", side_effect=_gate("QUARANTINE", "needs a human")):
+            self._run_main("--no-dry-run")
+        self.assertEqual([p.stem for p in cmp.QUARANTINE_DIR.glob("*.md")], ["clean-concept"])
+        self.assertIn("BLOCKED-OUTBOUND quarantine", cmp.WIKI_LOG.read_text(encoding="utf-8"))
+        self.assertNothingMarkedPublished()
+
+    def test_marking_phrase_alone_is_enough(self):
+        self._write_log([f"tagged-concept: Filed under {MARKING_PHRASE} by the ops team"])
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")):
+            self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertFalse(cmp.CONCEPTS_DIR.exists())
+        self.assertNotIn("tagged-concept", cmp.WIKI_LOG.read_text(encoding="utf-8"))
+
+    def test_dry_run_previews_the_block(self):
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")):
+            self._run_main("--dry-run", "--no-rich-body")
+        previews = [p.name for p in cmp.DRY_RUN_DIR.glob("*-PROMOTE-*.md")]
+        self.assertEqual(len(previews), 1)
+        self.assertIn("clean-concept", previews[0])
+        run_log = (cmp.DRY_RUN_DIR / f"{cmp.utc_today()}-compile-run-dry-run.md").read_text(encoding="utf-8")
+        self.assertIn("BLOCKED-OUTBOUND concept", run_log)
+
+    def test_reject_reason_quoting_marked_text_is_withheld_from_the_log(self):
+        def reason(prompt):
+            return f"Rejected because it repeats {marked_excerpt(20)}" if "leaky-concept" in prompt else "not durable"
+
+        with patch("compile.subprocess.run", side_effect=_gate("REJECT", reason)):
+            rc = self._run_main("--no-dry-run")
+        self.assertEqual(rc, 0)
+        log_text = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        self.assertIn("REJECT=2", log_text)
+        self.assertIn("REJECT clean-concept: not durable", log_text)
+        self.assertIn("BLOCKED-OUTBOUND log line withheld", log_text)
+        self.assertNothingMarkedPublished()
+
+    def test_discord_summary_carries_only_screened_lines(self):
+        def reason(prompt):
+            return f"Rejected because it repeats {marked_excerpt(20)}" if "leaky-concept" in prompt else "not durable"
+
+        sent = []
+        with patch("compile.subprocess.run", side_effect=_gate("REJECT", reason)), \
+             patch("compile.discord_post.send", side_effect=sent.append), \
+             patch.object(sys, "argv", ["compile.py", "--no-dry-run", "--votes", "1"]):
+            self.assertEqual(cmp.main(), 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("BLOCKED-OUTBOUND log line withheld", sent[0])
+        self.assertIn("REJECT clean-concept: not durable", sent[0])
+        for word in SECRET_WORDS + ("leaky-concept",):
+            self.assertNotIn(word, sent[0].lower())
+
+    def test_guard_failing_mid_run_stops_and_keeps_last_run_at(self):
+        self._write_log(["alpha-concept: The first harmless summary", "beta-concept: The second harmless summary"])
+        cmp.COMPILE_STATE_FILE.write_text(json.dumps(
+            {"last_run_at": "2026-01-01T00:00:00Z", "compiled_concepts": {}}), encoding="utf-8")
+        real_enforce = og.enforce
+        calls = {"concept": 0}
+
+        def index_ages_out_after_alpha(text, *, surface):
+            if surface == "wiki:concept":
+                calls["concept"] += 1
+                if calls["concept"] == 3:  # beta's first check: alpha took two
+                    raise og.OutboundBlocked(og.Verdict(False, "stale-index", index_age_hours=24.5))
+            return real_enforce(text, surface=surface)
+
+        original_log = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        with patch("compile.subprocess.run", side_effect=_gate("PROMOTE")), \
+             patch.object(cmp.outbound_guard, "enforce", side_effect=index_ages_out_after_alpha), \
+             patch.object(cmp, "_telemetry") as tel:
+            rc = self._run_main("--no-dry-run", "--no-rich-body", "--since", "2026-01-01")
+        self.assertEqual(rc, 1)
+        state = json.loads(cmp.COMPILE_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["last_run_at"], "2026-01-01T00:00:00Z")  # not advanced
+        self.assertEqual(sorted(state["compiled_concepts"]), ["alpha-concept"])  # what landed is kept
+        self.assertEqual([p.stem for p in cmp.CONCEPTS_DIR.glob("*.md")], ["alpha-concept"])
+        self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original_log)
+        self.assertFalse(tel.call_args.kwargs["ok"])
+        self.assertIn("mid_run:stale-index", tel.call_args.kwargs["detail"])
+
+    def test_unavailable_guard_refuses_the_whole_run(self):
+        original_log = cmp.WIKI_LOG.read_text(encoding="utf-8")
+        with patch.dict(os.environ, {og.ENV_DIR: str(self.tmp_path / "no-guard-state")}), \
+             patch.object(cmp.outbound_guard, "refresh", return_value=(False, "vault not found")) as refresh, \
+             patch("compile.subprocess.run") as run, \
+             patch.object(cmp, "_telemetry") as tel:
+            rc = self._run_main("--no-dry-run", "--no-rich-body")
+        self.assertEqual(rc, 1)
+        refresh.assert_called_once()
+        run.assert_not_called()  # no filing-gate calls spent
+        self.assertFalse(cmp.CONCEPTS_DIR.exists())
+        self.assertFalse(cmp.COMPILE_STATE_FILE.exists())  # last_run_at not advanced
+        self.assertEqual(cmp.WIKI_LOG.read_text(encoding="utf-8"), original_log)
+        self.assertFalse(tel.call_args.kwargs["ok"])
+        self.assertIn("outbound_guard_unavailable:no-index", tel.call_args.kwargs["detail"])
+
+    def test_connection_and_index_writers_screen_their_text(self):
+        marked_slug = "zephyrine-internal-only-notes"
+        conn = cmp.Connection(slug_a=marked_slug, slug_b="zz-other", shared_session_ids=["s1"],
+                              shared_sources=[{"agent": "research", "session_id": "s1",
+                                               "source_log": "daily-logs/research/x.md"}])
+        with self.assertRaises(og.OutboundBlocked):
+            cmp.write_connection(conn, dry_run=False)
+        self.assertFalse(cmp.CONNECTIONS_DIR.exists())
+        with self.assertRaises(og.OutboundBlocked):
+            cmp.refresh_index([marked_slug], dry_run=False)
+        self.assertIn("_None yet._", cmp.WIKI_INDEX.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
