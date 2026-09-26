@@ -120,6 +120,7 @@ def call_claude_sync(
     resume: bool = False,
     effort: str | None = None,
     agent_id: str | None = None,
+    mcp_config: str | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
@@ -153,6 +154,10 @@ def call_claude_sync(
         args.extend(["--effort", effort])
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
+    if mcp_config:
+        # Private MCP servers are loaded per call, only for turns that were
+        # granted them (see private_tools.py), never from user-wide config.
+        args.extend(["--mcp-config", mcp_config])
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
@@ -190,6 +195,7 @@ async def call_claude(
     resume: bool = False,
     effort: str | None = None,
     agent_id: str | None = None,
+    mcp_config: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -198,6 +204,6 @@ async def call_claude(
         lambda: call_claude_sync(
             prompt, model, timeout, allowed_tools, add_dirs,
             session_id=session_id, resume=resume, effort=effort,
-            agent_id=agent_id,
+            agent_id=agent_id, mcp_config=mcp_config,
         ),
     )

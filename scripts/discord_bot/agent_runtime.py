@@ -41,6 +41,7 @@ from .mention import (
     timeout_for,
     truncate_response,
 )
+from .private_tools import grant_for, merge_tools
 from .session_store import STORE as SESSION_STORE
 
 
@@ -93,6 +94,10 @@ class TurnRequest:
     # failure. The council room works this way because each turn is built from
     # the shared transcript rather than from Claude-side session continuity.
     stateless: bool = False
+    # True only when an authorized human started this turn directly. Gates
+    # private tools (private_tools.py); agent handoffs and every other path
+    # leave it False, so they never receive them.
+    owner_invoked: bool = False
 
 
 async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop) -> TurnResult:
@@ -121,6 +126,12 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         prompt = req.prompt_prefix + prompt
 
     tools = allowed_tools_for(req.agent_id)
+    grant = grant_for(req.agent_id, req.owner_invoked)
+    mcp_config = None
+    if grant:
+        tools = merge_tools(tools, grant.tools)
+        mcp_config = grant.mcp_config
+        log(f"TURN private tools granted: agent={req.agent_id} count={len(grant.tools.split(','))}")
     extra_dirs = add_dirs_for(req.agent_id)
     agent_timeout = timeout_for(req.agent_id)
     agent_effort = effort_for(req.agent_id)
@@ -149,6 +160,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         resume=not is_new_session,
         effort=agent_effort,
         agent_id=req.agent_id,
+        mcp_config=mcp_config,
         **model_kwargs,
     )
 
@@ -170,6 +182,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             resume=False,
             effort=agent_effort,
             agent_id=req.agent_id,
+            mcp_config=mcp_config,
             **model_kwargs,
         )
 
