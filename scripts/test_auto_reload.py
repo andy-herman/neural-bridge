@@ -120,6 +120,23 @@ class TestAutoReload(unittest.TestCase):
         self.assertEqual(len(kicks), 1, "only the loaded bridge is restarted")
         self.assertTrue(kicks[0].endswith("com.andyherman.neural-bridge.luna-telegram"))
 
+    def _assert_reloads_for(self, path: str) -> None:
+        self._commit(self.seed, path, "x = 1\n")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("no daemon-relevant changes", self._log_text())
+        self.assertIn("install.sh skip=com.andyherman.neural-bridge.auto-reload", self._calls())
+
+    def test_outbound_guard_change_reloads_the_daemon(self):
+        # The daemon imports scripts/outbound_guard.py (every GitHub action
+        # passes through it). Until 2026-09-26 the watcher treated it as
+        # unrelated, so a change to the guard's checks sat undeployed.
+        self._assert_reloads_for("scripts/outbound_guard.py")
+
+    def test_fleet_heartbeat_change_reloads_the_daemon(self):
+        # main.py imports scripts/fleet_heartbeat.py; same gap as above.
+        self._assert_reloads_for("scripts/fleet_heartbeat.py")
+
     def test_non_daemon_change_pulls_without_reload(self):
         self._commit(self.seed, "docs/NOTES.md", "notes\n")
         self._run()
