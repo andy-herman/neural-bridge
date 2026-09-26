@@ -433,22 +433,26 @@ ECHO_VOICE_MAX_CHARS = 6000
 ECHO_VOICE_AGENTS = {"content", "social", "luna"}
 
 
-def _echo_voice_block() -> str:
+def _echo_voice_block(agent_id: str | None = None) -> str:
     """Read Echo's voice.md profile and return an auto-inject block.
     Empty string if missing/unreadable so the prompt builder degrades gracefully.
+
+    Events carry the agent so consolidation gate G2 (keep the profile for all
+    three agents, or Luna only) can be answered; until 2026-09-25 every one of
+    them was logged without an agent and the gate could not be decided.
     """
     if not ECHO_VOICE_PATH.exists():
-        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail="voice.md missing")
+        _mem.record(_mem.RETRIEVE, "echo_voice", agent_id=agent_id, ok=False, detail="voice.md missing")
         return ""
     try:
         voice = ECHO_VOICE_PATH.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail=f"read failed: {exc}")
+        _mem.record(_mem.RETRIEVE, "echo_voice", agent_id=agent_id, ok=False, detail=f"read failed: {exc}")
         return ""
     if not voice.strip():
-        _mem.record(_mem.RETRIEVE, "echo_voice", ok=False, detail="voice.md is empty")
+        _mem.record(_mem.RETRIEVE, "echo_voice", agent_id=agent_id, ok=False, detail="voice.md is empty")
         return ""
-    _mem.record(_mem.RETRIEVE, "echo_voice", ok=True, chars=len(voice))
+    _mem.record(_mem.RETRIEVE, "echo_voice", agent_id=agent_id, ok=True, chars=len(voice))
     if len(voice) > ECHO_VOICE_MAX_CHARS:
         voice = voice[: ECHO_VOICE_MAX_CHARS - 1].rstrip() + "\n[…profile truncated to fit prompt budget. Read the full file via the Read tool if needed: `~/Documents/Luna Master/Andy Profile/voice.md`]"
     sanitized = sanitize_untrusted_text(voice, "echo-voice")
@@ -683,7 +687,7 @@ def build_mention_prompt(
     # (content, social, luna). Lets them reference Andy's voice without a
     # tool call. Phase 5 of the Echo build.
     if agent_id in ECHO_VOICE_AGENTS:
-        echo_prefix = _echo_voice_block()
+        echo_prefix = _echo_voice_block(agent_id)
         if echo_prefix:
             rendered = echo_prefix + rendered
 
