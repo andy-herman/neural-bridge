@@ -88,9 +88,8 @@ Only 13 shingles were exempt as already public.
 - A note marked since the last index rebuild (at most an hour on the daemon's
   schedule).
 - Anything outside the two routes: Discord and Telegram messages (except the
-  compile summary, which carries the same screened lines as `log.md`), the
-  loop engineer (not installed; it pushes through its own code), and anything
-  pushed by hand. Agents cannot edit tracked `knowledge/` files directly:
+  compile summary, which carries the same screened lines as `log.md`), and
+  anything pushed by hand. Agents cannot edit tracked `knowledge/` files directly:
   `hooks/guard_concepts.py` blocks every tool write under `knowledge/` except
   `knowledge/agents/`.
 
@@ -108,6 +107,7 @@ that, the exemption above covers it.
 | GitHub | `github_client.py` | Issue title and body, comments, closing comments, issue body edits. `/triage` now posts its comment through here too. |
 | GitHub | `pr_proposals.py` | The whole proposal (branch, commit message, title, body, file paths and contents) when it is staged, and again before execution touches the working tree. Finally, between the commit and `git push`: everything the push to origin would publish (every unpushed commit, merges included, with `-diff` and binary attributes overridden) plus the PR text. It commits only its own paths. |
 | GitHub | `agent_builder.py` | Every agent-supplied field before any git or file change, then the push itself, between the commit and `git push`. It stages and commits only the files it writes. |
+| GitHub | `loop_engineer/pr.py` | Before `git push`: everything the push would publish (every unpushed commit) plus the PR title and body, which carry the agent's own summary. It rebuilds an index older than an hour first, because it runs without the daemon's refresh loop. A refusal escalates the issue with counts only. |
 
 When something is blocked, nothing is published:
 

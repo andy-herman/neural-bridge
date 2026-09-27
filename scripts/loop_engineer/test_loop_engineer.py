@@ -9,10 +9,12 @@ race logic is tested by monkeypatching the thin gh wrappers.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PKG_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PKG_DIR.parent.parent))
@@ -31,6 +33,21 @@ from scripts.loop_engineer import (  # noqa: E402
 from scripts.loop_engineer.config import LoopConfig  # noqa: E402
 from scripts.loop_engineer.queue import Issue  # noqa: E402
 from scripts.loop_engineer.worktree import WorktreeHandle  # noqa: E402
+from scripts.outbound_guard_testing import (  # noqa: E402
+    FILLER, SECRET_WORDS, SyntheticGuard, marked_excerpt, planted,
+)
+
+# open_pr screens the push with scripts/outbound_guard.py. A synthetic index
+# keeps this module off the real index and audit log, and gives CI one to use.
+_GUARD = SyntheticGuard()
+
+
+def setUpModule():
+    _GUARD.install()
+
+
+def tearDownModule():
+    _GUARD.remove()
 
 
 def _issue(number=1, title="t", body="b", labels=(), url=""):
@@ -397,6 +414,88 @@ class TestPR(unittest.TestCase):
     def test_pr_body_handles_empty_summary(self):
         body = pr.pr_body(_issue(5, title="t"), "", files=1, lines=1, tests_ok=True)
         self.assertIn("no summary", body)
+
+
+class TestOpenPRGuard(unittest.TestCase):
+    """open_pr publishes only what the outbound guard clears."""
+
+    def setUp(self):
+        self.calls: list[list[str]] = []
+        self.wt = WorktreeHandle(number=7, branch="eng/7", path=Path(tempfile.gettempdir()))
+
+    def _open(self, summary="I changed X.", added=""):
+        def fake_git(cwd, args, timeout=120):
+            self.calls.append(args)
+            if args[0] == "log" and "-p" in args:  # the unpushed commits' patch
+                return True, f"diff --git a/x b/x\n+++ b/notes.md\n+{added}"
+            return True, ""
+
+        gh = mock.Mock(return_value=mock.Mock(returncode=0, stdout="https://github.com/x/y/pull/9\n", stderr=""))
+        with mock.patch.object(pr, "git", side_effect=fake_git), \
+             mock.patch.object(pr.sp, "run", gh), \
+             mock.patch.object(pr.outbound_guard, "ensure_fresh", return_value=(True, "fresh")) as fresh:
+            result = pr.open_pr(LoopConfig(), "x/y", self.wt, _issue(7, title="fix the thing"), summary, 1, 2)
+        return result, gh, fresh
+
+    def test_clean_change_is_pushed_and_opened(self):
+        result, gh, fresh = self._open(added=FILLER)
+        self.assertTrue(result.ok, result.error)
+        self.assertIn(["push", "-u", "origin", "eng/7"], self.calls)
+        gh.assert_called_once()
+        fresh.assert_called_once()
+
+    def test_marked_text_in_a_commit_stops_the_push(self):
+        result, gh, _ = self._open(added=planted(marked_excerpt(20)))
+        self.assertFalse(result.ok)
+        self.assertIn("outbound guard blocked", result.error)
+        self.assertIn("nothing pushed", result.error)
+        self.assertNotIn("push", [a[0] for a in self.calls])
+        gh.assert_not_called()
+
+    def test_marked_text_in_the_agent_summary_stops_the_push(self):
+        result, gh, _ = self._open(summary="Background: " + marked_excerpt(20))
+        self.assertFalse(result.ok)
+        self.assertNotIn("push", [a[0] for a in self.calls])
+        gh.assert_not_called()
+        for word in SECRET_WORDS:
+            self.assertNotIn(word, result.error.lower())
+
+    def test_end_to_end_on_a_real_repo_nothing_reaches_origin(self):
+        def git_cmd(cwd, *args):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                           cwd=str(cwd), capture_output=True, text=True, check=True)
+
+        real_run = subprocess.run
+
+        def git_only(cmd, *args, **kwargs):
+            if cmd[0] == "gh":
+                raise AssertionError("gh must not run")
+            return real_run(cmd, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            git_cmd(root, "-c", "init.defaultBranch=main", "init", "--bare", "origin.git")
+            git_cmd(root, "-c", "init.defaultBranch=main", "init", "work")
+            work = root / "work"
+            git_cmd(work, "remote", "add", "origin", str(root / "origin.git"))
+            (work / "README.md").write_text("hi\n", encoding="utf-8")
+            git_cmd(work, "add", "README.md")
+            git_cmd(work, "commit", "-m", "init")
+            git_cmd(work, "push", "-u", "origin", "main")
+            git_cmd(work, "checkout", "-b", "eng/8")
+            (work / "notes.md").write_text(planted(marked_excerpt(20)) + "\n", encoding="utf-8")
+            git_cmd(work, "add", "notes.md")
+            git_cmd(work, "commit", "-m", "agent work")
+            with mock.patch.object(pr.sp, "run", side_effect=git_only), \
+                 mock.patch.object(pr.outbound_guard, "ensure_fresh", return_value=(True, "fresh")):
+                result = pr.open_pr(LoopConfig(), "x/y", WorktreeHandle(8, "eng/8", work),
+                                    _issue(8, title="fix it"), "summary", 1, 1)
+            self.assertFalse(result.ok)
+            self.assertIn("shingle(s)", result.error)  # refused on content, not on a git error
+            origin_branches = real_run(["git", "branch", "--list"], cwd=str(root / "origin.git"),
+                                       capture_output=True, text=True).stdout
+            self.assertNotIn("eng/8", origin_branches)
 
 
 # ---------- notify builders + webhook precedence ----------

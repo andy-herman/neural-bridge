@@ -47,6 +47,12 @@ Every gate is computed by the daemon, never from the agent's claim of success:
    red (a couple of known pre-existing failures), and the loop is responsible
    only for not *adding* failures, not for fixing what it didn't touch. A change
    that fixes a baseline failure also passes.
+4. **Outbound guard**: before the push, `scripts/outbound_guard.py` screens
+   every unpushed commit plus the PR title and body, which carry the agent's
+   own summary. The branch and the PR are public the moment they exist, and the
+   agent may have read marked vault notes. A refusal pushes nothing: the issue
+   goes to `agent-failed` with a counts-only reason, and its worktree is kept.
+   See [OUTBOUND_GUARD.md](OUTBOUND_GUARD.md).
 
 On a failing gate the agent gets up to `max_strikes` (default 3) fix attempts,
 each fed the failing test output on the same session. The strike counter is held
