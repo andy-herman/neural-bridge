@@ -16,6 +16,9 @@ sys.path.insert(0, str(HOOKS_DIR))
 
 import session_start  # noqa: E402
 
+sys.path.insert(0, str(HOOKS_DIR.parent))
+from scripts.discord_bot import progress_log  # noqa: E402
+
 
 class TestResolveAgent(unittest.TestCase):
     def test_payload_agent_type(self):
@@ -158,13 +161,87 @@ class TestBuildContext(unittest.TestCase):
         self.assertIn("Recent research session notes", out)
         self.assertIn("Prior research findings.", out)
 
-    def test_includes_daily_logs(self):
+    # --- progress log (replaced the daily-log section on 2026-09-28) ---
+
+    def _vault(self) -> Path:
+        agents = self.repo / "vault" / "Agents"
+        agents.mkdir(parents=True)
+        return agents
+
+    def _seed_progress(self, agents: Path, agent: str, n: int, size: int = 60) -> None:
+        for i in range(n):
+            entry = progress_log.render_entry(session_id=f"s{i:02d}", decisions=[f"d{i} " + "x" * size],
+                                              findings=[], open_questions=[])
+            self.assertEqual(progress_log.append_entry(agent, entry, agents_base=agents), (True, "appended"))
+
+    def test_daily_logs_are_no_longer_injected(self):
         log_dir = session_start.DAILY_LOGS_DIR / "research"
         log_dir.mkdir(parents=True)
         (log_dir / "2026-05-09.md").write_text("Daily log entry.")
-        out = session_start.build_context("research", budget=4000)
-        self.assertIn("Recent research daily logs", out)
-        self.assertIn("Daily log entry.", out)
+        with patch.dict(os.environ, {"NB_AGENT_ID": ""}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", self.repo / "no-vault"):
+            out = session_start.build_context("research", budget=4000)
+        self.assertNotIn("daily logs", out)
+        self.assertNotIn("Daily log entry.", out)
+
+    def test_includes_progress_log_newest_entries_whole(self):
+        agents = self._vault()
+        self._seed_progress(agents, "research", 30, size=200)
+        with patch.dict(os.environ, {"NB_AGENT_ID": ""}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", agents):
+            out = session_start.build_context("research", budget=4000)
+        self.assertIn("## Your recent progress log (auto-injected from", out)
+        self.assertIn("Agents/research/progress.md", out)
+        self.assertEqual(out.count("progress log"), 1)  # one heading, not two
+        self.assertIn("<progress-log>", out)
+        self.assertIn("session s29", out)          # newest is there
+        self.assertNotIn("session s00", out)       # oldest fell outside the budget
+        self.assertNotIn("(entry truncated)", out)  # whole entries only
+        self.assertLessEqual(len(out), 4000 + 200)  # header/wrapper overhead only
+
+    def test_progress_log_left_out_on_daemon_turns(self):
+        # claude_invoke.py stamps NB_AGENT_ID; mention.py injects progress.md
+        # itself on those turns, so the hook must not add a second copy.
+        agents = self._vault()
+        self._seed_progress(agents, "luna", 3)
+        with patch.dict(os.environ, {"NB_AGENT_ID": "luna"}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", agents):
+            out = session_start.build_context("luna", budget=4000)
+        self.assertNotIn("progress log", out)
+        # The manual override is not the daemon marker and must not suppress it.
+        with patch.dict(os.environ, {"NB_AGENT_ID": "", "NB_AGENT": "luna"}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", agents):
+            out = session_start.build_context("luna", budget=4000)
+        self.assertIn("Agents/luna/progress.md", out)
+
+    def test_no_vault_or_no_log_is_quiet_not_fatal(self):
+        agents = self._vault()
+        with patch.dict(os.environ, {"NB_AGENT_ID": ""}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", agents):
+            out = session_start.build_context("research", budget=4000)  # vault, no log yet
+        self.assertNotIn("progress log", out)
+        self.assertIn("end SessionStart context", out)
+        with patch.dict(os.environ, {"NB_AGENT_ID": ""}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", self.repo / "absent"):
+            out = session_start.build_context("research", budget=4000)  # no vault at all
+        self.assertNotIn("progress log", out)
+        self.assertIn("end SessionStart context", out)
+
+    def test_progress_telemetry_mirrors_mention(self):
+        agents = self._vault()
+        self._seed_progress(agents, "research", 2)
+        seen = []
+        with patch.dict(os.environ, {"NB_AGENT_ID": ""}, clear=False), \
+             patch.object(progress_log, "AGENTS_BASE", agents), \
+             patch.object(session_start, "_record_progress_telemetry",
+                          side_effect=lambda agent, **kw: seen.append((agent, kw))):
+            session_start.build_context("research", budget=4000)
+            session_start.build_context("luna", budget=4000)  # no log: ok, chars 0
+        self.assertEqual(seen[0][0], "research")
+        self.assertTrue(seen[0][1]["ok"]); self.assertGreater(seen[0][1]["chars"], 0)
+        self.assertEqual(seen[1][0], "luna")
+        self.assertTrue(seen[1][1]["ok"]); self.assertEqual(seen[1][1]["chars"], 0)
+        self.assertIn("missing", seen[1][1]["detail"])
 
     def test_unattributed_yields_minimal_block(self):
         # Even unattributed gets the index if present
@@ -173,7 +250,7 @@ class TestBuildContext(unittest.TestCase):
         out = session_start.build_context(session_start.UNATTRIBUTED, budget=4000)
         self.assertIn("Index.", out)
         self.assertNotIn("session notes", out)
-        self.assertNotIn("daily logs", out)
+        self.assertNotIn("progress log", out)
 
 
 class TestMainEndToEnd(unittest.TestCase):
