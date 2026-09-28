@@ -171,6 +171,14 @@ every Discord turn was flushed as `_unattributed`, which `compile.py` skips.
   `progress_log` in the canary. A missing file is recorded as ok with zero
   chars, deliberately: lessons_digest died of counting "no file yet" as
   failure. Adoption is reported by `--gates`.
+- **Step 1 completed 2026-09-28.** "Both re-read at session start" is now
+  literal: `hooks/session_start.py` injects the recent `progress.md` entries
+  for Claude Code sessions, and no longer injects `daily-logs/<agent>/` at
+  all (that section read the two newest files from the top, so it carried the
+  oldest sessions of the day, truncated, and duplicated `progress.md` on
+  daemon turns). Daemon turns keep getting the log from `mention.py` only;
+  the hook checks the daemon's `NB_AGENT_ID` stamp and stands aside. The
+  daily logs remain `compile.py`'s input.
 - **Step 3 done.** `test_mention.py` carries a guard that fails if
   `semantic_search` or a `conversation_log` reader is ever imported into the
   prompt builder. Both stores stay retrieval-only.

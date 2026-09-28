@@ -225,9 +225,10 @@ def gates(events: list[dict]) -> dict[str, dict]:
     last_compile = max((int(e.get("epoch", 0)) for e in compiles), default=0)
     # "Agents ran under the code that reads the wiki": mention.py logs a
     # progress_log retrieve on every turn, right beside the wiki read, and both
-    # shipped together. Older traffic (honcho, luna_notes) predates the read
-    # path, so counting it would call the wiki dead for turns that could never
-    # have read it.
+    # shipped together (session_start.py logs the same event for Claude Code
+    # sessions since 2026-09-28, beside the UserPromptSubmit read). Older
+    # traffic (honcho, luna_notes) predates the read path, so counting it would
+    # call the wiki dead for turns that could never have read it.
     turns = _sel("progress_log", mem.RETRIEVE)
     g4 = {"question": "is knowledge/concepts read at all, and does compile still run?",
           "reads": len(reads), "grounded": grounded, "compile_runs": len(compiles),

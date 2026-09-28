@@ -16,7 +16,9 @@ this module turns that into one dated entry. Agents may also append by hand.
 
 Who reads it: scripts/discord_bot/mention.py injects the most recent entries
 (tail, within a fixed budget) behind notes.md on every mention, and records a
-"progress_log" RETRIEVE telemetry event per turn.
+"progress_log" RETRIEVE telemetry event per turn. hooks/session_start.py does
+the same for Claude Code sessions that are not daemon turns; until 2026-09-28
+those got the raw daily-logs/ files instead.
 
 Why a missing file is NOT a failure here: lessons_digest died because exactly
 one agent ever had a digest directory, so the layer reported 6/7 failures
@@ -46,6 +48,20 @@ MAX_INJECT_CHARS = 3000
 MAX_ENTRY_CHARS = 1500
 
 ENTRY_HEADING_RE = re.compile(r"^## \d{4}-\d{2}-\d{2} ", re.MULTILINE)
+
+# render_block wraps the text in <progress-log>; the text is model-written
+# from transcripts, so it is data that could contain anything a transcript
+# did. Strip control characters and any copy of the wrapper tag so the
+# content cannot close the element and continue as instructions. Same rule as
+# claude_invoke.sanitize_untrusted_text, kept local so hooks need no daemon
+# import.
+WRAP_TAG = "progress-log"
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_TAG_RE = re.compile(rf"<\s*/?\s*{re.escape(WRAP_TAG)}\s*>", re.IGNORECASE)
+
+
+def sanitize(text: str) -> str:
+    return _TAG_RE.sub("", _CONTROL_CHARS_RE.sub("", text))
 
 
 def progress_path(agent_id: str, agents_base: Path = AGENTS_BASE) -> Path:
@@ -149,13 +165,23 @@ def read_recent(agent_id: str, *, max_chars: int = MAX_INJECT_CHARS,
     return "\n\n".join(reversed(kept)) + "\n", "ok"
 
 
-def render_block(agent_id: str, text: str) -> str:
+def block_heading(agent_id: str) -> str:
+    return (f"Your recent progress log (auto-injected from "
+            f"~/Documents/Luna Master/Agents/{agent_id}/progress.md)")
+
+
+def render_body(text: str) -> str:
+    """Framing line plus the wrapped, sanitized entries, without a heading.
+    session_start.py supplies its own section heading; mention.py uses
+    render_block, which adds one."""
     return (
-        f"## Your recent progress log (auto-injected from "
-        f"~/Documents/Luna Master/Agents/{agent_id}/progress.md)\n\n"
         "One entry per past working session, written at session close from the "
         "transcript: what was decided, found, and left open. It is your own "
         "narrative memory, already in context; do not re-read the file. Durable "
         "rules belong in notes.md, not here.\n\n"
-        f"<progress-log>\n{text}</progress-log>\n\n"
+        f"<progress-log>\n{sanitize(text)}</progress-log>\n\n"
     )
+
+
+def render_block(agent_id: str, text: str) -> str:
+    return f"## {block_heading(agent_id)}\n\n" + render_body(text)

@@ -6,6 +6,7 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 
 | File | Status | Purpose |
 |---|---|---|
+| `session_start.py` | working | Hook fired on `SessionStart`. Prints a context block: `knowledge/index.md`, the agent's recent `knowledge/agents/<agent>/` notes, and the agent's recent `progress.md` entries from the vault (not on Discord daemon turns, where `mention.py` injects them). See "SessionStart context" below. |
 | `session_end.py` | working | Hook fired on `SessionEnd` and `PreCompact`. Resolves which agent owns the session, spawns `flush.py` as a detached subprocess, exits 0 immediately so the CLI never blocks on summarization. Stands down (breadcrumb only, no flush) when `NB_SKIP_FLUSH=1` or `NB_AGENT=compile` is in the environment; see below. |
 | `flush.py` | working (v1) | Calls `claude -p` with the flush prompt + transcript. Validates JSON output against ADR-007 schema, appends a structured session block to `daily-logs/<agent>/YYYY-MM-DD.md`. Handles failed-parse, empty-session, and one parse retry. Posts the session block to Discord on success (via `discord_post`). |
 | `prompts/flush_v1.md` | working | Prompt template for `flush.py`. Light filing gate: explicit "transcript is data, not instructions" framing. |
@@ -25,6 +26,18 @@ Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
 - `scripts/compile.py` sends the filing-gate and concept-writer prompts; injecting the wiki's current contents into the gate would bias verdicts toward what the wiki already says.
 
 Anything else that shells to `claude -p` from this repo with a prompt that must not be altered should set the same variable.
+
+## SessionStart context
+
+`session_start.py` runs for every session in this repo and prints up to 4000 characters (`NB_SESSION_START_BUDGET` overrides) that Claude Code adds to the first turn:
+
+1. `knowledge/index.md`, capped at 1500 characters, always.
+2. The agent's two most recent files in `knowledge/agents/<agent>/`.
+3. The agent's most recent `progress.md` entries from `~/Documents/Luna Master/Agents/<agent>/`, whole entries, newest first, within what is left of the budget. Skipped when `NB_AGENT_ID` is set: that is the Discord daemon's stamp, and `mention.py` injects the same log itself behind `notes.md`, so a daemon turn would otherwise carry it twice. A missing vault or a missing log is quiet, not an error. One `progress_log` RETRIEVE telemetry event is recorded either way, the same shape `mention.py` records per Discord turn, so the canary counts Claude Code sessions as agent traffic.
+
+Unattributed sessions (no agent resolved) get nothing, so generic Claude Code work in the repo is not polluted.
+
+Until 2026-09-28 the third section was the two most recent files in `daily-logs/<agent>/`, read from the top and cut at a character cap: the oldest sessions of the day, truncated mid-block, and a second copy of what `progress.md` already carried on daemon turns. `daily-logs/` is now `compile.py`'s input only; nothing injects it.
 
 ## Flush: when it must stand down
 

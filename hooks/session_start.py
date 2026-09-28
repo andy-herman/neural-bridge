@@ -4,7 +4,9 @@
 When Claude Code starts a session in this repo, this hook reads:
 - knowledge/index.md (always-loaded wiki entry point)
 - The agent's most recent 1-2 entries in knowledge/agents/<agent>/
-- The most recent 2-3 entries in daily-logs/<agent>/
+- The agent's most recent progress.md entries from the vault
+  (~/Documents/Luna Master/Agents/<agent>/progress.md), unless the session
+  is a Discord daemon turn, where mention.py already injects them
 
 …and prints a context block to stdout. Claude Code's SessionStart hook
 contract treats hook stdout as additionalContext to inject into the
@@ -14,6 +16,14 @@ Total budget: 4000 chars by default (env var `NB_SESSION_START_BUDGET`
 overrides). The block is structured so partial truncation degrades
 gracefully — index.md is always included; per-agent context shrinks
 first.
+
+History: until 2026-09-28 the third section was the two most recent files
+in daily-logs/<agent>/, read from the top and truncated, so it carried the
+oldest sessions of the day, cut mid-block. progress.md is written from the
+same flush output, keeps whole entries, newest first within budget, and is
+the narrative store docs/MEMORY_CONSOLIDATION.md names as the one re-read
+at session start. daily-logs/ remains compile.py's input; it is no longer
+injected anywhere.
 
 Schema: ADR-007 (decisions/ADR-007-daily-log-schema.md) for daily-log
 structure; AGENTS.md for the wiki layout.
@@ -42,7 +52,13 @@ from schema import KNOWN_AGENTS, UNATTRIBUTED  # noqa: E402
 DEFAULT_BUDGET = 4000  # chars total
 INDEX_CAP = 1500
 PER_AGENT_NOTES_CAP = 2
-DAILY_LOG_ENTRIES_CAP = 2
+
+# The Discord daemon stamps this on every `claude -p` turn (claude_invoke.py)
+# and its prompt builder (mention.py) injects progress.md itself, behind
+# notes.md, with its own telemetry event. When it is present this hook leaves
+# the progress log out so a daemon turn does not carry it twice. NB_AGENT, the
+# manual override, does not suppress it.
+DAEMON_MARKER_ENV = "NB_AGENT_ID"
 
 
 def utc_iso() -> str:
@@ -99,6 +115,65 @@ def recent_files(directory: Path, *, limit: int) -> list[Path]:
     return candidates[:limit]
 
 
+def _progress_module():
+    """Import scripts/discord_bot/progress_log.py (stdlib only) by repo path.
+
+    Resolved lazily and by path, not by package, so the hook keeps working from
+    any cwd and never needs the daemon's venv. Returns None if the module is
+    missing, which a fresh checkout cannot be but a partial one could.
+    """
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from scripts.discord_bot import progress_log
+    except Exception:
+        return None
+    return progress_log
+
+
+def _record_progress_telemetry(agent: str, *, ok: bool, chars: int, detail: str) -> None:
+    """One RETRIEVE event for store "progress_log", same shape mention.py
+    records per Discord turn, so the canary sees Claude Code sessions as
+    agent traffic too. Never raises."""
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.discord_bot import memory_telemetry as mem
+        mem.record(mem.RETRIEVE, "progress_log", agent_id=agent, ok=ok, chars=chars,
+                   detail=f"session_start: {detail}"[:160])
+    except Exception:
+        pass
+
+
+def progress_section(agent: str, *, max_chars: int, env=None) -> tuple[str, str] | None:
+    """(header, content) for the agent's recent progress.md entries, or None.
+
+    None means "nothing to inject", which covers: a daemon turn (mention.py
+    injects it), no vault on this machine, no log yet for this agent, or a
+    read error. Only the read error is recorded as a failure; the rest are
+    legitimate (see progress_log.py on why a missing file is not a failure).
+    """
+    env = os.environ if env is None else env
+    if env.get(DAEMON_MARKER_ENV, "").strip():
+        return None
+    progress_log = _progress_module()
+    if progress_log is None:
+        return None
+    try:
+        text, status = progress_log.read_recent(agent, max_chars=max_chars)
+    except Exception as exc:  # the reader never raises, but the hook must not depend on that
+        _record_progress_telemetry(agent, ok=False, chars=0, detail=f"{type(exc).__name__}: {exc}")
+        return None
+    if status in ("missing", "empty"):
+        _record_progress_telemetry(agent, ok=True, chars=0, detail=f"progress.md {status}")
+        return None
+    if status != "ok":
+        _record_progress_telemetry(agent, ok=False, chars=0, detail=status)
+        return None
+    _record_progress_telemetry(agent, ok=True, chars=len(text), detail="injected")
+    return (progress_log.block_heading(agent), progress_log.render_body(text).rstrip())
+
+
 def render_block(agent: str, sections: list[tuple[str, str]]) -> str:
     """Render the final additionalContext block."""
     lines = [
@@ -147,23 +222,14 @@ def build_context(agent: str, *, budget: int) -> str:
                 sections.append((header, joined))
                 remaining -= len(joined) + len(header) + 12
 
-    # 3. Per-agent recent daily-logs (the flush-produced entries)
-    if agent != UNATTRIBUTED and remaining > 200:
-        log_dir = DAILY_LOGS_DIR / agent
-        files = recent_files(log_dir, limit=DAILY_LOG_ENTRIES_CAP)
-        if files:
-            chunks = []
-            per_file_cap = max(200, remaining // (DAILY_LOG_ENTRIES_CAP * 2))
-            for f in files:
-                content = read_capped(f, per_file_cap)
-                if content.strip():
-                    chunks.append(f"### {f.relative_to(REPO_ROOT)}\n\n{content}")
-            if chunks:
-                joined = "\n\n".join(chunks)
-                if len(joined) > remaining:
-                    joined = joined[: max(0, remaining - 100)].rstrip() + "\n\n_(truncated)_"
-                header = f"Recent {agent} daily logs"
-                sections.append((header, joined))
+    # 3. Per-agent progress log (the narrative half of the vault note store,
+    #    written by flush.py at session close). Whole entries, newest first,
+    #    within what is left of the budget. render_block's own framing text
+    #    is ~350 chars, so leave room for it or the section is all wrapper.
+    if agent != UNATTRIBUTED and remaining > 600:
+        section = progress_section(agent, max_chars=remaining - 400)
+        if section:
+            sections.append(section)
 
     return render_block(agent, sections)
 
