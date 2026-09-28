@@ -6,6 +6,8 @@ Agents read the Obsidian vault, and two routes publish what they write: the wiki
 
 Follow-up, 2026-09-26: text already published on the default branch of this repo or the blog is exempt from the index, because republishing it cannot leak anything. The private policy had gained more folders, which made four published blog posts match. Three matched on public NIST citation lines and one on a published 14-word phrase.
 
+Follow-up, 2026-09-28: a git pre-push hook (`scripts/githooks/pre-push`, installed with `outbound_guard.py install-pre-push`) is the catch-all. It screens every push from this repo's and the blog's clones, including manual pushes, the daemon's and the loop engineer's. The routes that already check before pushing are now also checked a second time at the git layer.
+
 A related fix: `create_agent` committed with `git add -A`, which would have swept every untracked file in the daemon's checkout into a public branch. It now stages only the files it writes. `docs/echo-synthesis/` is gitignored too, since its run logs carry the raw synthesis output.
 
 ## 2026-09-22 — Memory layer repair (PR #162)

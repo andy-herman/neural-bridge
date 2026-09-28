@@ -87,11 +87,15 @@ Only 13 shingles were exempt as already public.
 - Paraphrase, and verbatim runs shorter than about 14 words.
 - A note marked since the last index rebuild (at most an hour on the daemon's
   schedule).
-- Anything outside the two routes: Discord and Telegram messages (except the
-  compile summary, which carries the same screened lines as `log.md`), and
-  anything pushed by hand. Agents cannot edit tracked `knowledge/` files directly:
-  `hooks/guard_concepts.py` blocks every tool write under `knowledge/` except
-  `knowledge/agents/`.
+- Discord and Telegram messages, except the compile summary, which carries
+  the same screened lines as `log.md`.
+- Pushes from a clone without the pre-push hook (another machine, a fresh
+  clone before `install-pre-push`), and pushes made with `git push
+  --no-verify`, which skips every pre-push hook.
+
+Agents cannot edit tracked `knowledge/` files directly either:
+`hooks/guard_concepts.py` blocks every tool write under `knowledge/` except
+`knowledge/agents/`.
 
 The opposite trade-off, from dropping the discount: public text that also
 sits inside a marked note is blocked too, until it has been published once.
@@ -108,6 +112,7 @@ that, the exemption above covers it.
 | GitHub | `pr_proposals.py` | The whole proposal (branch, commit message, title, body, file paths and contents) when it is staged, and again before execution touches the working tree. Finally, between the commit and `git push`: everything the push to origin would publish (every unpushed commit, merges included, with `-diff` and binary attributes overridden) plus the PR text. It commits only its own paths. |
 | GitHub | `agent_builder.py` | Every agent-supplied field before any git or file change, then the push itself, between the commit and `git push`. It stages and commits only the files it writes. |
 | GitHub | `loop_engineer/pr.py` | Before `git push`: everything the push would publish (every unpushed commit) plus the PR title and body, which carry the agent's own summary. It rebuilds an index older than an hour first, because it runs without the daemon's refresh loop. A refusal escalates the issue with counts only. |
+| Any push | `scripts/githooks/pre-push` | The catch-all, a git pre-push hook linked into this repo's and the blog's clones. Every push from them is screened, whoever makes it: you by hand, the daemon, or the loop engineer. It covers every commit the push would publish that the remote lacks, on whatever branch. A deletion publishes nothing and passes. A refusal, or a guard that cannot screen, stops the push with a counts-only reason. |
 
 When something is blocked, nothing is published:
 
@@ -175,6 +180,12 @@ Policy file shape (placeholder values):
 - **Changing the policy:** edit the JSON, then rebuild.
 - **Rotating the key:** delete the key file, then rebuild. Until the rebuild,
   the old index fails closed.
+- **Install the pre-push hook** in a clone (default: this repo and the blog):
+  `.venv/bin/python scripts/outbound_guard.py install-pre-push`. It links
+  `.git/hooks/pre-push` to `scripts/githooks/pre-push`, is safe to run
+  again, and never replaces a hook it did not install. Worktrees share the
+  hook, so the loop engineer's `.trees/` pushes are covered. `git push
+  --no-verify` skips it; keep that for text you have checked yourself.
 
 ## Tests
 
@@ -192,6 +203,9 @@ Policy file shape (placeholder values):
     when gemma-grc is absent).
   - Push screening against a real temporary git remote: merges, a second
     remote, and `-diff` attributes.
+  - The pre-push catch-all: git's hook protocol (pushed refs other than
+    HEAD, deletions, commits the remote already has, an unusable guard), the
+    installer, and a real `git push` through the installed hook.
 - `scripts/discord_bot/test_outbound_guard_wiring.py`: every daemon GitHub
   path, the refresh loop, no echo of refused text, and `execute_proposal`
   end to end on a real temporary repo.

@@ -461,13 +461,15 @@ def readiness() -> Verdict:
 GitRunner = Callable[[list[str]], "tuple[bool, str]"]
 
 
-def pending_push_text(run_git: GitRunner, remote: str = "origin") -> str | None:
-    """Everything a push of HEAD to `remote` would publish that it does not
+def pending_push_text(run_git: GitRunner, remote: str = "origin", tips: Iterable[str] = ("HEAD",),
+                      exclude: Iterable[str] = ()) -> str | None:
+    """Everything a push of `tips` to `remote` would publish that it does not
     have yet: commit messages, file paths and added lines of every unpushed
     commit, merge commits included (against their first parent), with
     binary, -diff and textconv attributes overridden so no content hides.
-    None when git cannot say, which callers must treat as blocked."""
-    unpushed = ["HEAD", "--not", f"--remotes={remote}"]
+    `exclude` names further commits the remote already has. None when git
+    cannot say, which callers must treat as blocked."""
+    unpushed = [*tips, "--not", f"--remotes={remote}", *exclude]
     try:
         ok, messages = run_git(["log", "--format=%B", *unpushed])
         if not ok:
@@ -487,15 +489,81 @@ def pending_push_text(run_git: GitRunner, remote: str = "origin") -> str | None:
     return "\n".join(parts)
 
 
-def check_push(run_git: GitRunner, *, surface: str, extra: str = "", remote: str = "origin") -> Verdict:
+def check_push(run_git: GitRunner, *, surface: str, extra: str = "", remote: str = "origin",
+               tips: Iterable[str] = ("HEAD",), exclude: Iterable[str] = ()) -> Verdict:
     """Screen what a push would publish (plus `extra`, e.g. the PR title and
     body) as one item. Call after the commit, before `git push`."""
-    text = pending_push_text(run_git, remote)
+    text = pending_push_text(run_git, remote, tips, exclude)
     if text is None:
         verdict = Verdict(False, "error:git")
         _audit(surface, verdict)
         return verdict
     return check(f"{text}\n{extra}" if extra else text, surface=surface)
+
+
+# ---------- the catch-all: a git pre-push hook ----------
+
+HOOK_SCRIPT = REPO_ROOT / "scripts" / "githooks" / "pre-push"
+_ZERO_SHA = re.compile(r"^0+$")
+
+
+def _cwd_git(args: list[str]) -> tuple[bool, str]:
+    """git in the current directory, which is the repo root when git runs a hook."""
+    try:
+        proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    return proc.returncode == 0, proc.stdout
+
+
+def pre_push(argv: list[str], stdin_text: str, run_git: GitRunner | None = None) -> int:
+    """Git's pre-push protocol: argv is (remote name or URL, URL); stdin has one
+    `<local ref> <local sha> <remote ref> <remote sha>` line per ref. Screens
+    every commit the push would publish. Returns 0 to let it through and 1 to
+    stop it, with a counts-only reason on stderr. A guard that cannot screen
+    stops the push too."""
+    remote = argv[0] if argv else "origin"
+    run_git = run_git or _cwd_git
+    tips: list[str] = []
+    exclude: list[str] = []
+    for line in stdin_text.splitlines():
+        parts = line.split()
+        if len(parts) != 4 or _ZERO_SHA.match(parts[1]):
+            continue  # malformed, or a deletion, which publishes nothing
+        tips.append(parts[1])
+        remote_sha = parts[3]
+        if not _ZERO_SHA.match(remote_sha) and run_git(["cat-file", "-e", f"{remote_sha}^{{commit}}"])[0]:
+            exclude.append(remote_sha)  # the remote has it already
+    if not tips:
+        return 0
+    ensure_fresh()
+    verdict = check_push(run_git, surface=f"git:pre-push:{remote}", remote=remote, tips=tips, exclude=exclude)
+    if verdict.allowed:
+        return 0
+    print(f"pre-push refused by the outbound guard: {verdict.describe()}\n"
+          "Nothing was pushed. See docs/OUTBOUND_GUARD.md.", file=sys.stderr)
+    return 1
+
+
+def install_pre_push(repo: Path) -> tuple[bool, str]:
+    """Link `repo`'s pre-push hook to HOOK_SCRIPT. Idempotent, and never
+    replaces a hook it did not install. Worktrees share the hook."""
+    common = _git_bytes(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if common is None:
+        return False, f"{repo}: not a git repository"
+    custom = _git_bytes(repo, ["config", "--get", "core.hooksPath"])
+    hooks_dir = Path(custom.decode().strip()) if custom else Path(common.decode().strip()) / "hooks"
+    if not hooks_dir.is_absolute():
+        hooks_dir = repo / hooks_dir
+    target = hooks_dir / "pre-push"
+    if target.is_symlink() and target.resolve() == HOOK_SCRIPT.resolve():
+        return True, f"{repo}: already installed"
+    if target.exists() or target.is_symlink():
+        return False, f"{repo}: {target} exists and is not this hook; left alone"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(HOOK_SCRIPT)
+    return True, f"{repo}: installed {target} -> {HOOK_SCRIPT}"
 
 
 # ---------- building ----------
@@ -755,7 +823,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="index age and counts")
     chk = sub.add_parser("check", help="screen stdin; prints counts only; exit 1 when blocked")
     chk.add_argument("--surface", default="cli:check")
+    hook = sub.add_parser("pre-push", help="git pre-push hook entry point (git's ref lines on stdin)")
+    hook.add_argument("git_args", nargs="*", help="remote name or URL, then URL (passed by git)")
+    inst = sub.add_parser("install-pre-push", help="link the pre-push hook into git clones")
+    inst.add_argument("repos", nargs="*", type=Path, help="clones to install into (default: the public repos)")
     args = ap.parse_args(argv)
+
+    if args.cmd == "pre-push":
+        return pre_push(args.git_args, sys.stdin.read())
+    if args.cmd == "install-pre-push":
+        results = [install_pre_push(repo) for repo in (args.repos or public_repos())]
+        for _, line in results:
+            print(line)
+        return 0 if all(ok for ok, _ in results) else 1
 
     if args.cmd == "build":
         try:
