@@ -6,6 +6,12 @@ Co-Authored-By, no generated-by footer), per Andy's standing rule.
 
 The worktree started as a clean checkout of origin/base, so `git add -A` stages
 exactly the agent's changes and nothing else.
+
+Before the push, scripts/outbound_guard.py screens everything the push would
+publish (every unpushed commit) plus the PR title and body, which carry the
+agent's own summary. The branch and the PR are public the moment they exist,
+and the agent may have read marked vault notes. A refusal pushes nothing; the
+issue is escalated and its worktree is kept for inspection.
 """
 
 from __future__ import annotations
@@ -13,6 +19,8 @@ from __future__ import annotations
 import re
 import subprocess as sp
 from dataclasses import dataclass
+
+from scripts import outbound_guard
 
 from .config import LoopConfig
 from .gitutil import git
@@ -83,15 +91,27 @@ def open_pr(
     """Push the already-committed branch and open a draft PR. Never raises.
 
     The agent's work was committed by main.process_issue BEFORE any test run, so
-    the branch is a clean snapshot with no test pollution. Here we only publish.
+    the branch is a clean snapshot with no test pollution. Here we only publish,
+    and only after the outbound guard clears it.
     """
     subject, _ = commit_message(issue)
+    body = pr_body(issue, agent_summary, files, lines, tests_ok=True)
+
+    # This job runs hourly without the daemon's refresh loop; rebuild an index
+    # older than an hour first. If it is still unusable, the check refuses.
+    outbound_guard.ensure_fresh()
+    verdict = outbound_guard.check_push(
+        lambda args: git(wt.path, args),
+        surface=f"github:push:{gh_slug}:loop-engineer",
+        extra=f"{subject}\n{body}",
+    )
+    if not verdict.allowed:
+        return PRResult(False, None, f"{verdict.describe()}; nothing pushed")
 
     ok, err = git(wt.path, ["push", "-u", "origin", wt.branch], timeout=180)
     if not ok:
         return PRResult(False, None, f"git push: {err}")
 
-    body = pr_body(issue, agent_summary, files, lines, tests_ok=True)
     args = [
         "pr", "create",
         "--repo", gh_slug,
