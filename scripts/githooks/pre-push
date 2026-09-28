@@ -1,0 +1,16 @@
+#!/bin/sh
+# Git pre-push hook: the outbound guard's catch-all (docs/OUTBOUND_GUARD.md).
+#
+# Every push from a clone with this hook installed is screened: every commit
+# it would publish, on whatever branch, whoever pushes. A refusal, or a guard
+# that cannot screen, stops the push. Installed as a symlink by
+#   python scripts/outbound_guard.py install-pre-push
+# which links it from each public repo's .git/hooks (worktrees share it).
+
+# Resolve the symlink to find this repo, so the blog's hook runs the guard
+# that lives here. Prefer the repo's venv; the guard needs only the stdlib.
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+root=$(dirname "$(dirname "$here")")
+py="$root/.venv/bin/python"
+[ -x "$py" ] || py=python3
+exec "$py" "$root/scripts/outbound_guard.py" pre-push "$@"

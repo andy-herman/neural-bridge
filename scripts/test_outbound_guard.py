@@ -9,6 +9,7 @@ Run: python3 scripts/test_outbound_guard.py
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -689,6 +690,120 @@ class TestCheckPush(unittest.TestCase):
         v = og.check_push(undecodable, surface="test")
         self.assertEqual((v.allowed, v.reason), (False, "error:git"))
         self.assertIn("could not screen", v.describe())
+
+
+class TestPrePush(unittest.TestCase):
+    """The catch-all: git's pre-push protocol, the installer, and the installed
+    hook end to end."""
+
+    def setUp(self):
+        self.guard = SyntheticGuard().install()
+        root = self.guard.root
+        self.origin, self.work = root / "origin.git", root / "work"
+        _git(root, "-c", "init.defaultBranch=main", "init", "--bare", str(self.origin))
+        _git(root, "-c", "init.defaultBranch=main", "init", str(self.work))
+        _git(self.work, "remote", "add", "origin", str(self.origin))
+        self._commit("README.md", "hello\n", "initial")
+        self.assertTrue(_git(self.work, "push", "-u", "origin", "main")[0])
+
+    def tearDown(self):
+        self.guard.remove()
+        og._CACHE.clear()
+
+    def _commit(self, name, text, message):
+        (self.work / name).write_text(text, encoding="utf-8")
+        _git(self.work, "add", "--", name)
+        self.assertTrue(_git(self.work, "commit", "-m", message)[0])
+
+    def _sha(self, rev):
+        return _git(self.work, "rev-parse", rev)[1].strip()
+
+    def _pre_push(self, *lines, run_git=None):
+        run_git = run_git or (lambda args: _git(self.work, *args))
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = og.pre_push(["origin", str(self.origin)], "\n".join(lines) + "\n", run_git=run_git)
+        return code, err.getvalue()
+
+    def _line(self, branch, remote_sha="0" * 40):
+        return f"refs/heads/{branch} {self._sha(branch)} refs/heads/{branch} {remote_sha}"
+
+    def test_clean_branch_passes(self):
+        _git(self.work, "checkout", "-b", "feature")
+        self._commit("notes.md", FILLER + "\n", "notes")
+        self.assertEqual(self._pre_push(self._line("feature"))[0], 0)
+
+    def test_marked_commit_on_a_branch_other_than_head_is_refused(self):
+        _git(self.work, "checkout", "-b", "leak")
+        self._commit("notes.md", planted(marked_excerpt(20)) + "\n", "notes")
+        _git(self.work, "checkout", "main")  # the pushed ref is not HEAD
+        code, err = self._pre_push(self._line("leak"))
+        self.assertEqual(code, 1)
+        self.assertIn("refused by the outbound guard", err)
+        for word in SECRET_WORDS:
+            self.assertNotIn(word, err.lower())
+
+    def test_a_deletion_publishes_nothing(self):
+        def no_git(args):
+            raise AssertionError("a deletion needs no screening")
+        line = f"(delete) {'0' * 40} refs/heads/old {self._sha('main')}"
+        self.assertEqual(self._pre_push(line, run_git=no_git)[0], 0)
+
+    def test_commits_the_remote_already_has_are_not_rescanned(self):
+        self._commit("old.md", planted(marked_excerpt(20)) + "\n", "published before the hook")
+        self.assertTrue(_git(self.work, "push", "origin", "main")[0])
+        remote_tip = self._sha("main")
+        _git(self.work, "update-ref", "-d", "refs/remotes/origin/main")  # only the remote sha says so now
+        self._commit("new.md", "fine\n", "new")
+        self.assertEqual(self._pre_push(self._line("main", remote_sha=remote_tip))[0], 0)
+
+    def test_an_unusable_guard_stops_the_push(self):
+        _git(self.work, "checkout", "-b", "feature")
+        self._commit("notes.md", "fine\n", "notes")
+        with mock.patch.dict(os.environ, {og.ENV_DIR: str(self.guard.root / "empty")}), \
+             mock.patch.object(og, "refresh", return_value=(False, "stub")):
+            code, err = self._pre_push(self._line("feature"))
+        self.assertEqual(code, 1)
+        self.assertIn("index unusable", err)
+
+    def test_installed_hook_stops_a_real_push_and_lets_a_clean_one_through(self):
+        ok, msg = og.install_pre_push(self.work)
+        self.assertTrue(ok, msg)
+        _git(self.work, "checkout", "-b", "leak")
+        self._commit("notes.md", planted(marked_excerpt(20)) + "\n", "notes")
+        _git(self.work, "checkout", "-b", "clean", "main")
+        self._commit("ok.md", FILLER + "\n", "ok")
+
+        def push(branch):  # plain git: _git() disables hooks
+            return subprocess.run(["git", "push", "origin", branch], cwd=str(self.work),
+                                  capture_output=True, text=True, timeout=60)
+
+        refused = push("leak")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("refused by the outbound guard", refused.stderr)
+        self.assertEqual(push("clean").returncode, 0)
+        remote = _git(self.origin, "branch", "--list")[1]
+        self.assertNotIn("leak", remote)
+        self.assertIn("clean", remote)
+
+    def test_installer_is_idempotent_and_leaves_other_hooks_alone(self):
+        self.assertTrue(og.install_pre_push(self.work)[0])
+        ok, msg = og.install_pre_push(self.work)
+        self.assertTrue(ok)
+        self.assertIn("already installed", msg)
+        other = self.guard.root / "other"
+        _git(self.guard.root, "init", str(other))
+        foreign = other / ".git" / "hooks" / "pre-push"
+        foreign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ok, msg = og.install_pre_push(other)
+        self.assertFalse(ok)
+        self.assertIn("left alone", msg)
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "#!/bin/sh\nexit 0\n")
+
+    def test_installer_follows_core_hookspath_and_refuses_non_repos(self):
+        _git(self.work, "config", "core.hooksPath", ".githooks")
+        self.assertTrue(og.install_pre_push(self.work)[0])
+        self.assertEqual((self.work / ".githooks" / "pre-push").resolve(), og.HOOK_SCRIPT.resolve())
+        self.assertFalse(og.install_pre_push(self.guard.root / "not-a-repo")[0])
 
 
 class TestRefresh(unittest.TestCase):
