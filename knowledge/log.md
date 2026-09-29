@@ -89,3 +89,4 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
 - review queue: promoted `defenders-can-win-stories` from quarantine after human review (item 283512)
 - review queue: promoted `docker-up-doesnt-return` from quarantine after human review (item 66429b)
 - review queue: promoted `hashing-vs-encryption-explicit-distinction` from quarantine after human review (item 1632e5)
+- review queue: promoted `idor-still-a01-in-2025` from quarantine after human review (item b13d83)

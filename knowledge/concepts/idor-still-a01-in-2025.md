@@ -1,6 +1,7 @@
 ---
 slug: idor-still-a01-in-2025
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item b13d83, 2026-09-29T04:00:31Z)"
 reason: summary asserts specific facts (OWASP Top 10:2025 ranking, canonical lab content) that the session excerpt does not support — excerpt describes only a generic calibration pass with no mention of IDOR, BAC, or OWASP rankings
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:23:46Z
@@ -15,14 +16,6 @@ sources:
 
 # idor-still-a01-in-2025
 
-**Quarantined** for human review.
-
-**Reason:** summary asserts specific facts (OWASP Top 10:2025 ranking, canonical lab content) that the session excerpt does not support — excerpt describes only a generic calibration pass with no mention of IDOR, BAC, or OWASP rankings
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 OWASP Top 10:2025 keeps Broken Access Control at #1; lab teaches the canonical example
 
-_Quarantined on 2026-05-10T15:23:46Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T04:00:31Z after human review in the review queue (item b13d83). The filing gate had held it for: untraceable-claims._
