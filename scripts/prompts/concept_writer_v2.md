@@ -1,6 +1,8 @@
-# Concept article writer prompt v1.0
+# Concept article writer prompt v2.0
 
 Used by `scripts/compile.py` Phase B after the filing gate has issued a PROMOTE verdict. Writes a real concept article body — not a stub — for the wiki.
+
+v2 adds the fidelity rules and limits related-concept links to concepts the excerpt names. v1 invited links to slugs the writer could "plausibly assume exist", which is how LLM wikis fill with unverified links.
 
 Variables `{slug}`, `{summary}`, `{agent}`, `{session_excerpt}` are substituted before the prompt is sent to `claude -p`.
 
@@ -27,6 +29,15 @@ This is what the source agent did, decided, found, or asked questions about. Gro
 <session-excerpt>
 {session_excerpt}
 </session-excerpt>
+
+## Fidelity
+
+Every agent reads this article as settled shared memory, so a nuance lost here is lost for all of them.
+
+- Keep the excerpt's hedges, conditions and caveats. "For now", "in this lab", "we think" and "unless X" stay attached to the claim they qualify; do not turn a tentative finding into a settled one.
+- If the session disagreed with itself or left a point unresolved, say so under Open questions rather than picking a side.
+- Use the excerpt's own terms, names and numbers instead of paraphrasing them.
+- Separate what the excerpt states from what you infer. Leave an inference out, or end its bullet with "(inference)".
 
 ## Output rules
 
@@ -57,7 +68,7 @@ Structure (use these headings exactly, in this order; omit any section that has 
 
 ## Related concepts
 
-(Wiki-link other concept slugs you can plausibly assume exist or will exist soon. Format: `[[other-slug]]`. Skip this section if you have no candidates.)
+(Wiki-link only concepts the excerpt itself names or discusses. Format: `[[other-slug]]`. Do not invent slugs to make the article look connected. Skip this section if the excerpt names none.)
 ```
 
 ## Style
