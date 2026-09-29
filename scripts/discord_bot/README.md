@@ -6,11 +6,12 @@ Neural Bridge Discord bot daemon (Phase C of #28). Multi-bot: one `discord.Clien
 
 | File | Purpose |
 |---|---|
-| `agents.json` | Bot config: 9 agents + auth user IDs + guild ID + default_repo |
+| `agents.json` | Registered Discord identities (13 currently), auth user IDs, guild ID, and default_repo; not proof that every configured identity is enabled or connected |
 | `config.py` | Loads + validates `agents.json` |
 | `keychain.py` | Reads bot tokens from macOS keychain via `security find-generic-password` |
 | `auth.py` | Andy-only authorization gate. Every slash command checks before acting. |
 | `claude_invoke.py` | `claude -p` subprocess wrapper + prompt-injection sanitizer |
+| `agent_telemetry.py` | Opt-in private specialist registry/model-execution snapshot, source leases, heartbeat, and registry-only export; [contract and activation](../../docs/MOONBASE_TELEMETRY.md) |
 | `pm_intake.py` | PM intake state machine. In-memory, keyed by Discord thread ID. |
 | `thread_map.py` | Persistent issue↔thread mapping (`~/Library/Application Support/neural-bridge/issue_threads.json`, atomic writes) |
 | `github_client.py` | gh CLI wrapper for `create_issue` (PR-K adds comment / labels / close). Every call that publishes text passes the outbound guard first ([docs/OUTBOUND_GUARD.md](../../docs/OUTBOUND_GUARD.md)); so do PR proposals and `create_agent` pushes |

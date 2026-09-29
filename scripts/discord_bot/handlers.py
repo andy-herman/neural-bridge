@@ -909,7 +909,7 @@ async def handle_pm_summary(interaction: discord.Interaction, config: BotConfig)
     template = SUMMARY_PROMPT_PATH.read_text(encoding="utf-8")
     prompt = build_summary_prompt(template, repo=config.default_repo, issues=issues)
 
-    ok, stdout, err = await call_claude(prompt)
+    ok, stdout, err = await call_claude(prompt, telemetry_agent_id="senior-pm")
     if not ok:
         await interaction.followup.send(f"claude -p failed for pm-summary: `{err}`", ephemeral=True)
         log(f"PM_SUMMARY claude FAILED: error={err}")
@@ -948,7 +948,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
     # 1. Senior-pm drafts framing + picks specialists.
     framing_template = FRAMING_PROMPT_PATH.read_text(encoding="utf-8")
     framing_prompt = build_framing_prompt(framing_template, topic=topic)
-    ok, stdout, err = await call_claude(framing_prompt)
+    ok, stdout, err = await call_claude(framing_prompt, telemetry_agent_id="senior-pm")
     if not ok:
         await interaction.followup.send(f"Framing failed: `{err}`", ephemeral=True)
         log(f"SQUAD_DISCUSS framing FAILED: error={err}")
@@ -1028,7 +1028,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
                         round_n=round_n, prior_rounds=rounds_history,
                         round_prompt=current_round_prompt,
                     )
-            ok, stdout, err = await call_claude(turn_prompt)
+            ok, stdout, err = await call_claude(turn_prompt, telemetry_agent_id=agent_id)
             if not ok:
                 log(f"SQUAD_DISCUSS turn FAILED (round={round_n} agent={agent_id}): {err}")
                 continue
@@ -1065,7 +1065,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
             decision_template, topic=topic, framing=framing,
             round_n=round_n, turns=round_turns,
         )
-        ok, stdout, err = await call_claude(decision_prompt)
+        ok, stdout, err = await call_claude(decision_prompt, telemetry_agent_id="senior-pm")
         if not ok:
             log(f"SQUAD_DISCUSS round_decision FAILED (round={round_n}): {err}; closing")
             await thread.send(f"_Round decision failed ({err}); closing discussion._")
@@ -1109,7 +1109,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
             report_template, topic=topic, framing=framing,
             rounds=rounds_history, thread_url=thread.jump_url, date=today,
         )
-        ok, stdout, err = await call_claude(report_prompt)
+        ok, stdout, err = await call_claude(report_prompt, telemetry_agent_id="senior-pm")
         if not ok:
             log(f"SQUAD_DISCUSS report FAILED: {err}")
             await thread.send(f"_Report generation failed ({err}). Discussion is in this thread._")
@@ -1173,7 +1173,7 @@ async def handle_squad_discuss(interaction: discord.Interaction, config: BotConf
                 vault_path=str(report_vault_path) if report_vault_path else "(not written)",
                 issue_lines=issue_lines, thread_url=thread.jump_url,
             )
-            ok, stdout, err = await call_claude(brief_prompt)
+            ok, stdout, err = await call_claude(brief_prompt, telemetry_agent_id="luna")
             if not ok:
                 log(f"SQUAD_DISCUSS luna brief FAILED: {err}")
             else:
@@ -1229,7 +1229,7 @@ async def handle_triage(interaction: discord.Interaction, config: BotConfig, iss
     template = TRIAGE_PROMPT_PATH.read_text(encoding="utf-8")
     prompt = build_triage_prompt(template, repo=config.default_repo, issue_number=issue_number, issue=issue)
 
-    ok, stdout, err = await call_claude(prompt)
+    ok, stdout, err = await call_claude(prompt, telemetry_agent_id="senior-pm")
     if not ok:
         await interaction.followup.send(f"claude -p failed for triage: `{err}`", ephemeral=True)
         log(f"TRIAGE claude FAILED: issue=#{issue_number} error={err}")

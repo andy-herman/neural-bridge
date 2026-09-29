@@ -42,6 +42,11 @@ data/recall/
 # outside the repo, in ~/.config/neural-bridge/.
 data/outbound_guard/
 
+# Private specialist observations belong outside every checkout. These ignore
+# rules also protect accidental copies of the documented runtime filename.
+agent-telemetry.json*
+data/agent-telemetry/
+
 # compile.py / lint.py outputs — run-time, not tracked
 docs/compile/*
 !docs/compile/.gitkeep

@@ -78,7 +78,7 @@ from telegram.ext import (
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.discord_bot import honcho_client
+from scripts.discord_bot import agent_telemetry, honcho_client
 from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude
 from scripts.discord_bot.keychain import get_token
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
@@ -546,11 +546,15 @@ def main() -> None:
 
     log(f"Council Telegram bridge starting (allowed users: {sorted(allowed)})")
 
-    app: Application = ApplicationBuilder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.run_polling(drop_pending_updates=True)
+    async def post_init(_app: Application) -> None:
+        agent_telemetry.ready("loid")
+
+    with agent_telemetry.runtime("telegram-council", {"loid": True}, log=log):
+        app: Application = ApplicationBuilder().token(token).post_init(post_init).build()
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

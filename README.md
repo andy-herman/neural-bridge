@@ -4,7 +4,7 @@ A personal AI substrate: fourteen specialized agents sharing a markdown wiki mem
 
 ## What this actually is, today
 
-V1 ships and runs. Fourteen specialists (thirteen registered on the Discord daemon) answer @-mentions in Discord; Luna and Loid are also reachable on Telegram. They read each other's notes, hand off to each other, and emit structured GitHub actions (file an issue, comment, label, close, recruit a new agent). Sessions flush to dated daily logs. A filing gate promotes (or rejects) candidate concepts before they reach the shared wiki. A weekly lint pass re-checks the wiki for drift.
+V1 ships and runs. Fourteen specialists are defined in the plugin; thirteen identities are registered in the Discord configuration. Luna and Loid have Telegram bridges, and Loid also participates in Council; Loid is not currently registered in the Discord configuration. The specialists read each other's notes, hand off to each other, and emit structured GitHub actions (file an issue, comment, label, close, recruit a new agent). Sessions flush to dated daily logs. A filing gate promotes (or rejects) candidate concepts before they reach the shared wiki. A weekly lint pass re-checks the wiki for drift.
 
 The whole thing runs locally on a Mac Mini under `launchd`. There is no cloud infrastructure to manage, no service to pay for beyond a Claude Max subscription.
 
@@ -40,10 +40,10 @@ Neural Bridge is the substrate where the work compounds.
 | `docs-editor` | Tightens prose, fixes drift in the wiki |
 | `librarian` | Maintains the Luna Master Obsidian vault: INDEX, audits, structure |
 | `echo` | Voice-double: keeps Andy's voice profile, flags AI-sounding drafts |
-| `loid` | Career strategist on Telegram and Discord, backed by the Synapse DB |
+| `loid` | Career strategist on Telegram and Council, backed by the Synapse DB |
 | `ux-designer` | Look and feel for neural-bridge-blog and other web surfaces |
 
-`@` any of them in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other (including multi-round `/squad-discuss` sessions).
+`@` the registered identities in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other (including multi-round `/squad-discuss` sessions).
 
 ## Memory pipeline
 
@@ -65,6 +65,16 @@ Thirteen bot identities, one daemon, one asyncio loop. Each agent has its own Di
 - Tracks per-channel turn budget so cross-agent chains can't run away
 
 `senior-pm` also exposes slash commands: `/pm-task`, `/pm-summary`, `/triage`, `/squad-discuss`, `/close`.
+
+### Private specialist observations
+
+[Moonbase telemetry](docs/MOONBASE_TELEMETRY.md) is an optional local JSON
+snapshot of the discovered registry and actual model-subprocess execution.
+It is disabled unless `NB_AGENT_TELEMETRY_PATH` names a private file outside
+Git checkouts. Registry-only export shows every defined specialist as
+unobserved, without starting a bot. Writer freshness, gateway connectivity,
+and model activity remain separate; this is not a task-completion feed or the
+application-level Fleet heartbeat. No operational endpoint is added.
 
 ## Repo map
 
