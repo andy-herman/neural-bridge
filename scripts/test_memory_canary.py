@@ -351,12 +351,49 @@ class TestConsolidationGates(unittest.TestCase):
         from scripts.memory_canary import G3_KEEP_RATE, gates
         good = [self._ev("honcho_peer_card", mem.RETRIEVE, chars=500)] * 9 + \
                [self._ev("honcho_peer_card", mem.RETRIEVE, chars=0)]
-        self.assertEqual(gates(good)["G3"]["answer"], "keep injected")
+        # Reads recorded before the digest shipped carry no "card:" detail; the
+        # rate alone still says keep, but the verdict says freshness is unknown.
+        self.assertEqual(gates(good)["G3"]["answer"],
+                         "keep injected (freshness unmeasured: no digest-carrying reads yet)")
+        self.assertIsNone(gates(good)["G3"]["versions"])
         bad = [self._ev("honcho_peer_card", mem.RETRIEVE, chars=500)] * 5 + \
               [self._ev("honcho_peer_card", mem.RETRIEVE, ok=True, chars=0)] * 5
         g = gates(bad)["G3"]
         self.assertEqual(g["answer"], "demote to retrieval-only")
         self.assertLess(g["rate"], G3_KEEP_RATE)
+
+    def _card(self, digest, **kw):
+        e = self._ev("honcho_peer_card", mem.RETRIEVE, chars=500, **kw)
+        e["detail"] = f"card:{digest}"
+        return e
+
+    def test_g3_frozen_card_despite_captures_demotes(self):
+        # 2026-09-29: non-empty is necessary, not sufficient. A card that never
+        # changes while turns are captured is a snapshot, and the 09-25 keep
+        # was measured over a window in which nothing was being captured.
+        from scripts.memory_canary import G3_FROZEN_MIN_CAPTURES, gates
+        frozen = [self._card("aaaaaaaaaaaa")] * 10
+        caps = [self._ev("honcho_capture", mem.WRITE, chars=900)] * G3_FROZEN_MIN_CAPTURES
+        g = gates(frozen + caps)["G3"]
+        self.assertTrue(g["answer"].startswith("demote to retrieval-only: card frozen"))
+        self.assertEqual((g["versions"], g["captures"]), (1, G3_FROZEN_MIN_CAPTURES))
+        # Too few captures to judge: a frozen card is not yet evidence.
+        g = gates(frozen + caps[:-1])["G3"]
+        self.assertEqual(g["answer"], "keep injected")
+        # Failed captures do not count as captures.
+        failed = [self._ev("honcho_capture", mem.WRITE, ok=False)] * 50
+        self.assertEqual(gates(frozen + failed)["G3"]["answer"], "keep injected")
+
+    def test_g3_changing_card_keeps(self):
+        from scripts.memory_canary import G3_FROZEN_MIN_CAPTURES, gates
+        live = [self._card("aaaaaaaaaaaa")] * 5 + [self._card("bbbbbbbbbbbb")] * 5
+        caps = [self._ev("honcho_capture", mem.WRITE, chars=900)] * (G3_FROZEN_MIN_CAPTURES * 2)
+        g = gates(live + caps)["G3"]
+        self.assertEqual(g["answer"], "keep injected")
+        self.assertEqual(g["versions"], 2)
+        # Rate still gates first: a changing card that is mostly empty is demoted.
+        empties = [self._ev("honcho_peer_card", mem.RETRIEVE, ok=False, chars=0)] * 10
+        self.assertEqual(gates(live + empties + caps)["G3"]["answer"], "demote to retrieval-only")
 
     def test_g4_shapes(self):
         from scripts.memory_canary import gates
