@@ -183,6 +183,59 @@ class TestAutoReload(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FATAL: auto_reload.sh exited at line", self._log_text())
 
+    # -- the review queue (scripts/review_queue) ---------------------------
+
+    def _stub_queue(self, exit_code: int = 0) -> None:
+        """The repo's venv python, recording each queue call."""
+        py = self.repo / ".venv" / "bin" / "python"
+        py.parent.mkdir(parents=True)
+        _write_exec(py, f'echo "queue $*" >> "{self.calls}"\nexit {exit_code}\n')
+
+    def _queue_calls(self) -> list[str]:
+        return [c for c in self._calls().splitlines() if c.startswith("queue ")]
+
+    def test_review_queue_change_reloads_the_bridges(self):
+        # Luna's Telegram bridge hosts the queue's pusher and buttons.
+        self._assert_reloads_for("scripts/review_queue/store.py")
+
+    def test_blocked_run_queues_one_alert_and_recovery_clears_it(self):
+        self._stub_queue()
+        self._commit(self.seed, "scripts/discord_bot/mention.py", "y = 2\n")
+        readme = self.repo / "README.md"
+        readme.write_text("local edit\n")
+        for _ in range(3):
+            self.assertEqual(self._run().returncode, 0)
+        (raised,) = self._queue_calls()
+        self.assertIn("-m scripts.review_queue raise --source auto_reload --key blocked --kind alert", raised)
+        self.assertIn("uncommitted changes", raised)
+
+        readme.write_text("seed\n")  # the edit is reverted; next tick pulls
+        self._run()
+        self._run()
+        cleared = [c for c in self._queue_calls() if " clear " in c]
+        self.assertEqual(cleared, ["queue -m scripts.review_queue clear --source auto_reload --key blocked"],
+                         "cleared once, on the tick that ended the blocked run")
+
+    def test_a_healthy_tick_never_calls_the_queue(self):
+        self._stub_queue()
+        self._run()
+        self.assertEqual(self._queue_calls(), [])
+
+    def test_a_broken_queue_never_stops_the_watcher(self):
+        self._stub_queue(exit_code=1)
+        self._git("checkout", "-q", "-b", "feat/x", cwd=self.repo)
+        for _ in range(2):
+            self.assertEqual(self._run().returncode, 0)
+        log = self._log_text()
+        self.assertIn("queue: raise failed", log)
+        self.assertEqual(self._calls().count("curl "), 1, "the Discord ping still goes out")
+
+    def test_missing_venv_is_logged_not_fatal(self):
+        self._git("checkout", "-q", "-b", "feat/x", cwd=self.repo)
+        for _ in range(2):
+            self.assertEqual(self._run().returncode, 0)
+        self.assertIn("queue: no venv python", self._log_text())
+
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
 class TestInstallSkip(unittest.TestCase):

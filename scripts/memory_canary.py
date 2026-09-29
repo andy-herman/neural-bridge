@@ -261,6 +261,40 @@ def format_gates(results: dict[str, dict], window_days: int) -> str:
     return "\n".join(lines)
 
 
+def review_queue_check(results: dict[str, dict], bad: list[str]) -> dict:
+    """Queue each degraded layer as an alert, then read-back check the queue.
+
+    The sync is the canary's whole producer contract: a layer that recovers
+    clears its own alert on the next run. The check (scripts/review_queue/
+    health.py) writes, reads and decides a probe item and confirms the pusher
+    is alive, because a queue that silently stops delivering would bring back
+    exactly the dormancy it exists to end. Never raises: a queue that cannot
+    even be checked is itself the finding.
+    """
+    try:
+        from scripts.review_queue import health as queue_health
+        from scripts.review_queue import store as queue_store
+        store = queue_store.Store()
+        store.sync(source="memory_canary", kind=queue_store.ALERT, entries=[
+            {"key": s, "title": f"Memory layer {s} is {results[s]['status']}",
+             "detail": results[s]["reason"][:200]}
+            for s in sorted(bad)])
+        return queue_health.check(store, queue_health.push_kinds())
+    except Exception as exc:
+        return {"ok": False, "facts": {},
+                "problems": [f"could not run: {type(exc).__name__}: {exc}"]}
+
+
+def queue_report(result: dict) -> str:
+    # Formatted here rather than by review_queue.health, so the report still
+    # prints when that module is the thing that failed to import.
+    facts = ", ".join(f"{k}={v}" for k, v in result.get("facts", {}).items())
+    head = "Review queue: ok" if result["ok"] else "Review queue: PROBLEMS"
+    lines = [f"{head} ({facts})" if facts else head]
+    lines.extend(f"  - {p}" for p in result["problems"])
+    return "\n".join(lines)
+
+
 def degraded(results: dict[str, dict]) -> list[str]:
     return [s for s, r in results.items() if r["status"] in (SILENT, FAILING, DEGRADED)]
 
@@ -290,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     bad = degraded(results)
-    report = json.dumps(results, indent=2) if args.json else format_report(results, args.days, events)
+    queue = review_queue_check(results, bad)
+    report = json.dumps({**results, "review_queue": queue}, indent=2) if args.json \
+        else format_report(results, args.days, events) + "\n" + queue_report(queue)
+    if not queue["ok"]:
+        bad = bad + ["review_queue"]
 
     if bad or not args.quiet:
         print(report)
@@ -302,7 +340,8 @@ def main(argv: list[str] | None = None) -> int:
             from scripts.loop_engineer import notify
             notify.notify(
                 "🧠 **memory canary** degraded: " + ", ".join(sorted(bad))
-                + "\n```\n" + format_report(results, args.days)[:1500] + "\n```"
+                + "\n```\n" + (format_report(results, args.days) + "\n"
+                                + queue_report(queue))[:1500] + "\n```"
             )
         except Exception:
             pass  # a notification failure must not change the exit code
