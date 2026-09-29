@@ -1,6 +1,7 @@
 ---
 slug: hashing-vs-encryption-explicit-distinction
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item 1632e5, 2026-09-29T04:00:22Z)"
 reason: summary's specific pedagogical claims — 'recurring student confusion', 'one-way vs two-way framing', 'password example' — are not evidenced anywhere in the session excerpt, which only reports aggregate counts of candidates extracted
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:23:31Z
@@ -15,14 +16,6 @@ sources:
 
 # hashing-vs-encryption-explicit-distinction
 
-**Quarantined** for human review.
-
-**Reason:** summary's specific pedagogical claims — 'recurring student confusion', 'one-way vs two-way framing', 'password example' — are not evidenced anywhere in the session excerpt, which only reports aggregate counts of candidates extracted
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 one-slide anchor for the recurring student confusion; one-way vs two-way framing with password example
 
-_Quarantined on 2026-05-10T15:23:31Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T04:00:22Z after human review in the review queue (item 1632e5). The filing gate had held it for: untraceable-claims._
