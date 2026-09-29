@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -77,9 +78,16 @@ def write_status(store: st.Store, push_kinds: tuple[str, ...], now: int | None =
 
 
 def read_back(store: st.Store, now: int | None = None) -> str:
-    """Round-trip one probe item. Returns "" when healthy, else what broke."""
+    """Take one probe item through the whole lifecycle (create, read back,
+    decide, claim, apply). Returns "" when healthy, else what broke.
+
+    The key is random, not just the time: the canary and a hand-run `health`
+    in the same second once collided on `probe-<epoch>`, and the second
+    check reported a healthy queue as broken.
+    """
     now = now if now is not None else int(time.time())
-    item, created = store.raise_item(source="health", key=f"probe-{now}", kind=st.PROBE,
+    key = f"probe-{now}-{secrets.token_hex(4)}"
+    item, created = store.raise_item(source="health", key=key, kind=st.PROBE,
                                      title="read-back probe", now=now)
     if not created:
         return "probe raise did not create an item"
@@ -88,8 +96,12 @@ def read_back(store: st.Store, now: int | None = None) -> str:
         return "probe written but not read back"
     if not store.decide(item.id, st.ACKNOWLEDGE, actor="health", now=now):
         return "probe could not be decided"
+    if not store.claim(item.id, actor="health", now=now):
+        return "probe could not be claimed for apply"
+    if not store.finish(item.id, True, "", actor="health", resolve=True, now=now):
+        return "probe apply could not be recorded"
     events = [e["event"] for e in store.events(item.id)]
-    if events[:2] != ["created", "decided"]:
+    if events != ["created", "decided", "applying", "applied"]:
         return f"event log incomplete for the probe: {events}"
     return ""
 

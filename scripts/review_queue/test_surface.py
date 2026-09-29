@@ -312,6 +312,21 @@ class TestHealth(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.store.items(), [], "probes stay out of Andy's list")
 
+    def test_two_checks_in_the_same_second_both_pass(self):
+        # Production, 2026-09-29: `health` by hand and the canary ran within
+        # one second, collided on the probe key, and the second failed.
+        self.store.meta_set(health.HEARTBEAT_KEY, str(T0))
+        first = health.check(self.store, (), now=T0)
+        second = health.check(self.store, (), now=T0)
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(second["ok"], second)
+
+    def test_the_probe_ends_applied_and_resolved(self):
+        self.assertEqual(health.read_back(self.store, now=T0), "")
+        (probe,) = self.store.items(include_probes=True)
+        self.assertEqual(probe.state, st.APPLIED)
+        self.assertIsNotNone(probe.resolved_at)
+
     def test_a_missing_or_stale_heartbeat_is_a_problem(self):
         self.assertIn("no heartbeat", " ".join(health.check(self.store, (), now=T0)["problems"]))
         self.store.meta_set(health.HEARTBEAT_KEY, str(T0))
