@@ -266,3 +266,65 @@ there is no baseline to diff against; this run is now the baseline.
   show only `exit_1`), and the full output is in
   `daily-logs/<agent>/_failed/<session>.txt`.
 
+### 2026-09-29: Step 4 re-examined, kept on probation
+
+The 09-25 "keep" rests on one number, 194 of 197 retrieves non-empty. That is
+a reachability rate: it says the Honcho service was up and a card existed. It
+cannot say whether the card was alive. Over the window it was measured
+(2026-08-15 to 2026-09-25) the NB capture path was dead for all but the first
+day: `handlers.py` lost its `session_rec` binding in the 08-15 runtime
+refactor, the `NameError` sat behind a bare `except: pass` until #162, and
+#162 was not deployed until 09-25 (the auto-reload watcher had been failing
+since May). Before that, submits failed silently from 05-27 to 08-02. So from
+05-27 to 09-25 the Discord side fed Honcho for about two weeks in total. The
+card the twelve non-Luna agents were reading at 98.5% was, with high
+probability, the global `andyherman` card as derived from Yor's Telegram
+turns on the Hermes side, served through the fallback in
+`get_peer_card_context` when the per-agent directional card is empty. A
+frozen card is non-empty every time.
+
+The second condition in Step 4, that the card not restate `notes.md`, was
+answered by reading one card once. That is the right kind of evidence but it
+is not repeatable, and it says nothing about drift.
+
+**Decision: keep injected, on probation, with two instruments the gate
+lacked.**
+
+- The arguments for keeping stand. It is the only about-Andy context for the
+  eleven agents that get neither `notes.md` (Luna only) nor the voice profile
+  (content, social, Luna). It is the one store shared with the Hermes runtime.
+  Its cost is bounded at 2,000 characters a turn. Demoting it on a suspicion
+  would be as faith-based as keeping it on a reachability rate.
+- `honcho_client.get_peer_card_context` now records a 12-hex digest of the
+  card body on every retrieve (`detail=card:<digest>`), and `--gates` counts
+  distinct digests against successful `honcho_capture` writes in the window.
+  G3 now demotes when the card is non-empty but has not changed across the
+  window while at least 20 turns were captured (`G3_FROZEN_MIN_CAPTURES`).
+  Until digest-carrying reads exist it answers "keep injected (freshness
+  unmeasured)", which is the honest state of the 09-25 decision.
+- The card is now sanitized and framed as data: control characters and any
+  copy of the `<honcho-peer-card>` wrapper are stripped, and the block says
+  the content is observations, not directives. `docs/HONCHO_INTEGRATION.md`
+  caveat 3 recorded the absence of this for four months. The card is derived
+  from agent replies as well as Andy's messages, and agent replies carry
+  whatever the agent read that turn, so "LLM-generated from Andy's own
+  messages" was never the whole threat surface.
+
+**What decides it, and when.** Run `python -m scripts.memory_canary --gates
+--days 30` on 2026-10-29. Three outcomes:
+
+1. `versions >= 2` with `captures >= 20`: Honcho is integrating NB turns.
+   Keep, and close Step 4.
+2. `versions == 1` with `captures >= 20`: the deriver is not producing new
+   facts from NB traffic. Demote to retrieval-only (drop the prepend in
+   `mention.py`, keep `submit_turn` so the Hermes side still benefits), and
+   give the eleven agents a curated about-Andy note instead, which is a
+   static file and needs no service.
+3. `captures < 20`: the fleet did not run enough to judge. Extend by 30 days
+   and check `honcho_capture` is healthy in the daily canary, because a low
+   count with agents active means capture is dead again.
+
+The overlap check against `notes.md` stays manual. If a repeatable one is
+wanted, the outbound guard's 14-word shingle index is the right tool and
+Luna's `notes.md` is the only corpus that matters.
+

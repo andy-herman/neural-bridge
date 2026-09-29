@@ -187,6 +187,12 @@ def format_report(results: dict[str, dict], window_days: int,
 #   python -m scripts.memory_canary --gates --days 30
 
 G3_KEEP_RATE = 0.90   # peer card must be non-empty at least this often to stay injected
+# Freshness: once this many turns were captured into Honcho in the window, a
+# card whose digest never changed is a card the deriver is not integrating NB
+# turns into, and injecting it is injecting a snapshot. The 2026-09-25 "keep"
+# was decided on non-empty rate alone, over a window in which the capture path
+# was dead, so the rate could not tell a live memory from a frozen one.
+G3_FROZEN_MIN_CAPTURES = 20
 
 
 def gates(events: list[dict]) -> dict[str, dict]:
@@ -208,14 +214,32 @@ def gates(events: list[dict]) -> dict[str, dict]:
                      "undecided: no read carries an agent yet" if not attributed else
                      "luna only" if attributed <= {"luna"} else "keep for all three")}
 
-    # G3: honcho_peer_card non-empty rate. Keep as an injected layer?
+    # G3: honcho_peer_card non-empty rate, and since 2026-09-29 whether the
+    # card actually changes while turns are being captured. Keep as an
+    # injected layer?
     card = _sel("honcho_peer_card", mem.RETRIEVE)
     nonempty = sum(1 for e in card if e.get("ok") and int(e.get("chars", 0)) > 0)
     rate = (nonempty / len(card)) if card else 0.0
-    g3 = {"question": f"keep honcho peer card injected (needs non-empty >= {G3_KEEP_RATE:.0%})?",
+    captures = sum(1 for e in _sel("honcho_capture", mem.WRITE) if e.get("ok"))
+    digests = {str(e.get("detail", ""))[5:] for e in card
+               if e.get("ok") and str(e.get("detail", "")).startswith("card:")}
+    versions = len(digests) if digests else None  # None: no digest-carrying reads yet
+    if not card:
+        answer = "no data"
+    elif rate < G3_KEEP_RATE:
+        answer = "demote to retrieval-only"
+    elif versions == 1 and captures >= G3_FROZEN_MIN_CAPTURES:
+        answer = (f"demote to retrieval-only: card frozen across {nonempty} retrieves "
+                  f"despite {captures} captured turns")
+    elif versions is None:
+        answer = "keep injected (freshness unmeasured: no digest-carrying reads yet)"
+    else:
+        answer = "keep injected"
+    g3 = {"question": (f"keep honcho peer card injected (needs non-empty >= {G3_KEEP_RATE:.0%}, "
+                       f"and a card that changes once >= {G3_FROZEN_MIN_CAPTURES} turns are captured)?"),
           "retrieves": len(card), "nonempty": nonempty, "rate": rate,
-          "answer": ("no data" if not card else
-                     "keep injected" if rate >= G3_KEEP_RATE else "demote to retrieval-only")}
+          "captures": captures, "versions": versions,
+          "answer": answer}
 
     # G4: is the repo wiki alive? Reads since the read loop shipped, and the
     # last live compile.

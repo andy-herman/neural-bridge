@@ -78,7 +78,7 @@ Right now Honcho's deriver runs on `qwen2.5:14b` (local Ollama, slow, frequent t
 
 1. **Directional observation mode siloes per-agent views.** Luna's facts about Andy are stored under `luna`'s perspective; Yor's under `yor`'s. The integration falls back to the global andyherman card if a per-agent view is empty, but full cross-agent sharing would require switching the observation mode to `unified` in `~/.hermes/honcho.json`. Worth revisiting after a week of data — if directional silos feel limiting, flip to unified and re-derive.
 2. **Honcho's `get_card()` returns None until the deriver has produced facts.** Cold start = no context for ~the first few conversations.
-3. **No prompt-injection sanitization on Honcho-supplied context.** The peer card is LLM-generated from Andy's own messages, so the threat surface is low — but worth thinking about if you ever expose Honcho writes to other humans.
+3. **Prompt-injection sanitization on Honcho-supplied context** (added 2026-09-29; absent before). The card is derived from Andy's messages and from agent replies, and agent replies carry whatever the agent read that turn (issues, web pages, attachments), so it was never only Andy's words. `get_peer_card_context` now strips control characters and any copy of the `<honcho-peer-card>` wrapper tag, wraps the body in that tag, and frames it as observations, not directives. It also records a digest of the card on every retrieve so the canary's gate G3 can tell a changing card from a frozen one.
 4. **Submit happens after Discord post, fire-and-forget.** If the Honcho API stalls, the bot is unaffected; the turn just doesn't get captured. Future improvement: optional retry queue.
 
 ## Rollback
