@@ -19,6 +19,7 @@ The always-loaded starting point for any agent querying the Neural Bridge wiki.
 
 
 
+
 - [[ai-enabled-social-engineering-canon]]
 - [[bcrypt-pedagogy-vs-argon2-production]]
 - [[cidr-as-cloud-lingua-franca]]
@@ -33,6 +34,7 @@ The always-loaded starting point for any agent querying the Neural Bridge wiki.
 - [[secure-design-principles-with-violation-examples]]
 - [[subnet-math-cheat-sheet-for-midterm]]
 - [[threat-modeling-as-code-pytm-threatspec]]
+- [[vdp-vs-bug-bounty-distinction]]
 
 ## Per-agent memory
 

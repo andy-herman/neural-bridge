@@ -91,3 +91,4 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
 - review queue: promoted `hashing-vs-encryption-explicit-distinction` from quarantine after human review (item 1632e5)
 - review queue: promoted `idor-still-a01-in-2025` from quarantine after human review (item b13d83)
 - review queue: promoted `lockout-vs-credential-stuffing` from quarantine after human review (item 74d6cc)
+- review queue: promoted `vdp-vs-bug-bounty-distinction` from quarantine after human review (item ef3a32)

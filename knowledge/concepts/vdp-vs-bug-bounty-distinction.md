@@ -1,6 +1,7 @@
 ---
 slug: vdp-vs-bug-bounty-distinction
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item ef3a32, 2026-09-29T04:00:50Z)"
 reason: summary makes specific factual claims (legal safe harbor framing, CISA federal mandate) that the session excerpt does not support — excerpt is a compilation meta-log, not the teaching session that would evidence those claims
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:26:45Z
@@ -15,14 +16,6 @@ sources:
 
 # vdp-vs-bug-bounty-distinction
 
-**Quarantined** for human review.
-
-**Reason:** summary makes specific factual claims (legal safe harbor framing, CISA federal mandate) that the session excerpt does not support — excerpt is a compilation meta-log, not the teaching session that would evidence those claims
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 VDP = legal safe harbor + reporting channel; bug bounty = VDP + payment; CISA mandate for federal agencies
 
-_Quarantined on 2026-05-10T15:26:45Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T04:00:50Z after human review in the review queue (item ef3a32). The filing gate had held it for: untraceable-claims._
