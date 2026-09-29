@@ -53,7 +53,7 @@ A producer must never fail because the queue is unavailable: log it and carry on
 
 `python -m scripts.review_queue health` checks four things (the memory canary runs the same check daily and fails when it does):
 
-1. **Read-back.** It writes a probe item, reads it back, decides it, and confirms the event log.
+1. **Read-back.** It takes a probe item through its whole lifecycle (create, read back, decide, claim, apply) and confirms the event log.
 2. **Pusher heartbeat.** It must be under 10 minutes old; the bridge writes it on every successful loop.
 3. **Unsent backlog.** No pushable item may stay unsent for more than 15 minutes.
 4. **Appliers.** Any failed, stuck or interrupted apply is named.
