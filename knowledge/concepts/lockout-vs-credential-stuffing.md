@@ -1,6 +1,7 @@
 ---
 slug: lockout-vs-credential-stuffing
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item 74d6cc, 2026-09-29T04:00:41Z)"
 reason: summary makes specific security claims (lockout/brute-force, MFA/credential-stuffing distinction) not present in the excerpt, which is a meta-level calibration summary with no supporting content
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:24:01Z
@@ -15,14 +16,6 @@ sources:
 
 # lockout-vs-credential-stuffing
 
-**Quarantined** for human review.
-
-**Reason:** summary makes specific security claims (lockout/brute-force, MFA/credential-stuffing distinction) not present in the excerpt, which is a meta-level calibration summary with no supporting content
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 lockout defends against brute force; only MFA defends against credential stuffing; pattern for distinguishing two related threats
 
-_Quarantined on 2026-05-10T15:24:01Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T04:00:41Z after human review in the review queue (item 74d6cc). The filing gate had held it for: untraceable-claims._
