@@ -13,9 +13,11 @@ The always-loaded starting point for any agent querying the Neural Bridge wiki.
 
 
 
+
 - [[ai-enabled-social-engineering-canon]]
 - [[bcrypt-pedagogy-vs-argon2-production]]
 - [[cidr-as-cloud-lingua-franca]]
+- [[cloud-native-firewalls-replace-appliances]]
 - [[csp-with-nonces-not-unsafe-inline]]
 - [[cve-cwe-owasp-hierarchy]]
 - [[secure-design-principles-with-violation-examples]]

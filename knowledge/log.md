@@ -85,3 +85,4 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
 ## 2026-09-29
 
 - review queue: promoted `ai-enabled-social-engineering-canon` from quarantine after human review (item ec3f45)
+- review queue: promoted `cloud-native-firewalls-replace-appliances` from quarantine after human review (item 5608e0)
