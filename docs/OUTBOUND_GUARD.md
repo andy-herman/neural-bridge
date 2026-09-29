@@ -85,6 +85,8 @@ Only 13 shingles were exempt as already public.
 ### What it does not catch
 
 - Paraphrase, and verbatim runs shorter than about 14 words.
+- Text rendered as image pixels or encoded/compressed inside binary formats.
+  Forced-text diffs screen textual bytes, not decoded images or archives.
 - A note marked since the last index rebuild (at most an hour on the daemon's
   schedule).
 - Discord and Telegram messages, except the compile summary, which carries
@@ -113,6 +115,14 @@ that, the exemption above covers it.
 | GitHub | `agent_builder.py` | Every agent-supplied field before any git or file change, then the push itself, between the commit and `git push`. It stages and commits only the files it writes. |
 | GitHub | `loop_engineer/pr.py` | Before `git push`: everything the push would publish (every unpushed commit) plus the PR title and body, which carry the agent's own summary. It rebuilds an index older than an hour first, because it runs without the daemon's refresh loop. A refusal escalates the issue with counts only. |
 | Any push | `scripts/githooks/pre-push` | The catch-all, a git pre-push hook linked into this repo's and the blog's clones. Every push from them is screened, whoever makes it: you by hand, the daemon, or the loop engineer. It covers every commit the push would publish that the remote lacks, on whatever branch. A deletion publishes nothing and passes. A refusal, or a guard that cannot screen, stops the push with a counts-only reason. |
+
+The pre-push hook captures Git output as bytes and decodes UTF-8 with
+replacement: invalid byte sequences become `U+FFFD`, while valid text remains
+intact for the same scanner. It does not translate newlines, and patch parsing
+splits only at Git's LF boundaries, so control characters or Unicode separators
+inside added content cannot hide the text that follows. Binary files are still
+forced through `--text`, including earlier unpushed commits; no file is skipped.
+Git failures, timeouts, spawn errors and unusable indexes still block the push.
 
 When something is blocked, nothing is published:
 
@@ -203,6 +213,9 @@ Policy file shape (placeholder values):
     when gemma-grc is absent).
   - Push screening against a real temporary git remote: merges, a second
     remote, and `-diff` attributes.
+  - Real Git capture of a tiny synthetic PNG and arbitrary bytes: valid UTF-8
+    survives, mixed binary/text excerpts and markings still block, and removed
+    binary content in unpushed history stays protected.
   - The pre-push catch-all: git's hook protocol (pushed refs other than
     HEAD, deletions, commits the remote already has, an unusable guard), the
     installer, and a real `git push` through the installed hook.

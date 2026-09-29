@@ -692,6 +692,125 @@ class TestCheckPush(unittest.TestCase):
         self.assertIn("could not screen", v.describe())
 
 
+class TestBinaryPush(unittest.TestCase):
+    """Exercise the actual Git capture with synthetic binary and UTF-8 content."""
+
+    # A locally generated one-pixel PNG; no real images enter the fixtures.
+    PNG = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+        "0000000c49444154789c63606060000000040001f61738550000000049454e44ae426082"
+    )
+
+    def setUp(self):
+        self.guard = SyntheticGuard().install()
+        self.addCleanup(self.guard.remove)
+        self.addCleanup(og._CACHE.clear)
+        self.work = self.guard.root / "work"
+        self.work.mkdir()
+        self.enterContext(mock.patch.dict(os.environ, {
+            "GIT_DIR": str(self.work / ".git"),
+            "GIT_WORK_TREE": str(self.work),
+        }))
+        self.assertTrue(_git(self.work, "-c", "init.defaultBranch=main", "init")[0])
+        self._commit({"README.md": b"hello\n"})
+        ok, sha = _git(self.work, "rev-parse", "HEAD")
+        self.assertTrue(ok)
+        self.assertTrue(_git(self.work, "update-ref", "refs/remotes/origin/main", sha.strip())[0])
+
+    def _commit(self, files: dict[str, bytes], message: str = "notes"):
+        for name, data in files.items():
+            (self.work / name).write_bytes(data)
+        self.assertTrue(_git(self.work, "add", "--", *files)[0])
+        self.assertTrue(_git(self.work, "commit", "-m", message)[0])
+
+    def test_clean_binary_push_preserves_valid_utf8(self):
+        article = FILLER + "\narticle caf\u00e9 \u96ea\n"
+        embedded = "embedded caf\u00e9 \u96ea \U0001f319"
+        message = "Publish caf\u00e9 notes"
+        self._commit({
+            "pixel.png": self.PNG,
+            "article.md": article.encode("utf-8"),
+            "payload.bin": bytes(range(256)) + b"\0" + embedded.encode("utf-8") + b"\xbc\0",
+        }, message)
+        ok, patch = og._cwd_git(["show", "--text", "--format=", "HEAD"])
+        self.assertTrue(ok)
+        self.assertIn("\ufffd", patch)
+        text = og.pending_push_text(og._cwd_git)
+        self.assertIsNotNone(text)
+        for expected in (article.rstrip(), embedded, message, "pixel.png", "payload.bin"):
+            self.assertIn(expected, text)
+        self.assertTrue(og.check_push(og._cwd_git, surface="test:binary").allowed)
+        ok, sha = og._cwd_git(["rev-parse", "HEAD"])
+        self.assertTrue(ok)
+        line = f"refs/heads/main {sha.strip()} refs/heads/main {'0' * 40}\n"
+        self.assertEqual(og.pre_push(["origin"], line), 0)
+
+    def test_protected_text_in_mixed_binary_push_is_still_blocked(self):
+        excerpt = marked_excerpt(20)
+        cases = (
+            (excerpt, "shingles", 9, 0),
+            (excerpt.replace(" ", "\u2028"), "shingles", 9, 0),
+            (MARKING_PHRASE, "marking", 0, 1),
+            (MARKING_PHRASE.replace(" ", "\u2028"), "marking", 0, 1),
+        )
+        for case, (protected, reason, shingles, markings) in enumerate(cases):
+            for name in ("article.md", "payload.bin"):
+                with self.subTest(case=case, location=name):
+                    self.assertTrue(_git(self.work, "checkout", "--detach", "origin/main")[0])
+                    data = protected.encode("utf-8")
+                    if name == "payload.bin":
+                        data = b"\0\xff\r\v\f\x1c\x1d\x1e" + data + b"\xbc\0"
+                    self._commit({"pixel.png": self.PNG, name: data})
+                    text = og.pending_push_text(og._cwd_git)
+                    self.assertIsNotNone(text)
+                    self.assertIn(protected, text)
+                    verdict = og.check_push(og._cwd_git, surface="test:binary")
+                    self.assertEqual((verdict.allowed, verdict.reason), (False, reason))
+                    self.assertEqual((verdict.shingle_hits, verdict.marking_hits), (shingles, markings))
+                    logged = self.guard.audit_path.read_text(encoding="utf-8") + verdict.describe()
+                    for word in SECRET_WORDS:
+                        self.assertNotIn(word, logged.lower())
+
+    def test_binary_history_stays_protected_after_removal(self):
+        self._commit({"payload.bin": b"\0\xff" + marked_excerpt(20).encode("utf-8") + b"\xbc\0"})
+        self.assertTrue(_git(self.work, "rm", "--", "payload.bin")[0])
+        self.assertTrue(_git(self.work, "commit", "-m", "remove payload")[0])
+        verdict = og.check_push(og._cwd_git, surface="test:binary")
+        self.assertEqual((verdict.allowed, verdict.reason, verdict.shingle_hits), (False, "shingles", 9))
+
+    def test_binary_diff_attributes_cannot_hide_content(self):
+        self._commit({
+            ".gitattributes": b"* -diff\n",
+            "pixel.png": self.PNG,
+            "payload.bin": b"\0\xff" + marked_excerpt(20).encode("utf-8") + b"\xbc\0",
+        })
+        verdict = og.check_push(og._cwd_git, surface="test:binary")
+        self.assertEqual((verdict.allowed, verdict.reason), (False, "shingles"))
+
+    def test_unavailable_index_still_blocks_binary_push(self):
+        self._commit({"pixel.png": self.PNG, "article.md": FILLER.encode("utf-8")})
+        self.guard.index_path.unlink()
+        verdict = og.check_push(og._cwd_git, surface="test:binary")
+        self.assertEqual((verdict.allowed, verdict.reason), (False, "no-index"))
+
+    def test_real_git_failure_still_blocks(self):
+        verdict = og.check_push(og._cwd_git, surface="test:binary", tips=("refs/heads/missing-fixture",))
+        self.assertEqual((verdict.allowed, verdict.reason), (False, "error:git"))
+
+    def test_nonzero_binary_git_output_still_blocks(self):
+        result = subprocess.CompletedProcess(["git"], 1, stdout=b"\xff", stderr=b"\xbc")
+        with mock.patch.object(og.subprocess, "run", return_value=result):
+            verdict = og.check_push(og._cwd_git, surface="test:binary")
+        self.assertEqual((verdict.allowed, verdict.reason), (False, "error:git"))
+
+    def test_git_timeout_and_spawn_failure_still_block(self):
+        for error in (subprocess.TimeoutExpired("git", 120), OSError("fixture spawn failure")):
+            with self.subTest(error=type(error).__name__), \
+                 mock.patch.object(og.subprocess, "run", side_effect=error):
+                verdict = og.check_push(og._cwd_git, surface="test:binary")
+            self.assertEqual((verdict.allowed, verdict.reason), (False, "error:git"))
+
+
 class TestPrePush(unittest.TestCase):
     """The catch-all: git's pre-push protocol, the installer, and the installed
     hook end to end."""

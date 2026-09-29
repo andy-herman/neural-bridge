@@ -481,7 +481,8 @@ def pending_push_text(run_git: GitRunner, remote: str = "origin", tips: Iterable
     except Exception:  # e.g. undecodable output: cannot screen, so block
         return None
     parts = [messages]
-    for line in patch.splitlines():
+    # Git delimits patch lines with LF; other separators can be added content.
+    for line in patch.split("\n"):
         if line.startswith("+++ "):
             parts.append(line[4:].removeprefix("b/"))
         elif line.startswith("+"):
@@ -508,13 +509,13 @@ _ZERO_SHA = re.compile(r"^0+$")
 
 
 def _cwd_git(args: list[str]) -> tuple[bool, str]:
-    """git in the current directory, which is the repo root when git runs a hook."""
+    """Git in the hook's repo; replace invalid UTF-8 without rewriting newlines."""
     try:
-        proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120,
+        proc = subprocess.run(["git", *args], capture_output=True, timeout=120,
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return False, ""
-    return proc.returncode == 0, proc.stdout
+    return proc.returncode == 0, proc.stdout.decode("utf-8", errors="replace")
 
 
 def pre_push(argv: list[str], stdin_text: str, run_git: GitRunner | None = None) -> int:
