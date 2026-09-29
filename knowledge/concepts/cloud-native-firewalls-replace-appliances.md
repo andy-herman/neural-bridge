@@ -1,6 +1,7 @@
 ---
 slug: cloud-native-firewalls-replace-appliances
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item 5608e0, 2026-09-29T03:59:54Z)"
 reason: summary cites specific technologies (AWS SG, Azure NSG, GCP FR, eBPF microsegmentation) not present in the session excerpt — claims are untraceable to the provided evidence
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:21:31Z
@@ -15,14 +16,6 @@ sources:
 
 # cloud-native-firewalls-replace-appliances
 
-**Quarantined** for human review.
-
-**Reason:** summary cites specific technologies (AWS SG, Azure NSG, GCP FR, eBPF microsegmentation) not present in the session excerpt — claims are untraceable to the provided evidence
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 AWS SG / Azure NSG / GCP FR + eBPF microsegmentation; modern network security beyond Cisco-style ACLs
 
-_Quarantined on 2026-05-10T15:21:31Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T03:59:54Z after human review in the review queue (item 5608e0). The filing gate had held it for: untraceable-claims._
