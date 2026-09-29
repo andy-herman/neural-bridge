@@ -1,6 +1,7 @@
 ---
 slug: ai-enabled-social-engineering-canon
-verdict: QUARANTINE
+verdict: PROMOTE
+reviewed: "approved by Andy in the review queue (item ec3f45, 2026-09-29T03:59:45Z)"
 reason: summary references specific factual claim (Hong Kong $25M deepfake CFO incident) that is not present or supported in the session excerpt
 checks_triggered: [untraceable-claims]
 compiled_at: 2026-05-10T15:19:45Z
@@ -15,14 +16,6 @@ sources:
 
 # ai-enabled-social-engineering-canon
 
-**Quarantined** for human review.
-
-**Reason:** summary references specific factual claim (Hong Kong $25M deepfake CFO incident) that is not present or supported in the session excerpt
-
-**Checks triggered:** untraceable-claims
-
-## Proposed summary
-
 Hong Kong $25M deepfake CFO + voice cloning bank fraud; pattern for "the social engineering threat surface has expanded with AI capability."
 
-_Quarantined on 2026-05-10T15:19:45Z by `compile.py` v1.2._
+_Promoted from quarantine on 2026-09-29T03:59:45Z after human review in the review queue (item ec3f45). The filing gate had held it for: untraceable-claims._

@@ -81,3 +81,7 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
   - CONNECTION secure-design-principles-with-violation-examples ↔ subnet-math-cheat-sheet-for-midterm -> knowledge/connections/secure-design-principles-with-violation-examples--subnet-math-cheat-sheet-for-midterm.md
   - CONNECTION secure-design-principles-with-violation-examples ↔ threat-modeling-as-code-pytm-threatspec -> knowledge/connections/secure-design-principles-with-violation-examples--threat-modeling-as-code-pytm-threatspec.md
   - CONNECTION subnet-math-cheat-sheet-for-midterm ↔ threat-modeling-as-code-pytm-threatspec -> knowledge/connections/subnet-math-cheat-sheet-for-midterm--threat-modeling-as-code-pytm-threatspec.md
+
+## 2026-09-29
+
+- review queue: promoted `ai-enabled-social-engineering-canon` from quarantine after human review (item ec3f45)
