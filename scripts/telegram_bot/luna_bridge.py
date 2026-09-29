@@ -62,7 +62,7 @@ from telegram.ext import (
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.discord_bot import honcho_client
+from scripts.discord_bot import agent_telemetry, honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
 from scripts.env_file import load_default_env  # noqa: E402
@@ -315,16 +315,20 @@ def main() -> None:
 
     queue = QueueSurface(store=review_store.Store(), repo=REPO_ROOT,
                          chat_ids=_allowed_user_ids, log=log)
-    app: Application = (ApplicationBuilder().token(token)
-                        .post_init(queue.start).post_shutdown(queue.stop).build())
-    app.add_handler(CommandHandler("start", cmd_start))
-    queue.install(app)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # python-telegram-bot 20+ has a synchronous run_polling that owns the loop.
-    # allowed_updates is explicit: when omitted Telegram reuses whatever an
-    # earlier run registered, and the queue's buttons need callback_query.
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+    async def post_init(app: Application) -> None:
+        await queue.start(app)
+        agent_telemetry.ready(AGENT_ID)
+
+    with agent_telemetry.runtime("telegram-luna", {AGENT_ID: True}, log=log):
+        app: Application = (ApplicationBuilder().token(token)
+                            .post_init(post_init).post_shutdown(queue.stop).build())
+        app.add_handler(CommandHandler("start", cmd_start))
+        queue.install(app)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+        # Explicit updates preserve the review queue's callback buttons.
+        app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

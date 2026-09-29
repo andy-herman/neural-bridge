@@ -56,7 +56,7 @@ from .handlers import (
 from .auth import is_authorized
 from .mention import is_mention_for_self
 from .keychain import get_token
-from . import inflight
+from . import agent_telemetry, inflight
 
 # Mentions a previous process left in-flight (killed by restart/crash).
 # Populated once in run(); each agent's on_ready posts a notice for its own
@@ -159,6 +159,7 @@ class AgentClient(discord.Client):
             log(f"slash commands synced to guild {self.bot_config.guild_id}")
 
     async def on_ready(self) -> None:
+        agent_telemetry.ready(self.agent.id)
         log(f"online: {self.agent.id} ({self.agent.display_name}) as {self.user}")
         fleet_log_event(f"{self.agent.id} online")
 
@@ -180,6 +181,12 @@ class AgentClient(discord.Client):
                 log(f"inflight recovery notice posted: agent={self.agent.id} channel={channel_id}")
             except Exception as exc:
                 log(f"inflight recovery notice FAILED: agent={self.agent.id} {type(exc).__name__}: {exc}")
+
+    async def on_resumed(self) -> None:
+        agent_telemetry.ready(self.agent.id)
+
+    async def on_disconnect(self) -> None:
+        agent_telemetry.disconnected(self.agent.id)
 
     async def on_message(self, message: discord.Message) -> None:
         # Never respond to messages from ourselves (the bot itself).
@@ -301,57 +308,58 @@ async def run() -> None:
         CLIENT_REGISTRY.register(agent.id, client)
         clients_and_tokens.append((client, token))
 
-    if not clients_and_tokens:
-        log("ERROR: no agents have keychain tokens. Cannot start daemon.")
-        return
-    log(f"client registry: {len(CLIENT_REGISTRY)} agents registered")
+    enabled = {client.agent.id for client, _ in clients_and_tokens}
+    with agent_telemetry.runtime(
+        "discord", {agent.id: agent.id in enabled for agent in config.agents}, log=log,
+    ):
+        if not clients_and_tokens:
+            log("ERROR: no agents have keychain tokens. Cannot start daemon.")
+            return
+        log(f"client registry: {len(CLIENT_REGISTRY)} agents registered")
 
-    fleet_set_state(
-        metrics={
-            "agents_registered": len(CLIENT_REGISTRY),
-            "specialists": len(config.agents),
-            "guild_id": config.guild_id,
-        },
-        headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
-    )
-    fleet_log_event(f"daemon started with {len(CLIENT_REGISTRY)} agents")
-
-    async def _heartbeat_tick() -> None:
-        """Refresh the Fleet heartbeat every 10 min so NB doesn't drift to
-        'idle' on the dashboard between mentions. The agent clients themselves
-        only emit on startup (per-persona online events) and on mentions —
-        long quiet stretches make a healthy daemon look stale."""
-        while True:
-            try:
-                await asyncio.sleep(600)  # 10 minutes
-                fleet_set_state(
-                    metrics={
-                        "agents_registered": len(CLIENT_REGISTRY),
-                        "specialists": len(config.agents),
-                        "guild_id": config.guild_id,
-                    },
-                    headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log(f"heartbeat tick failed: {type(exc).__name__}: {exc}")
-
-    log(f"starting {len(clients_and_tokens)} agents...")
-    tick_task = asyncio.create_task(_heartbeat_tick())
-    guard_task = asyncio.create_task(outbound_guard_refresh_loop())
-    try:
-        await asyncio.gather(
-            *[client.start(token) for client, token in clients_and_tokens],
-            return_exceptions=False,
+        fleet_set_state(
+            metrics={
+                "agents_registered": len(CLIENT_REGISTRY),
+                "specialists": len(config.agents),
+                "guild_id": config.guild_id,
+            },
+            headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
         )
-    finally:
-        for task in (tick_task, guard_task):
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        fleet_log_event(f"daemon started with {len(CLIENT_REGISTRY)} agents")
+
+        async def _heartbeat_tick() -> None:
+            """Refresh application-level Fleet health, separately from model activity."""
+            while True:
+                try:
+                    await asyncio.sleep(600)  # 10 minutes
+                    fleet_set_state(
+                        metrics={
+                            "agents_registered": len(CLIENT_REGISTRY),
+                            "specialists": len(config.agents),
+                            "guild_id": config.guild_id,
+                        },
+                        headline=f"Discord daemon online — {len(CLIENT_REGISTRY)} agents registered",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log(f"heartbeat tick failed: {type(exc).__name__}: {exc}")
+
+        log(f"starting {len(clients_and_tokens)} agents...")
+        tick_task = asyncio.create_task(_heartbeat_tick())
+        guard_task = asyncio.create_task(outbound_guard_refresh_loop())
+        try:
+            await asyncio.gather(
+                *[client.start(token) for client, token in clients_and_tokens],
+                return_exceptions=False,
+            )
+        finally:
+            for task in (tick_task, guard_task):
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 def main() -> int:

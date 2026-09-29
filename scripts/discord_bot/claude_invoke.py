@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import agent_telemetry
+
 # The route policy is shared with the hooks (flush runs inside these
 # sessions), so it lives with them; see hooks/claude_env.py.
 _HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
@@ -134,6 +136,9 @@ def call_claude_sync(
     effort: str | None = None,
     agent_id: str | None = None,
     mcp_config: str | None = None,
+    telemetry_agent_id: str | None = None,
+    *,
+    _telemetry_span: agent_telemetry.Invocation | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
 
@@ -179,23 +184,28 @@ def call_claude_sync(
             args.extend(["--resume", session_id])
         else:
             args.extend(["--session-id", session_id])
-    try:
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=_subprocess_env(agent_id=agent_id),
-        )
-    except subprocess.TimeoutExpired:
-        return False, "", "timeout"
-    except FileNotFoundError:
-        return False, "", "claude_cli_not_found"
-    if result.returncode != 0:
-        snippet = (result.stderr or "")[:200].replace("\n", " ")
-        return False, result.stdout, f"exit_{result.returncode}:{snippet}"
-    return True, result.stdout, ""
+    # Attribution is deliberately separate from NB_AGENT_ID and tool policy.
+    with _telemetry_span or agent_telemetry.Invocation(telemetry_agent_id or agent_id) as span:
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+                env=_subprocess_env(agent_id=agent_id),
+            )
+        except subprocess.TimeoutExpired:
+            return False, "", "timeout"
+        except FileNotFoundError:
+            return False, "", "claude_cli_not_found"
+        if result.returncode != 0:
+            if result.returncode < 0:
+                span.outcome = "cancelled"
+            snippet = (result.stderr or "")[:200].replace("\n", " ")
+            return False, result.stdout, f"exit_{result.returncode}:{snippet}"
+        span.outcome = "succeeded"
+        return True, result.stdout, ""
 
 
 async def call_claude(
@@ -209,14 +219,21 @@ async def call_claude(
     effort: str | None = None,
     agent_id: str | None = None,
     mcp_config: str | None = None,
+    telemetry_agent_id: str | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: call_claude_sync(
-            prompt, model, timeout, allowed_tools, add_dirs,
-            session_id=session_id, resume=resume, effort=effort,
-            agent_id=agent_id, mcp_config=mcp_config,
-        ),
-    )
+    span = agent_telemetry.Invocation(telemetry_agent_id or agent_id)
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: call_claude_sync(
+                prompt, model, timeout, allowed_tools, add_dirs,
+                session_id=session_id, resume=resume, effort=effort,
+                agent_id=agent_id, mcp_config=mcp_config,
+                telemetry_agent_id=telemetry_agent_id, _telemetry_span=span,
+            ),
+        )
+    except asyncio.CancelledError:
+        span.cancel_wait()
+        raise

@@ -1,6 +1,30 @@
 # Hooks
 
-Claude Code hook scripts for Neural Bridge. Wired into `.claude/settings.json`.
+Hook scripts for Neural Bridge's Claude Code and Copilot sessions. Wired into
+`.claude/settings.json`.
+
+## Write-guard input compatibility
+
+`guard_concepts.py` accepts Claude Code's `file_path` / `notebook_path` objects
+and Copilot's raw `apply_patch` strings. It checks every added, updated, or deleted
+path and both ends of every move before approving a batch. Diff content is not
+treated as path metadata. The path policy is unchanged: resolve relative paths
+against the session working directory, follow symlinks, compare case-insensitively,
+and block writes under `knowledge/` except `knowledge/agents/`.
+
+Malformed JSON, unrecognized mutation input, ambiguous patch syntax, and paths
+that cannot be resolved are rejected with exit 2 and an explicit diagnostic. They
+are not treated as empty successful operations. Non-writing tools without file
+paths are unaffected.
+
+Hook launchers use `CLAUDE_PROJECT_DIR` when supplied and otherwise resolve the
+current git worktree root, including from a nested working directory. Guard rules,
+matchers, timeouts, and tool permissions are unchanged.
+
+Run the stdlib regression suite with `python3 hooks/test_guard_concepts.py`.
+It covers structured edits, multi-file patches, move sources and destinations,
+traversal, symlinks, malformed inputs, and both launcher environments without
+writing to the real wiki or invoking models.
 
 ## What's here
 

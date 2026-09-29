@@ -63,7 +63,7 @@ from telegram.ext import (
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.discord_bot import honcho_client
+from scripts.discord_bot import agent_telemetry, honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
 from scripts.env_file import load_default_env  # noqa: E402
@@ -398,12 +398,16 @@ def main() -> None:
 
     log(f"Loid Telegram bridge starting (allowed users: {sorted(allowed)})")
 
-    app: Application = ApplicationBuilder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    async def post_init(_app: Application) -> None:
+        agent_telemetry.ready(AGENT_ID)
 
-    app.run_polling(drop_pending_updates=True)
+    with agent_telemetry.runtime("telegram-loid", {AGENT_ID: True}, log=log):
+        app: Application = ApplicationBuilder().token(token).post_init(post_init).build()
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
