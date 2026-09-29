@@ -364,8 +364,11 @@ async def run() -> None:
 
 
 def main() -> int:
-    load_default_env(keys={agent_telemetry.ENV_PATH})
     _configure_logging()
+    try:
+        load_default_env(keys={agent_telemetry.ENV_PATH})
+    except ValueError:
+        log("agent telemetry: invalid_env_value")
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

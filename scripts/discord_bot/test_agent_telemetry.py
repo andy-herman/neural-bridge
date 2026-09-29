@@ -784,6 +784,43 @@ class TestRuntimeWiring(TelemetryCase):
                         self.assertIsNone(t._writer)
         self.assertFalse(self.path.exists())
 
+    def test_discord_invalid_telemetry_env_value_does_not_block_startup(self):
+        from scripts.discord_bot import main
+
+        environment = {"NB_AGENT_ID": "research", "ANTHROPIC_API_KEY": "fake-inherited"}
+        unrelated = "NB_AGENT_ID=loid\nANTHROPIC_API_KEY=fake-file\nCLAUDE_CODE_USE_BEDROCK=1\n"
+        for source in (self.shared_env, self.local_env):
+            with self.subTest(source=source.name):
+                self.shared_env.write_text(unrelated)
+                self.local_env.write_text(unrelated + f"{t.ENV_PATH}={self.path}\n")
+                source.write_text(unrelated + f"{t.ENV_PATH}=invalid\0telemetry-env-sentinel\n")
+                events = []
+
+                async def run():
+                    self.assertEqual(events, ["logging", "agent telemetry: invalid_env_value"])
+                    self.assertEqual(dict(os.environ), environment)
+                    with t.runtime("discord", {"research": True}, log=self.logs.append):
+                        self.assertIsNone(t._writer)
+                    events.append("run")
+
+                with patch.dict(os.environ, environment, clear=True), \
+                     patch.object(t, "sys", SimpleNamespace(modules={})), \
+                     patch.object(t, "_writer", None), \
+                     patch.object(t, "discover_registry") as registry, \
+                     patch.object(t, "SnapshotWriter") as constructor, \
+                     patch.object(main, "_configure_logging", side_effect=lambda: events.append("logging")), \
+                     patch.object(main, "log", side_effect=events.append) as log, \
+                     patch.object(main, "run", side_effect=run) as runner:
+                    self.assertEqual(main.main(), 0)
+                    self.assertEqual(events, ["logging", "agent telemetry: invalid_env_value", "run"])
+                    self.assertEqual(dict(os.environ), environment)
+                    self.assertNotIn("telemetry-env-sentinel", " ".join(events))
+                    log.assert_called_once_with("agent telemetry: invalid_env_value")
+                    runner.assert_awaited_once_with()
+                    registry.assert_not_called()
+                    constructor.assert_not_called()
+        self.assertFalse(self.path.exists())
+
     def test_discord_uses_real_setup_and_connection_events(self):
         from scripts.discord_bot import main
         from scripts.discord_bot.config import AgentConfig, BotConfig

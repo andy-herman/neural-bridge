@@ -64,6 +64,10 @@ settings are imported or overridden in Discord: credentials, provider/routing
 flags, and `NB_AGENT_ID` remain untouched. The three Telegram bridge entrypoints
 keep their existing unfiltered `load_default_env()` calls.
 
+A telemetry value rejected by the process environment produces only the fixed
+`invalid_env_value` diagnostic. Discord still starts with telemetry off; the
+input value is never logged. The shared loader's error behavior is unchanged.
+
 The default precedence is the inherited process environment (including an
 explicitly empty string), then `~/.hermes/.env`, then the optional ignored
 repository `.env`. The earlier source wins. A local file supplies the path only
