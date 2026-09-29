@@ -18,7 +18,7 @@ aggregate, do not prove that specialists are absent, idle, or offline.
 
 | Setting | Meaning |
 |---|---|
-| `NB_AGENT_TELEMETRY_PATH` | Producer opt-in: an absolute JSON filename outside all Git checkouts. Unset/empty means no telemetry files or heartbeat thread. |
+| `NB_AGENT_TELEMETRY_PATH` | Producer opt-in: an absolute JSON filename outside all Git checkouts. An unset/empty effective value means no telemetry files or heartbeat thread. |
 | `MOONBASE_NEURAL_BRIDGE_SNAPSHOT` | Moonbase server's explicit local source filename, pointing to the same snapshot. Never expose it to browsers or accept a request-supplied filename. |
 
 A suggested, **not automatic**, destination is
@@ -43,11 +43,11 @@ and event. An error returns nonzero and does not overwrite the file.
 The exporter does not use models, the network, credential stores, or transcripts.
 This is the registry fallback, not a hardcoded roster or synthetic activity.
 
-Live observation requires the new code and `NB_AGENT_TELEMETRY_PATH` in each
-desired process's own launch environment, followed by a separately approved
-normal restart. Setting a variable in a shell does not change an existing
-launchd process. This integration does not edit installed plists or restart
-anything. **The existing main-branch auto-reloader can restart Discord and
+Live observation requires deployed code and `NB_AGENT_TELEMETRY_PATH` in each
+desired process, inherited or loaded at startup as described below, followed
+by a separately approved normal restart. Setting a variable in a shell does not
+change an existing launchd process. This integration does not edit installed
+plists or restart anything. **The existing main-branch auto-reloader can restart Discord and
 loaded Telegram bridges after merge. Coordinate deployment before merging.**
 All selected producers should use the same deployed registry revision.
 
@@ -55,6 +55,40 @@ For a separately authorized manual run, export the variable before invoking
 the existing daemon command. Do not launch a duplicate production daemon as a
 telemetry test. A duplicate telemetry source cannot steal the existing lease,
 but this does not replace the bots' own process-management rules.
+
+### Persistent opt-in (source-only follow-up)
+
+Discord now calls the existing `scripts.env_file.load_default_env` before
+observer setup with only `keys={agent_telemetry.ENV_PATH}`. No other file
+settings are imported or overridden in Discord: credentials, provider/routing
+flags, and `NB_AGENT_ID` remain untouched. The three Telegram bridge entrypoints
+keep their existing unfiltered `load_default_env()` calls.
+
+A telemetry value rejected by the process environment produces only the fixed
+`invalid_env_value` diagnostic. Discord still starts with telemetry off; the
+input value is never logged. The shared loader's error behavior is unchanged.
+
+The default precedence is the inherited process environment (including an
+explicitly empty string), then `~/.hermes/.env`, then the optional ignored
+repository `.env`. The earlier source wins. A local file supplies the path only
+when neither the process nor the shared file defines it. Unsetting an inherited
+value exposes the file defaults; an inherited empty string explicitly opts out
+even if a file contains a path.
+
+For a separately approved persistent configuration, the operator can create the
+ignored repository `.env` with exactly this one credential-free setting,
+replacing the placeholder with a literal absolute filename:
+
+```dotenv
+NB_AGENT_TELEMETRY_PATH=/absolute/private/path/agent-telemetry.json
+```
+
+The parser does not interpolate `$HOME` or expand `~` in values. The previously
+demonstrated live pilot used a transient launchd environment; this source-only
+follow-up does not establish that file-based persistence is deployed. It creates
+no real env file and changes no service, plist, or launchctl environment.
+Deployment still requires the operator's review and separately approved
+pause-first rollout.
 
 ### Operator runbook: separately approved live pilot
 
@@ -313,11 +347,12 @@ Production emission is suppressed under test runners; tests instantiate
 explicit temporary writers with fake lifecycles instead.
 
 ```sh
-.venv/bin/python -m pytest scripts/discord_bot/test_agent_telemetry.py -q
+.venv/bin/python -m pytest scripts/test_env_file.py scripts/discord_bot/test_agent_telemetry.py -q
 .venv/bin/python -m pytest hooks/ scripts/ -q
 ```
 
 Tests cover actual cross-process leases/merges, concurrent readers, overlapping
 jobs, cancelled waiters, stopped/restarted observers, safe registry projection,
-future times, private paths, atomic failures, and mocked transport entrypoints.
+future times, private paths, atomic failures, allowlisted env-file precedence,
+and mocked transport entrypoints with temporary default env paths.
 Passing fixtures does not establish that a production daemon is running.

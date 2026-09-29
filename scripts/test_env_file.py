@@ -61,6 +61,11 @@ def test_empty_value_allowed():
     assert env_file.parse_env_text("K=")["K"] == ""
 
 
+@pytest.mark.parametrize("value", ["$HOME/private/snapshot.json", "~/private/snapshot.json"])
+def test_values_are_not_interpolated(value):
+    assert env_file.parse_env_text(f"K={value}")["K"] == value
+
+
 # ---------- loading ----------
 
 def test_existing_environment_wins(tmp_path, monkeypatch):
@@ -107,6 +112,86 @@ def test_returns_key_names_only_never_values(tmp_path, monkeypatch):
     applied = env_file.load_env_file(f)
     assert applied == ["LUNA_TEST_SECRET"]
     assert "hunter2" not in "".join(applied)
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_allowlist_excludes_unselected_keys_even_when_overriding(tmp_path, monkeypatch, override):
+    f = tmp_path / "selected.env"
+    f.write_text("LUNA_TEST_SELECTED=file\nLUNA_TEST_SECRET=file\nLUNA_TEST_PROVIDER=file\n")
+    monkeypatch.setenv("LUNA_TEST_SELECTED", "inherited")
+    monkeypatch.setenv("LUNA_TEST_SECRET", "unchanged")
+    monkeypatch.delenv("LUNA_TEST_PROVIDER", raising=False)
+
+    applied = env_file.load_env_file(f, keys={"LUNA_TEST_SELECTED"}, override=override)
+
+    assert applied == (["LUNA_TEST_SELECTED"] if override else [])
+    assert os.environ["LUNA_TEST_SELECTED"] == ("file" if override else "inherited")
+    assert os.environ["LUNA_TEST_SECRET"] == "unchanged"
+    assert "LUNA_TEST_PROVIDER" not in os.environ
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_empty_allowlist_loads_nothing(tmp_path, monkeypatch, override):
+    f = tmp_path / "empty-allowlist.env"
+    f.write_text("LUNA_TEST_PRESENT=file\nLUNA_TEST_ABSENT=file\n")
+    monkeypatch.setenv("LUNA_TEST_PRESENT", "unchanged")
+    monkeypatch.delenv("LUNA_TEST_ABSENT", raising=False)
+    monkeypatch.setattr(env_file, "DEFAULT_ENV_PATHS", (f,))
+
+    assert env_file.load_env_file(f, keys=set(), override=override) == []
+    assert env_file.load_default_env(keys=set(), override=override) == []
+    assert os.environ["LUNA_TEST_PRESENT"] == "unchanged"
+    assert "LUNA_TEST_ABSENT" not in os.environ
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"keys": None}], ids=["omitted", "none"])
+@pytest.mark.parametrize("override", [False, True])
+def test_default_allowlist_preserves_all_key_behavior(tmp_path, monkeypatch, kwargs, override):
+    first, second = tmp_path / "shared.env", tmp_path / "local.env"
+    first.write_text("LUNA_TEST_ONE=one\nLUNA_TEST_TWO=two\n")
+    second.write_text("LUNA_TEST_THREE=three\nLUNA_TEST_TWO=later\n")
+    for key in ("LUNA_TEST_ONE", "LUNA_TEST_TWO", "LUNA_TEST_THREE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(env_file, "DEFAULT_ENV_PATHS", (first, second))
+
+    assert env_file.load_env_file(first, override=override, **kwargs) == [
+        "LUNA_TEST_ONE", "LUNA_TEST_TWO",
+    ]
+    applied = env_file.load_default_env(override=override, **kwargs)
+
+    assert applied == (["LUNA_TEST_ONE", "LUNA_TEST_TWO", "LUNA_TEST_THREE", "LUNA_TEST_TWO"]
+                       if override else ["LUNA_TEST_THREE"])
+    assert os.environ["LUNA_TEST_ONE"] == "one"
+    assert os.environ["LUNA_TEST_TWO"] == ("later" if override else "two")
+    assert os.environ["LUNA_TEST_THREE"] == "three"
+
+
+@pytest.mark.parametrize("inherited", [None, "", "from_process"])
+@pytest.mark.parametrize("shared", [None, "", "first"])
+@pytest.mark.parametrize("override", [False, True])
+def test_allowlisted_default_precedence(tmp_path, monkeypatch, inherited, shared, override):
+    first, second = tmp_path / "shared.env", tmp_path / "local.env"
+    first.write_text("" if shared is None else f"LUNA_TEST_ORDER={shared}\n")
+    second.write_text("LUNA_TEST_ORDER=second\nLUNA_TEST_PROVIDER=file\n")
+    monkeypatch.delenv("LUNA_TEST_PROVIDER", raising=False)
+    if inherited is None:
+        monkeypatch.delenv("LUNA_TEST_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("LUNA_TEST_ORDER", inherited)
+    monkeypatch.setattr(env_file, "DEFAULT_ENV_PATHS", (first, second))
+
+    applied = env_file.load_default_env(keys={"LUNA_TEST_ORDER"}, override=override)
+
+    if override:
+        assert os.environ["LUNA_TEST_ORDER"] == "second"
+        assert applied == ["LUNA_TEST_ORDER"] * (1 if shared is None else 2)
+    elif inherited is not None:
+        assert os.environ["LUNA_TEST_ORDER"] == inherited
+        assert applied == []
+    else:
+        assert os.environ["LUNA_TEST_ORDER"] == ("second" if shared is None else shared)
+        assert applied == ["LUNA_TEST_ORDER"]
+    assert "LUNA_TEST_PROVIDER" not in os.environ
 
 
 def test_first_path_wins_across_defaults(tmp_path, monkeypatch):
