@@ -193,6 +193,72 @@ class TestCanaryClassification(unittest.TestCase):
         self.assertIn("honcho_capture", text)
 
 
+class TestReviewQueueCheck(unittest.TestCase):
+    """The canary queues each degraded layer as an alert and read-back checks
+    the review queue itself, so a queue that stopped delivering fails the
+    canary instead of reproducing the dormancy at a new address."""
+
+    def setUp(self):
+        import os
+        self.tmp = tempfile.TemporaryDirectory()
+        self._env = patch.dict(os.environ, {
+            "NB_REVIEW_QUEUE_DB": str(Path(self.tmp.name) / "q.db"),
+            "NB_REVIEW_QUEUE_STATUS": str(Path(self.tmp.name) / "status.json"),
+        })
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self.tmp.cleanup()
+
+    def _results(self, bad: bool) -> dict:
+        row = ({"status": FAILING, "ok": 0, "failed": 3, "reason": "3 attempt(s), none succeeded"}
+               if bad else {"status": HEALTHY, "ok": 5, "failed": 0, "reason": "5 ok / 0 failed"})
+        return {"honcho_capture": row}
+
+    def test_degraded_layers_become_alerts_and_clear_on_recovery(self):
+        from scripts.memory_canary import review_queue_check
+        from scripts.review_queue import store as qs
+        review_queue_check(self._results(True), ["honcho_capture"])
+        (item,) = qs.Store().items(states=qs.WAITING)
+        self.assertEqual((item.source, item.kind, item.key), ("memory_canary", qs.ALERT, "honcho_capture"))
+        self.assertIn("FAILING", item.title)
+        review_queue_check(self._results(False), [])
+        self.assertEqual(qs.Store().items(states=qs.WAITING), [])
+
+    def test_a_queue_with_no_pusher_fails_the_canary(self):
+        from scripts import memory_canary as mc
+        import io
+        from contextlib import redirect_stdout
+        healthy = {"total": 5, "ok": 5, "failed": 0}
+        summary = {store: healthy for store in mc.WATCHED}
+        with patch.object(mem, "read_events", return_value=[]), \
+                patch.object(mem, "summarize", return_value=summary):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mc.main(["--no-notify"])
+        self.assertEqual(rc, 1)
+        self.assertIn("Review queue: PROBLEMS", buf.getvalue())
+        self.assertIn("no heartbeat", buf.getvalue())
+
+    def test_a_live_pusher_passes(self):
+        from scripts import memory_canary as mc
+        from scripts.review_queue import health, store as qs
+        import io
+        import time
+        from contextlib import redirect_stdout
+        qs.Store().meta_set(health.HEARTBEAT_KEY, str(int(time.time())))
+        healthy = {"total": 5, "ok": 5, "failed": 0}
+        summary = {store: healthy for store in mc.WATCHED}
+        with patch.object(mem, "read_events", return_value=[]), \
+                patch.object(mem, "summarize", return_value=summary):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mc.main(["--no-notify"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn("Review queue: ok", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
 

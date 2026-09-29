@@ -11,6 +11,10 @@ Reuses NB's existing infrastructure:
   - session_store.SESSION_STORE for --resume session continuity across turns
   - honcho_client.submit_turn for shared peer-memory capture
 
+Also hosts the review queue's surface (scripts/review_queue/surface.py): the
+pusher loop that sends queue items as cards with buttons, the button
+callbacks, and /queue. Same bot, same allowlist.
+
 Does NOT yet support:
   - Handoffs to other agents (Discord-only for now)
   - Slash commands
@@ -62,6 +66,8 @@ from scripts.discord_bot import honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
 from scripts.env_file import load_default_env  # noqa: E402
+from scripts.review_queue import store as review_store  # noqa: E402
+from scripts.review_queue.surface import QueueSurface  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -307,12 +313,18 @@ def main() -> None:
 
     log(f"Luna Telegram bridge starting (allowed users: {sorted(allowed)})")
 
-    app: Application = ApplicationBuilder().token(token).build()
+    queue = QueueSurface(store=review_store.Store(), repo=REPO_ROOT,
+                         chat_ids=_allowed_user_ids, log=log)
+    app: Application = (ApplicationBuilder().token(token)
+                        .post_init(queue.start).post_shutdown(queue.stop).build())
     app.add_handler(CommandHandler("start", cmd_start))
+    queue.install(app)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # python-telegram-bot 20+ has a synchronous run_polling that owns the loop
-    app.run_polling(drop_pending_updates=True)
+    # python-telegram-bot 20+ has a synchronous run_polling that owns the loop.
+    # allowed_updates is explicit: when omitted Telegram reuses whatever an
+    # earlier run registered, and the queue's buttons need callback_query.
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

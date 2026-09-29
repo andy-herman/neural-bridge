@@ -5,6 +5,8 @@
 # Triggers a daemon reload when files in any of these paths changed since the
 # last poll:
 #   - scripts/discord_bot/*       (the daemon code itself)
+#   - scripts/telegram_bot/*, scripts/luna/*, scripts/review_queue/*
+#                                 (the Telegram bridges and what they import)
 #   - scripts/outbound_guard.py, scripts/fleet_heartbeat.py
 #                                 (top-level modules the daemon imports)
 #   - hooks/*                     (KNOWN_AGENTS + flush logic loaded at session boundaries)
@@ -81,8 +83,31 @@ reset_skip_state() {
     # Called once the checkout is back in step with origin/main; the
     # silent-stale window is over. Remove counter + alerted flag so the next
     # divergence starts a fresh count. `rm -f` on a missing file succeeds, so
-    # this can never return non-zero.
+    # this can never return non-zero. The `if` keeps the queue call off the
+    # every-tick path: it only runs on the tick that ends a blocked run. (Not
+    # keyed on the alerted flag: that marks the Discord ping, which can fail
+    # while the queue alert was raised.)
+    if [ -f "$SKIP_COUNTER" ] || [ -f "$ALERTED_FLAG" ]; then
+        queue_cmd clear --source auto_reload --key blocked
+    fi
     rm -f "$SKIP_COUNTER" "$ALERTED_FLAG"
+}
+
+# Helper: tell the review queue (scripts/review_queue). Never fails the
+# script: the queue is a second channel beside the Discord ping, and a broken
+# queue must not stop the deploy. Failures are logged; the queue's own health
+# check catches a queue that stopped taking items.
+queue_cmd() {
+    local py="${REPO}/.venv/bin/python"
+    if [ ! -x "$py" ]; then
+        log "queue: no venv python at ${py}; skipped $1"
+        return 0
+    fi
+    if (cd "$REPO" && "$py" -m scripts.review_queue "$@" >/dev/null 2>>"$LOG"); then
+        return 0
+    fi
+    log "queue: $1 failed (stderr above)"
+    return 0
 }
 
 # Record one tick on which the daemon could not be brought up to date, and
@@ -99,6 +124,8 @@ note_blocked() {
         local minutes=$((count * 2))
         log "alert: blocked $count ticks (~${minutes} min): $reason — pinging Discord"
         local msg="⚠️ neural-bridge auto-reload has been blocked for ${count} ticks (~${minutes} min): ${reason}. The daemon is running stale code until that is resolved in ${REPO}."
+        queue_cmd raise --source auto_reload --key blocked --kind alert \
+            --title "Auto-reload blocked for ~${minutes} min" --detail "$reason. The agents run stale code until it is resolved."
         if post_discord_alert "$msg"; then
             touch "$ALERTED_FLAG"
         else
@@ -181,7 +208,7 @@ DAEMON_RELEVANT=0
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-        scripts/discord_bot/*|scripts/telegram_bot/*|scripts/luna/*|scripts/env_file.py|scripts/outbound_guard.py|scripts/fleet_heartbeat.py|hooks/*|plugins/neural-bridge-core/agents/*|scripts/launchd/*)
+        scripts/discord_bot/*|scripts/telegram_bot/*|scripts/luna/*|scripts/review_queue/*|scripts/env_file.py|scripts/outbound_guard.py|scripts/fleet_heartbeat.py|hooks/*|plugins/neural-bridge-core/agents/*|scripts/launchd/*)
             DAEMON_RELEVANT=1
             break
             ;;
