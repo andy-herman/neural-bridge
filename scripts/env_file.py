@@ -12,10 +12,15 @@ is config you cannot test.
 
 PRECEDENCE
 
-Anything already in os.environ wins. A plist that sets a variable explicitly
-keeps overriding the file, so adding a value here cannot change what a running
-scheduled job does. Pass override=True only when you mean to stomp the process
-environment, which is almost never.
+Anything already in os.environ wins, including an explicitly empty value.
+A plist that sets a variable explicitly keeps overriding the file, so adding
+a value here cannot change what a running scheduled job does. The first
+default file wins over later ones. Pass override=True only when you mean to
+stomp the process environment and let later files win, which is almost never.
+
+Callers can restrict assignments with an explicit keys allowlist. None (the
+default) loads all keys; an empty set loads none. Overrides apply only to
+selected keys. File values are literal: $HOME and ~ are not expanded.
 
 SECURITY
 
@@ -31,7 +36,7 @@ from pathlib import Path
 # Searched in order. Later files do not override earlier ones, and neither
 # overrides the real environment. ~/.hermes/.env is the shared secret store
 # Andy already keeps for the Hermes side; the repo-local file is optional and
-# gitignored, for per-checkout overrides.
+# gitignored, for per-checkout defaults.
 DEFAULT_ENV_PATHS: tuple[Path, ...] = (
     Path.home() / ".hermes" / ".env",
     Path(__file__).resolve().parent.parent / ".env",
@@ -76,9 +81,13 @@ def parse_env_text(text: str) -> dict[str, str]:
     return out
 
 
-def load_env_file(path: str | Path, *, override: bool = False) -> list[str]:
+def load_env_file(
+    path: str | Path, *, override: bool = False, keys: set[str] | None = None,
+) -> list[str]:
     """Load one file into os.environ. Returns the KEY names actually set.
 
+    keys=None selects all keys; an empty set selects none. Unselected keys
+    are never assigned, even with override=True.
     Missing or unreadable files are not an error; they return []. The caller
     is usually a daemon starting up, and a missing optional override file must
     not be fatal.
@@ -90,6 +99,8 @@ def load_env_file(path: str | Path, *, override: bool = False) -> list[str]:
         return []
     applied: list[str] = []
     for key, value in parse_env_text(text).items():
+        if keys is not None and key not in keys:
+            continue
         if not override and key in os.environ:
             continue
         os.environ[key] = value
@@ -97,12 +108,13 @@ def load_env_file(path: str | Path, *, override: bool = False) -> list[str]:
     return applied
 
 
-def load_default_env(*, override: bool = False) -> list[str]:
+def load_default_env(*, override: bool = False, keys: set[str] | None = None) -> list[str]:
     """Load DEFAULT_ENV_PATHS in order. Returns every KEY name set, in order.
 
+    The same keys allowlist and override flag apply to every file.
     Call this once at the top of a `main()`. Safe to call more than once.
     """
     applied: list[str] = []
     for path in DEFAULT_ENV_PATHS:
-        applied.extend(load_env_file(path, override=override))
+        applied.extend(load_env_file(path, override=override, keys=keys))
     return applied

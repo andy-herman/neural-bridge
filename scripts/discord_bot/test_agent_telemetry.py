@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts import env_file
 from scripts.discord_bot import agent_telemetry as t, claude_invoke
 
 REGISTRY = [
@@ -709,6 +710,80 @@ class TestInvocation(TelemetryCase):
 
 
 class TestRuntimeWiring(TelemetryCase):
+    def setUp(self):
+        super().setUp()
+        self.shared_env = self.root / "shared.env"
+        self.local_env = self.root / "local.env"
+        self.enterContext(patch.object(
+            env_file, "DEFAULT_ENV_PATHS", (self.shared_env, self.local_env),
+        ))
+
+    def test_discord_main_loads_only_telemetry_before_observer_setup(self):
+        from scripts.discord_bot import main
+
+        unrelated = {
+            "ANTHROPIC_API_KEY": "fake-secret",
+            "ANTHROPIC_BASE_URL": "https://example.invalid",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "LUNA_TELEGRAM_ALLOWED_USERS": "123",
+            "NB_AGENT_ID": "loid",
+        }
+        file_text = "".join(f"{key}={value}\n" for key, value in unrelated.items())
+        local = str(self.path)
+        shared = str(self.root / "shared.json")
+        inherited = str(self.root / "inherited.json")
+        for name, shared_value, local_value, inherited_value, expected in (
+            ("local", None, local, None, local),
+            ("shared", shared, local, None, shared),
+            ("inherited", shared, local, inherited, inherited),
+            ("inherited-empty", shared, local, "", ""),
+            ("shared-empty", "", local, None, ""),
+            ("local-empty", None, "", None, ""),
+            ("unset", None, None, None, None),
+        ):
+            for inherit_unrelated in (False, True):
+                with self.subTest(case=name, inherit_unrelated=inherit_unrelated):
+                    self.logs.clear()
+                    for path, value in ((self.shared_env, shared_value), (self.local_env, local_value)):
+                        path.write_text(file_text + ("" if value is None else f"{t.ENV_PATH}={value}\n"))
+                    environment = ({key: "inherited" for key in unrelated} if inherit_unrelated else {})
+                    if inherited_value is not None:
+                        environment[t.ENV_PATH] = inherited_value
+                    expected_environment = dict(environment)
+                    if expected is not None:
+                        expected_environment[t.ENV_PATH] = expected
+
+                    async def run():
+                        self.assertEqual(dict(os.environ), expected_environment)
+                        with t.runtime("discord", {"research": True}, log=self.logs.append):
+                            self.assertEqual(t._writer is not None, bool(expected))
+
+                    with patch.dict(os.environ, environment, clear=True), \
+                         patch.object(t, "sys", SimpleNamespace(modules={})), \
+                         patch.object(t, "_writer", None), \
+                         patch.object(t, "discover_registry", return_value=REGISTRY) as registry, \
+                         patch.object(t, "SnapshotWriter") as constructor, \
+                         patch.object(main, "_configure_logging") as logging_setup, \
+                         patch.object(main, "log", self.logs.append), \
+                         patch.object(main, "run", side_effect=run) as runner:
+                        self.assertEqual(main.main(), 0, self.logs)
+                        self.assertEqual(dict(os.environ), expected_environment)
+                        logging_setup.assert_called_once_with()
+                        runner.assert_awaited_once_with()
+                        if expected:
+                            registry.assert_called_once_with()
+                            constructor.assert_called_once_with(
+                                Path(expected), "discord", REGISTRY, {"research": True},
+                                log=self.logs.append,
+                            )
+                            constructor.return_value.start_heartbeat.assert_called_once_with()
+                            constructor.return_value.close.assert_called_once_with()
+                        else:
+                            registry.assert_not_called()
+                            constructor.assert_not_called()
+                        self.assertIsNone(t._writer)
+        self.assertFalse(self.path.exists())
+
     def test_discord_uses_real_setup_and_connection_events(self):
         from scripts.discord_bot import main
         from scripts.discord_bot.config import AgentConfig, BotConfig
@@ -793,7 +868,7 @@ class TestRuntimeWiring(TelemetryCase):
                     *a, **kw, clock=lambda: self.now,
                 )))
                 stack.enter_context(patch.object(module, "ApplicationBuilder", return_value=builder))
-                stack.enter_context(patch.object(module, "load_default_env"))
+                load_env = stack.enter_context(patch.object(module, "load_default_env"))
                 stack.enter_context(patch.object(module, "_configure_logging"))
                 stack.enter_context(patch.object(module, "_allowed_user_ids", return_value={123}))
                 stack.enter_context(patch.object(module, "get_token", return_value="fake"))
@@ -802,6 +877,7 @@ class TestRuntimeWiring(TelemetryCase):
                     stack.enter_context(patch.object(module.review_store, "Store"))
                     stack.enter_context(patch.object(module, "QueueSurface", return_value=queue))
                 module.main()
+                load_env.assert_called_once_with()
                 self.assertIsNone(observed[0]["connected"])
                 self.assertIsNone(observed[0]["last_activity_at"])
                 self.assertEqual(observed[0]["status"], "idle")

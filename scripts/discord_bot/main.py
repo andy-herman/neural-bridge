@@ -39,6 +39,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 from fleet_heartbeat import set_state as fleet_set_state, log_event as fleet_log_event
 from scripts import outbound_guard
+from scripts.env_file import load_default_env
 
 from .client_registry import REGISTRY as CLIENT_REGISTRY
 from .config import AgentConfig, BotConfig, load_config
@@ -363,6 +364,7 @@ async def run() -> None:
 
 
 def main() -> int:
+    load_default_env(keys={agent_telemetry.ENV_PATH})
     _configure_logging()
     try:
         asyncio.run(run())
