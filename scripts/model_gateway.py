@@ -318,10 +318,18 @@ class Watchdog:
         self.down_after = down_after
         self.offset: int | None = None
         self.inode: int | None = None
+        self.head = b""
         self.down_since: float | None = None
         self.last_check: float | None = None
         self.last_result = "not run yet"
         self.token_expires_in: int | None = None
+
+    def _head(self, n: int = 128) -> bytes:
+        try:
+            with self.log_path.open("rb") as f:
+                return f.read(n)
+        except OSError:
+            return b""
 
     def new_refusals(self) -> int:
         """403 responses the proxy logged since the last call. The first call
@@ -331,11 +339,16 @@ class Watchdog:
         except OSError:
             return 0
         size = st.st_size
+        head = self._head()
         if self.offset is None:  # first look: old refusals are history
-            self.offset, self.inode = size, st.st_ino
+            self.offset, self.inode, self.head = size, st.st_ino, head
             return 0
-        if st.st_ino != self.inode or size < self.offset:  # replaced or truncated: read it all
-            self.offset, self.inode = 0, st.st_ino
+        # A different file (rotated or replaced) or a truncated one: read it
+        # all. The inode alone is not enough: Linux can hand a new file the
+        # number the deleted one had, so the file's first bytes are compared too.
+        if st.st_ino != self.inode or size < self.offset or not head.startswith(self.head[:len(head)]):
+            self.offset = 0
+        self.inode, self.head = st.st_ino, head
         if size == self.offset:
             return 0
         with self.log_path.open("rb") as f:

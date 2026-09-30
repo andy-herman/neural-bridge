@@ -423,6 +423,21 @@ class TestWatchdog(unittest.TestCase):
         self.log.write_text("--> POST /v1/messages \x1b[33m403\x1b[0m 1ms\n")
         self.assertEqual(self.wd.new_refusals(), 1)
 
+    def test_a_replaced_log_with_a_reused_inode_is_still_caught(self):
+        # CI on Linux, 2026-09-30: a file deleted and recreated at once got the
+        # same inode number back, so an inode-only check read nothing.
+        new_text = "--> POST /v1/messages \x1b[33m403\x1b[0m 1ms\n"
+        with mock.patch.object(mg.Path, "stat") as fake_stat:
+            fake_stat.return_value = mock.Mock(st_size=len(new_text), st_ino=self.wd.inode)
+            self.log.write_text(new_text)
+            self.assertEqual(self.wd.new_refusals(), 1)
+
+    def test_appended_lines_are_not_mistaken_for_a_new_file(self):
+        self.refuse(2)
+        self.assertEqual(self.wd.new_refusals(), 2)
+        self.refuse(1)
+        self.assertEqual(self.wd.new_refusals(), 1)
+
     def test_a_truncated_log_is_read_from_the_start(self):
         # Same file, now shorter than where the last read stopped.
         self.log.write_text("--> GET / \x1b[33m403\x1b[0m 1ms\n")
