@@ -395,7 +395,9 @@ class TestImperativeCheckRoute(unittest.TestCase):
             captured["env"] = kwargs.get("env")
             return _Result()
 
-        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+        # Hermetic: the real model gateway may be running on this machine.
+        with patch.object(L.claude_env, "gateway_up", return_value=False), \
+                patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
                                      "ANTHROPIC_API_KEY": "sk-ant-no-credit"}, clear=False), \
              patch("lint.subprocess.run", side_effect=fake_run):
             os.environ.pop("NB_COPILOT_API_BASE", None)

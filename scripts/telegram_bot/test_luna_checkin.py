@@ -185,5 +185,41 @@ class TestAllowedChatIds(unittest.TestCase):
         self.assertEqual(ci.allowed_chat_ids(), [789])
 
 
+class TestGenerate(unittest.TestCase):
+    """Check-ins run on Luna's model and survive a Claude 5 failure."""
+
+    def _calls(self, results):
+        calls = []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        return calls, fake
+
+    def test_uses_lunas_model(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(True, "hi", "")])
+        with patch.object(ci, "call_claude_sync", side_effect=fake):
+            self.assertEqual(ci.generate("p"), (True, "hi", ""))
+        self.assertEqual(calls[0]["model"], ci.model_for("luna"))
+
+    def test_claude_5_failure_retries_once_on_the_default(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(False, "", "exit_1:API Error: 400 prefill"), (True, "hi", "")])
+        with patch.object(ci, "model_for", return_value="claude-opus-5"), \
+                patch.object(ci, "call_claude_sync", side_effect=fake):
+            self.assertEqual(ci.generate("p"), (True, "hi", ""))
+        self.assertEqual([c["model"] for c in calls], ["claude-opus-5", ci.DEFAULT_MODEL])
+
+    def test_timeout_is_not_retried(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(False, "", "timeout")])
+        with patch.object(ci, "model_for", return_value="claude-opus-5"), \
+                patch.object(ci, "call_claude_sync", side_effect=fake):
+            self.assertFalse(ci.generate("p")[0])
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

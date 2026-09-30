@@ -42,13 +42,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
-from scripts.discord_bot.claude_invoke import call_claude_sync, sanitize_untrusted_text  # noqa: E402
+from scripts.discord_bot.claude_invoke import (  # noqa: E402
+    DEFAULT_MODEL,
+    call_claude_sync,
+    claude_env,
+    sanitize_untrusted_text,
+)
 from scripts.discord_bot.keychain import get_token  # noqa: E402
 from scripts.luna import tasks  # noqa: E402
 from scripts.discord_bot.mention import (  # noqa: E402
     LUNA_NOTES_MAX_CHARS,
     LUNA_NOTES_PATH,
     budget_notes,
+    model_for,
 )
 from scripts.env_file import load_default_env  # noqa: E402
 
@@ -226,6 +232,22 @@ def send_telegram(chat_id: int, text: str, token: str, timeout: int = 15) -> boo
         return False
 
 
+# ---------- generation ----------
+
+def generate(prompt: str) -> tuple[bool, str, str]:
+    """Run the check-in on Luna's model, falling back once to the fleet
+    default when a Claude 5 call fails (Claude 5 answers only through the
+    model gateway; see agent_runtime for the same rule on her turns)."""
+    model = model_for(AGENT_ID) or DEFAULT_MODEL
+    ok, stdout, err = call_claude_sync(prompt, model=model, timeout=CHECKIN_TIMEOUT,
+                                       effort=CHECKIN_EFFORT)
+    if not ok and not claude_env.proxy_supports(model) and err != "timeout":
+        print(f"check-in on {model} failed ({err[:120]}); retrying on {DEFAULT_MODEL}", file=sys.stderr)
+        ok, stdout, err = call_claude_sync(prompt, model=DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT,
+                                           effort=CHECKIN_EFFORT)
+    return ok, stdout, err
+
+
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,9 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     notes = gather_notes()
     prompt = build_checkin_prompt(args.kind, context, notes)
 
-    ok, stdout, err = call_claude_sync(
-        prompt, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT,
-    )
+    ok, stdout, err = generate(prompt)
     if not ok:
         print(f"check-in generation failed: {err}", file=sys.stderr)
         mem.record(mem.WRITE, "luna_checkin", agent_id=AGENT_ID, ok=False,
