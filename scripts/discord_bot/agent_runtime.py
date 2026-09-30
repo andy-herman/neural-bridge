@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .claude_invoke import call_claude
+from .claude_invoke import DEFAULT_MODEL, call_claude, claude_env
 from .mention import (
     MENTION_PROMPT_PATH,
     add_dirs_for,
@@ -38,6 +38,7 @@ from .mention import (
     effort_for,
     load_agent_definition,
     max_response_chars_for,
+    model_for,
     timeout_for,
     truncate_response,
 )
@@ -65,6 +66,9 @@ class TurnResult:
     is_new_session: bool = False
     resume_retried: bool = False
     prompt_chars: int = 0
+    # True when the agent's Claude 5 model failed and the turn was answered by
+    # (or failed on) the fleet default instead.
+    model_fallback: bool = False
     # Set when the turn failed before claude was ever called (missing template).
     setup_error: str = ""
 
@@ -135,7 +139,8 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
     extra_dirs = add_dirs_for(req.agent_id)
     agent_timeout = timeout_for(req.agent_id)
     agent_effort = effort_for(req.agent_id)
-    model_kwargs = {"model": req.model} if req.model else {}
+    model = req.model or model_for(req.agent_id)
+    model_kwargs = {"model": model} if model else {}
 
     if req.stateless:
         session_id = str(uuid.uuid4())
@@ -164,6 +169,32 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         **model_kwargs,
     )
 
+    # Claude 5 answers only through the model gateway. If this agent's Claude 5
+    # turn fails for any reason but a timeout, run it once more on the fleet
+    # default: on the same session when there is one (a session resumes across
+    # models, verified 2026-09-30), otherwise on a fresh id, since the failed
+    # call may already have claimed the new one.
+    fell_back = False
+    if not ok and model and not claude_env.proxy_supports(model) and err != "timeout":
+        log(f"TURN {model} failed, falling back to {DEFAULT_MODEL}: agent={req.agent_id} err={err[:120]}")
+        fell_back = True
+        model_kwargs = {"model": DEFAULT_MODEL}
+        if is_new_session:
+            session_id = (str(uuid.uuid4()) if req.stateless
+                          else SESSION_STORE.reset(req.conversation_key, req.agent_id).session_id)
+        ok, stdout, err = await call_claude(
+            prompt,
+            timeout=agent_timeout,
+            allowed_tools=tools,
+            add_dirs=extra_dirs,
+            session_id=session_id,
+            resume=not is_new_session,
+            effort=agent_effort,
+            agent_id=req.agent_id,
+            mcp_config=mcp_config,
+            **model_kwargs,
+        )
+
     # A failure under --resume usually means Claude Code pruned the session
     # file. Retry ONCE with a fresh id; a second failure is a real problem the
     # user should hear about rather than something to keep retrying.
@@ -191,7 +222,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         return TurnResult(ok=False, raw_stdout=stdout or "", error_reason=err,
                           session_id=session_id,
                           is_new_session=is_new_session, resume_retried=retried,
-                          prompt_chars=len(prompt))
+                          prompt_chars=len(prompt), model_fallback=fell_back)
 
     if not req.stateless:
         SESSION_STORE.touch(req.conversation_key, req.agent_id)
@@ -204,4 +235,5 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         is_new_session=is_new_session,
         resume_retried=retried,
         prompt_chars=len(prompt),
+        model_fallback=fell_back,
     )
