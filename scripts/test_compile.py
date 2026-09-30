@@ -420,7 +420,10 @@ class TestMainWithMockedGate(unittest.TestCase):
         # shell that loaded ~/.hermes/.env carries a credit-less API key.
         inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
                      "ANTHROPIC_API_KEY": "sk-ant-no-credit"}
-        with patch.dict(os.environ, inherited, clear=False):
+        import claude_env
+        # Hermetic: the real model gateway may be running on this machine.
+        with patch.dict(os.environ, inherited, clear=False), \
+                patch.object(claude_env, "gateway_up", return_value=False):
             os.environ.pop("NB_COPILOT_API_BASE", None)
             env = cmp._subprocess_env_for_compile_claude()
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4141")
