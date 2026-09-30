@@ -452,7 +452,8 @@ def check_frontmatter(verbose: bool = False) -> list[Finding]:
 def call_imperative_check(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+             *claude_env.mcp_args()],
             capture_output=True,
             text=True,
             timeout=timeout,

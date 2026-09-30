@@ -309,6 +309,40 @@ def review_queue_check(results: dict[str, dict], bad: list[str]) -> dict:
                 "problems": [f"could not run: {type(exc).__name__}: {exc}"]}
 
 
+def model_gateway_check(base: str | None = None, timeout: float = 5.0) -> dict:
+    """Is NB's model gateway up, and can it reach the proxy behind it?
+
+    When it is down, claude_env falls back to copilot-api directly and the
+    fleet keeps answering on 4.x models, so nothing else would notice. Never
+    raises: an unreachable gateway is the finding.
+    """
+    import os
+    import urllib.request
+    base = base or os.environ.get("NB_MODEL_GATEWAY_BASE") or "http://localhost:4142"
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/_gateway/health", timeout=timeout) as resp:
+            health = json.loads(resp.read())
+    except Exception as exc:
+        return {"ok": False, "facts": {},
+                "problems": [f"model gateway unreachable ({type(exc).__name__}); the fleet is on the "
+                             f"fallback route, where Claude 5 models fail"]}
+    problems = []
+    if not health.get("upstream_up"):
+        problems.append("the proxy behind the gateway is not answering")
+    if health.get("alert_open"):
+        problems.append("the proxy refuses requests even after a restart (see the review queue)")
+    facts = {k: health.get(k) for k in ("requests", "folded", "retried", "restarts")}
+    return {"ok": not problems, "facts": facts, "problems": problems}
+
+
+def gateway_report(result: dict) -> str:
+    facts = ", ".join(f"{k}={v}" for k, v in result.get("facts", {}).items())
+    head = "Model gateway: ok" if result["ok"] else "Model gateway: PROBLEMS"
+    lines = [f"{head} ({facts})" if facts else head]
+    lines.extend(f"  - {p}" for p in result["problems"])
+    return "\n".join(lines)
+
+
 def queue_report(result: dict) -> str:
     # Formatted here rather than by review_queue.health, so the report still
     # prints when that module is the thing that failed to import.
@@ -349,10 +383,14 @@ def main(argv: list[str] | None = None) -> int:
 
     bad = degraded(results)
     queue = review_queue_check(results, bad)
-    report = json.dumps({**results, "review_queue": queue}, indent=2) if args.json \
-        else format_report(results, args.days, events) + "\n" + queue_report(queue)
+    gateway = model_gateway_check()
+    report = json.dumps({**results, "review_queue": queue, "model_gateway": gateway}, indent=2) if args.json \
+        else (format_report(results, args.days, events) + "\n" + queue_report(queue)
+              + "\n" + gateway_report(gateway))
     if not queue["ok"]:
         bad = bad + ["review_queue"]
+    if not gateway["ok"]:
+        bad = bad + ["model_gateway"]
 
     if bad or not args.quiet:
         print(report)
@@ -365,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
             notify.notify(
                 "🧠 **memory canary** degraded: " + ", ".join(sorted(bad))
                 + "\n```\n" + (format_report(results, args.days) + "\n"
-                                + queue_report(queue))[:1500] + "\n```"
+                                + queue_report(queue) + "\n" + gateway_report(gateway))[:1500] + "\n```"
             )
         except Exception:
             pass  # a notification failure must not change the exit code

@@ -172,7 +172,8 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+             *claude_env.mcp_args()],
             capture_output=True,
             text=True,
             timeout=timeout,
