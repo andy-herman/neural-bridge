@@ -78,13 +78,6 @@ def proxy_supports(model: str) -> bool:
     return not _CLAUDE_5_RE.match(model)
 
 
-# stderr lines Claude Code prints on the proxy route on every call, whatever
-# else happened. They are true and harmless here: the fleet's connectors are
-# not claude.ai connectors (Luna reaches Calendar and Gmail through her own
-# CLIs), and a placeholder key is what routes the call to copilot-api. Left
-# in, they fill the 200-character error snippet and hide the line that
-# matters: on 2026-09-30 Luna's turn showed "connectors are disabled ... ⚠
-# Claude Op" and nothing else, when the second, cut-off warning was the cause.
 # Warnings Claude Code prints on every proxy-route call. True, and never the
 # reason a call failed: the fleet uses no claude.ai connectors, and the proxy's
 # dotted model ids (claude-opus-4.8) read to Claude Code as the retired
