@@ -76,3 +76,38 @@ def proxy_env(env: Mapping[str, str]) -> dict[str, str]:
 def proxy_supports(model: str) -> bool:
     """False for model ids known to fail on the proxy through Claude Code."""
     return not _CLAUDE_5_RE.match(model)
+
+
+# stderr lines Claude Code prints on the proxy route on every call, whatever
+# else happened. They are true and harmless here: the fleet's connectors are
+# not claude.ai connectors (Luna reaches Calendar and Gmail through her own
+# CLIs), and a placeholder key is what routes the call to copilot-api. Left
+# in, they fill the 200-character error snippet and hide the line that
+# matters: on 2026-09-30 Luna's turn showed "connectors are disabled ... ⚠
+# Claude Op" and nothing else, when the second, cut-off warning was the cause.
+BENIGN_STDERR = (
+    "claude.ai connectors are disabled",
+)
+
+ERROR_SNIPPET_LIMIT = 300
+
+
+def error_snippet(stdout: str | None, stderr: str | None, *, limit: int = ERROR_SNIPPET_LIMIT) -> str:
+    """One line naming why a `claude -p` call failed, for logs and Discord.
+
+    Claude Code prints the API's own error on stdout ("API Error: 400 ...");
+    stderr carries CLI warnings. Preference order: the API error line, then
+    stderr with the benign proxy-route warnings removed, then raw stderr,
+    then the tail of stdout, then a marker. The 2026-09-25 flush outage and
+    the 2026-09-30 Luna failure were both invisible for want of this.
+    """
+    out_lines = [l.strip() for l in (stdout or "").splitlines() if l.strip()]
+    err_lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    api_error = next((l for l in out_lines if l.startswith("API Error")), "")
+    if api_error:
+        text = api_error
+    else:
+        real = [l for l in err_lines if not any(b in l for b in BENIGN_STDERR)]
+        text = " | ".join(real) or " | ".join(err_lines) or (out_lines[-1] if out_lines else "(no output)")
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."

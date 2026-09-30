@@ -202,7 +202,11 @@ def call_claude_sync(
         if result.returncode != 0:
             if result.returncode < 0:
                 span.outcome = "cancelled"
-            snippet = (result.stderr or "")[:200].replace("\n", " ")
+            # What the agent posts to Discord as "I hit an error". Until
+            # 2026-09-30 this was stderr[:200], which on the proxy route is
+            # the connectors warning and the first word of whatever mattered.
+            # The API error Claude Code prints on stdout was discarded.
+            snippet = claude_env.error_snippet(result.stdout, result.stderr)
             return False, result.stdout, f"exit_{result.returncode}:{snippet}"
         span.outcome = "succeeded"
         return True, result.stdout, ""

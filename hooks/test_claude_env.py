@@ -61,6 +61,39 @@ class TestProxyEnv(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9999")
 
 
+class TestErrorSnippet(unittest.TestCase):
+    CONNECTORS = ("claude.ai connectors are disabled because ANTHROPIC_API_KEY or another "
+                  "auth source is set and takes precedence over your claude.ai login · Unset "
+                  "it to load your organization's connectors")
+
+    def test_api_error_on_stdout_wins(self):
+        out = 'thinking...\nAPI Error: 400 {"error":{"message":"prefill"}}\n'
+        self.assertEqual(claude_env.error_snippet(out, self.CONNECTORS),
+                         'API Error: 400 {"error":{"message":"prefill"}}')
+
+    def test_benign_connectors_warning_is_dropped_so_the_real_warning_shows(self):
+        # Luna, 2026-09-30: the visible snippet was the connectors line plus
+        # "⚠ Claude Op"; the cause was the second line.
+        err = f"⚠ {self.CONNECTORS}\n⚠ Claude Opus is not available with the Claude Pro plan. If you have updated your subscription plan recently, run /logout and /login for the plan to take effect.\n"
+        snip = claude_env.error_snippet("", err)
+        self.assertTrue(snip.startswith("⚠ Claude Opus is not available with the Claude Pro plan"), snip)
+        self.assertNotIn("connectors", snip)
+
+    def test_only_benign_lines_fall_back_to_them(self):
+        self.assertEqual(claude_env.error_snippet("", self.CONNECTORS), self.CONNECTORS)
+
+    def test_nothing_useful_falls_back_to_stdout_tail_then_marker(self):
+        self.assertEqual(claude_env.error_snippet("partial answer\nlast line", ""), "last line")
+        self.assertEqual(claude_env.error_snippet("", ""), "(no output)")
+        self.assertEqual(claude_env.error_snippet(None, None), "(no output)")
+
+    def test_truncates_and_flattens(self):
+        snip = claude_env.error_snippet("", "x " * 400, limit=50)
+        self.assertEqual(len(snip), 50)
+        self.assertTrue(snip.endswith("..."))
+        self.assertNotIn("\n", claude_env.error_snippet("", "a\nb\nc"))
+
+
 class TestProxySupports(unittest.TestCase):
     def test_claude_5_ids_are_rejected_on_the_proxy(self):
         for model in ("claude-sonnet-5", "claude-opus-5", "claude-opus-5.5", "claude-haiku-5"):
