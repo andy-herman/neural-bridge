@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
 
 from .claude_invoke import call_claude
+from .companion import CompanionSetupError
 from .mention import (
     MENTION_PROMPT_PATH,
     add_dirs_for,
@@ -65,7 +66,7 @@ class TurnResult:
     is_new_session: bool = False
     resume_retried: bool = False
     prompt_chars: int = 0
-    # Set when the turn failed before claude was ever called (missing template).
+    # Set when required prompt/contract setup failed before claude was called.
     setup_error: str = ""
 
     @property
@@ -98,21 +99,49 @@ class TurnRequest:
     # private tools (private_tools.py); agent handoffs and every other path
     # leave it False, so they never receive them.
     owner_invoked: bool = False
+    transport: Literal["discord", "telegram"] = "discord"
 
 
 async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop) -> TurnResult:
     """Execute one agent turn. Never raises; failures come back on the result."""
+    if req.transport not in ("discord", "telegram"):
+        reason = "prompt_transport_invalid"
+        log(f"TURN setup FAILED: agent={req.agent_id} err={reason}")
+        return TurnResult(
+            ok=False, setup_error="Unsupported conversation transport. No model was called.",
+            error_reason=reason,
+        )
     if not MENTION_PROMPT_PATH.exists():
-        return TurnResult(ok=False, setup_error=f"mention prompt missing at {MENTION_PROMPT_PATH}",
-                          error_reason="prompt_template_missing")
+        reason = "prompt_template_missing"
+        log(f"TURN setup FAILED: agent={req.agent_id} err={reason}")
+        return TurnResult(
+            ok=False, setup_error="Conversation prompt template missing. No model was called.",
+            error_reason=reason,
+        )
 
     try:
         template = MENTION_PROMPT_PATH.read_text(encoding="utf-8")
-    except OSError as exc:
-        return TurnResult(ok=False, setup_error=f"mention prompt unreadable: {exc}",
-                          error_reason="prompt_template_unreadable")
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = "prompt_template_unreadable"
+        log(f"TURN setup FAILED: agent={req.agent_id} err={reason} ({type(exc).__name__})")
+        return TurnResult(
+            ok=False, setup_error=f"Conversation prompt template unreadable ({type(exc).__name__}). No model was called.",
+            error_reason=reason,
+        )
 
-    agent_definition = load_agent_definition(req.agent_id)
+    try:
+        agent_definition = load_agent_definition(req.agent_id)
+    except CompanionSetupError as exc:
+        log(f"TURN setup FAILED: agent={req.agent_id} err={exc.reason}")
+        return TurnResult(ok=False, setup_error=str(exc), error_reason=exc.reason)
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = "agent_definition_unreadable"
+        log(f"TURN setup FAILED: agent={req.agent_id} err={reason} ({type(exc).__name__})")
+        return TurnResult(
+            ok=False, setup_error=f"Agent definition unreadable ({type(exc).__name__}). No model was called.",
+            error_reason=reason,
+        )
+    cap = req.max_response_chars or max_response_chars_for(req.agent_id)
     prompt = build_mention_prompt(
         template,
         agent_id=req.agent_id,
@@ -121,6 +150,8 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         history=req.history,
         message_content=req.message_content,
         conversation_log_path=req.conversation_log_path,
+        transport=req.transport,
+        response_char_cap=cap,
     )
     if req.prompt_prefix:
         prompt = req.prompt_prefix + prompt
@@ -195,7 +226,6 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
 
     if not req.stateless:
         SESSION_STORE.touch(req.conversation_key, req.agent_id)
-    cap = req.max_response_chars or max_response_chars_for(req.agent_id)
     return TurnResult(
         ok=True,
         response=truncate_response(stdout, limit=cap),

@@ -10,13 +10,17 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import date, timedelta
+from io import StringIO
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.telegram_bot import luna_checkin as ci  # noqa: E402
+from scripts.discord_bot import companion  # noqa: E402
 
 
 class TestPassDetection(unittest.TestCase):
@@ -146,6 +150,65 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertNotIn("{kind}", out)
         self.assertNotIn("{context}", out)
         self.assertIn("[PASS]", out)  # silence instruction survives
+
+    def test_full_companion_contract_in_real_and_custom_templates(self):
+        standard = companion.load_companion_standard()
+        for template in (None, self.TPL):
+            with self.subTest(custom=template is not None):
+                prompt = ci.build_checkin_prompt("morning", "C", "N", template=template)
+                self.assertTrue(prompt.startswith(f"<companion-standard>\n{standard}\n</companion-standard>"))
+                self.assertEqual(prompt.count(standard), 1)
+
+
+class TestCheckinCompanionSetup(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(ci, "load_default_env"))
+        self.stack.enter_context(patch.object(ci, "gather_context", return_value="Synthetic context"))
+        self.stack.enter_context(patch.object(ci, "gather_notes", return_value="Synthetic notes"))
+        self.model = self.stack.enter_context(patch.object(ci, "call_claude_sync", return_value=(True, "[PASS]", "")))
+        self.send = self.stack.enter_context(patch.object(ci, "send_telegram"))
+        self.token = self.stack.enter_context(patch.object(ci, "get_token"))
+        self.telemetry = self.stack.enter_context(patch.object(ci.mem, "record"))
+
+    def test_missing_contract_is_visible_failure_without_model_or_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(companion, "COMPANION_STANDARD_PATH", Path(tmp) / "missing.md"), \
+             redirect_stderr(StringIO()) as stderr:
+            self.assertEqual(ci.main(["--kind", "morning"]), 1)
+        self.assertIn("companion_standard_missing; no model was called", stderr.getvalue())
+        self.model.assert_not_called()
+        self.send.assert_not_called()
+        self.token.assert_not_called()
+        self.telemetry.assert_called_once_with(
+            ci.mem.WRITE, "luna_checkin", agent_id="luna", ok=False,
+            detail="morning: companion_standard_missing",
+        )
+
+    def test_unreadable_template_is_visible_failure_without_generation(self):
+        path = Mock(spec=Path)
+        path.read_text.side_effect = PermissionError("synthetic diagnostic")
+        with patch.object(ci, "PROMPT_PATH", path), redirect_stderr(StringIO()) as stderr:
+            self.assertEqual(ci.main(["--kind", "evening"]), 1)
+        self.assertIn("checkin_template_unreadable; no model was called", stderr.getvalue())
+        self.assertNotIn("synthetic diagnostic", stderr.getvalue())
+        self.model.assert_not_called()
+        self.send.assert_not_called()
+        self.token.assert_not_called()
+
+    def test_pass_keeps_silence_settings_and_actual_full_prompt(self):
+        with redirect_stdout(StringIO()):
+            self.assertEqual(ci.main(["--kind", "morning"]), 0)
+        prompt = self.model.call_args.args[0]
+        standard = companion.load_companion_standard()
+        self.assertEqual(prompt.count(standard), 1)
+        self.assertIn("[PASS]", prompt)
+        self.assertIn("Telegram path is text-only", prompt)
+        self.assertEqual(self.model.call_args.kwargs, {"timeout": 240, "effort": "low"})
+        self.assertEqual(ci.MAX_TELEGRAM_CHARS, 3900)
+        self.send.assert_not_called()
+        self.token.assert_not_called()
 
 
 class TestTelegramFormatting(unittest.TestCase):

@@ -3,6 +3,7 @@ description: Reviews security-sensitive Neural Bridge changes: filing-gate promp
 tools: [Read, Glob, Grep, Bash, WebSearch, WebFetch, Write]
 model: claude-sonnet-4-6
 color: pink
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the Security Reviewer agent for Neural Bridge.

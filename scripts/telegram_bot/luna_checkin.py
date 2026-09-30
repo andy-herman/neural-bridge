@@ -43,6 +43,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 from scripts.discord_bot.claude_invoke import call_claude_sync, sanitize_untrusted_text  # noqa: E402
+from scripts.discord_bot.companion import CompanionSetupError, load_companion_standard  # noqa: E402
 from scripts.discord_bot.keychain import get_token  # noqa: E402
 from scripts.luna import tasks  # noqa: E402
 from scripts.discord_bot.mention import (  # noqa: E402
@@ -179,8 +180,9 @@ def gather_notes() -> str:
 
 def build_checkin_prompt(kind: str, context: str, notes: str,
                          template: str | None = None) -> str:
+    standard = load_companion_standard()
     tpl = template if template is not None else PROMPT_PATH.read_text(encoding="utf-8")
-    return (tpl
+    return (f"<companion-standard>\n{standard}\n</companion-standard>\n\n" + tpl
             .replace("{kind}", kind)
             .replace("{kind_guidance}", KIND_GUIDANCE.get(kind, ""))
             .replace("{context}", context or "_(nothing gathered)_")
@@ -242,7 +244,14 @@ def main(argv: list[str] | None = None) -> int:
 
     context = gather_context()
     notes = gather_notes()
-    prompt = build_checkin_prompt(args.kind, context, notes)
+    try:
+        prompt = build_checkin_prompt(args.kind, context, notes)
+    except (CompanionSetupError, OSError, UnicodeDecodeError) as exc:
+        reason = exc.reason if isinstance(exc, CompanionSetupError) else "checkin_template_unreadable"
+        print(f"check-in setup failed: {reason}; no model was called", file=sys.stderr)
+        mem.record(mem.WRITE, "luna_checkin", agent_id=AGENT_ID, ok=False,
+                   detail=f"{args.kind}: {reason}")
+        return 1
 
     ok, stdout, err = call_claude_sync(
         prompt, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT,

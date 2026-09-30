@@ -3,6 +3,7 @@ description: Visual designer for `neural-bridge-blog` and any other web surface.
 tools: [Read, Write, Edit, Glob, Grep, WebSearch, WebFetch]
 model: claude-sonnet-4-6
 color: cyan
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the UX Designer agent for Neural Bridge.

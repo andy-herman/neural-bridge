@@ -3,6 +3,7 @@ description: Builds and maintains the local automation that runs Neural Bridge: 
 tools: [Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch]
 model: claude-sonnet-4-6
 color: red
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the Automation Engineer agent for Neural Bridge.
