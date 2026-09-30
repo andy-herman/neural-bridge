@@ -25,6 +25,15 @@ gateway relays to copilot-api (localhost:4141) and fixes two things on the way.
    refused too, restarting is not the fix, so it raises a review-queue alert
    and clears it on the next success.
 
+3. Trouble before a request finds it. A watchdog thread checks the proxy
+   every WATCH_INTERVAL: a token expired or about to (read from copilot-api's
+   /token, never logged), new 403s in copilot-api's own log (which also
+   catches Synapse and Gauntlet, which call it directly, not through here)
+   confirmed by one probe on a base model with no premium cost, or the proxy
+   not answering for DOWN_ALERT_AFTER. It restarts through the same
+   rate-limited Recovery, and raises a review-queue alert when a restart
+   does not help or the proxy stays down.
+
 It is also the one place a provider change would go, so moving off the
 Copilot seat is a change here rather than across the fleet.
 
@@ -43,6 +52,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -65,6 +75,20 @@ RESTART_INTERVAL = 300      # seconds; never restart the proxy more often than t
 UPSTREAM_WAIT = 60          # seconds to wait for the proxy to answer after a restart
 UPSTREAM_TIMEOUT = 900      # socket timeout; long agent turns stream for minutes
 ALERT_SOURCE, ALERT_KEY = "model_gateway", "upstream_forbidden"
+DOWN_KEY = "upstream_down"
+ALERT_TITLES = {
+    ALERT_KEY: "Copilot proxy refuses requests even after a restart",
+    DOWN_KEY: "Copilot proxy is not answering",
+}
+
+WATCH_INTERVAL = 300          # seconds between watchdog checks
+TOKEN_EXPIRY_MARGIN = 600     # restart when the proxy's token has less than this left
+DOWN_ALERT_AFTER = 600        # alert when the proxy has not answered for this long
+PROBE_MODEL = "gpt-4.1"       # a Copilot base model: no premium-request cost
+PROXY_LOG = Path.home() / "Library" / "Logs" / "neural-bridge" / "copilot-api.log"
+# copilot-api's response lines: "--> POST /v1/messages ESC[33m403ESC[0m 106ms"
+_REFUSED_LINE = re.compile(r"^--> \S+ \S+ (?:\x1b\[\d+m)?403(?:\x1b\[0m)?\s")
+_TOKEN_EXP = re.compile(r"(?:^|;)exp=(\d+)")
 
 # Headers that describe one hop, not the message.
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "transfer-encoding",
@@ -175,28 +199,36 @@ def launchctl_restart(label: str) -> Callable[[], bool]:
 # ---------- review-queue alert (only when a restart did not help) ----------
 
 class Alerts:
-    def __init__(self):
-        self.open = False
+    """Review-queue alerts this process raised, by key (ALERT_TITLES)."""
 
-    def raise_(self, detail: str) -> None:
+    def __init__(self):
+        self.open: set[str] = set()
+
+    def raise_(self, detail: str, key: str = ALERT_KEY) -> None:
         try:
             from scripts.review_queue import store as qs
-            qs.Store().raise_item(source=ALERT_SOURCE, key=ALERT_KEY, kind=qs.ALERT,
-                                  title="Copilot proxy refuses requests even after a restart",
-                                  detail=detail[:200])
-            self.open = True
+            qs.Store().raise_item(source=ALERT_SOURCE, key=key, kind=qs.ALERT,
+                                  title=ALERT_TITLES[key], detail=detail[:200])
+            self.open.add(key)
         except Exception as exc:  # the alert path must never break the relay
             _log.error("could not raise the review-queue alert: %s", exc)
 
-    def clear(self) -> None:
-        if not self.open:
+    def clear(self, key: str = ALERT_KEY, *, force: bool = False) -> None:
+        if key not in self.open and not force:
             return
         try:
             from scripts.review_queue import store as qs
-            qs.Store().clear(source=ALERT_SOURCE, key=ALERT_KEY)
-            self.open = False
+            qs.Store().clear(source=ALERT_SOURCE, key=key)
+            self.open.discard(key)
         except Exception as exc:
             _log.error("could not clear the review-queue alert: %s", exc)
+
+    def clear_all(self) -> None:
+        """At startup: this process knows nothing of what an earlier one
+        raised, so a plain clear() would be a no-op. If the problem is still
+        there, the watchdog raises it again within one check."""
+        for key in ALERT_TITLES:
+            self.clear(key, force=True)
 
 
 # ---------- the relay ----------
@@ -210,6 +242,10 @@ class Gateway:
         self.alerts = alerts or Alerts()
         self.stats = {"requests": 0, "folded": 0, "retried": 0, "forbidden": 0, "upstream_errors": 0}
         self._stats_lock = threading.Lock()
+        self.watchdog: "Watchdog | None" = None
+        # /v1/messages requests being relayed right now. A proxy restart kills
+        # them mid-stream, so the watchdog waits for zero when it can.
+        self.in_flight = 0
 
     def bump(self, key: str, n: int = 1) -> None:
         with self._stats_lock:
@@ -230,6 +266,143 @@ class Gateway:
         conn.request(method, path, body=body if body else None, headers=headers)
         return conn, conn.getresponse()
 
+    def token_expiry(self) -> float | None:
+        """When the proxy's Copilot token expires (epoch seconds), or None if
+        the proxy does not say. The token itself is never logged or kept."""
+        try:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+            conn.request("GET", "/token")
+            resp = conn.getresponse()
+            raw = resp.read()
+            conn.close()
+            if resp.status != 200:
+                return None
+            token = json.loads(raw).get("token") or ""
+        except (OSError, ValueError, AttributeError):
+            return None
+        m = _TOKEN_EXP.search(token)
+        return float(m.group(1)) if m else None
+
+    def probe(self) -> int | None:
+        """One smallest-possible completion on a base model. The status, or
+        None when the proxy did not answer at all."""
+        body = json.dumps({"model": PROBE_MODEL, "max_tokens": 1,
+                           "messages": [{"role": "user", "content": "ok"}]}).encode()
+        try:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=60)
+            conn.request("POST", "/v1/chat/completions", body=body,
+                         headers={"content-type": "application/json"})
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            return resp.status
+        except OSError:
+            return None
+
+
+class Watchdog:
+    """Finds a stale or refusing proxy before an agent turn does.
+
+    One check: is the proxy answering; is its token expired or close to it;
+    has anything been refused 403 since the last check (confirmed by a probe
+    before acting). A restart goes through the gateway's Recovery, so it shares
+    the five-minute rate limit with the relay's own 403 path.
+    """
+
+    def __init__(self, gw: Gateway, *, log_path: Path = PROXY_LOG, clock: Callable[[], float] = time.time,
+                 margin: float = TOKEN_EXPIRY_MARGIN, down_after: float = DOWN_ALERT_AFTER):
+        self.gw = gw
+        self.log_path = log_path
+        self.clock = clock
+        self.margin = margin
+        self.down_after = down_after
+        self.offset: int | None = None
+        self.inode: int | None = None
+        self.down_since: float | None = None
+        self.last_check: float | None = None
+        self.last_result = "not run yet"
+        self.token_expires_in: int | None = None
+
+    def new_refusals(self) -> int:
+        """403 responses the proxy logged since the last call. The first call
+        only records where the log ends: old refusals are history."""
+        try:
+            st = self.log_path.stat()
+        except OSError:
+            return 0
+        size = st.st_size
+        if self.offset is None:  # first look: old refusals are history
+            self.offset, self.inode = size, st.st_ino
+            return 0
+        if st.st_ino != self.inode or size < self.offset:  # replaced or truncated: read it all
+            self.offset, self.inode = 0, st.st_ino
+        if size == self.offset:
+            return 0
+        with self.log_path.open("rb") as f:
+            f.seek(self.offset)
+            chunk = f.read(size - self.offset)
+        self.offset = size
+        return sum(1 for line in chunk.decode("utf-8", "replace").splitlines() if _REFUSED_LINE.match(line))
+
+    def check(self) -> str:
+        now = self.clock()
+        self.last_check = now
+        alerts = self.gw.alerts
+        if not self.gw.upstream_up():
+            self.down_since = self.down_since or now
+            if now - self.down_since >= self.down_after:
+                alerts.raise_(f"Not answering for {int((now - self.down_since) // 60)} min. launchd should "
+                              f"restart it; check the proxy's stderr log.", key=DOWN_KEY)
+            return self._done(f"proxy not answering for {int(now - self.down_since)}s")
+        self.down_since = None
+        alerts.clear(DOWN_KEY)
+
+        reason = None
+        exp = self.gw.token_expiry()
+        self.token_expires_in = int(exp - now) if exp is not None else None
+        if exp is not None and exp - now < self.margin:
+            if exp > now and self.gw.in_flight:
+                # Still valid: let the turns in progress finish. The margin
+                # leaves another check before it expires.
+                return self._done(f"token expires in {int((exp - now) // 60)} min; waiting for "
+                                  f"{self.gw.in_flight} request(s) in flight before restarting")
+            reason = (f"its token {'expired' if exp <= now else 'expires'} "
+                      f"{'%d min ago' % ((now - exp) // 60) if exp <= now else 'in %d min' % ((exp - now) // 60)}")
+        refused = self.new_refusals()
+        if reason is None and refused:
+            status = self.gw.probe()
+            if status == 403:
+                reason = f"{refused} request(s) refused 403 since the last check, and a probe was refused too"
+            else:
+                return self._done(f"{refused} refusal(s) in the log, but a probe got {status}: not stale")
+        if reason is None:
+            return self._done("ok")
+
+        _log.warning("watchdog: restarting the proxy because %s", reason)
+        self.gw.recovery.recover()
+        status = self.gw.probe()
+        if status == 403:
+            alerts.raise_(f"The watchdog restarted the proxy because {reason}, and a probe was still "
+                          f"refused. Check the Copilot login and the proxy log.")
+            return self._done(f"restart did not help ({reason})")
+        alerts.clear()
+        exp = self.gw.token_expiry()
+        self.token_expires_in = int(exp - self.clock()) if exp is not None else None
+        return self._done(f"restarted: {reason}; probe {status}")
+
+    def _done(self, result: str) -> str:
+        if result != self.last_result or result != "ok":
+            _log.info("watchdog: %s", result)
+        self.last_result = result
+        return result
+
+    def run(self, interval: float, stop: threading.Event) -> None:
+        while not stop.wait(interval):
+            try:
+                self.check()
+            except Exception as exc:  # a broken check must not kill the thread
+                _log.error("watchdog check failed: %s: %s", type(exc).__name__, exc)
+
 
 def make_handler(gw: Gateway):
     class Handler(BaseHTTPRequestHandler):
@@ -242,7 +415,15 @@ def make_handler(gw: Gateway):
             with gw._stats_lock:
                 stats = dict(gw.stats)
             payload = {"ok": True, "upstream_up": gw.upstream_up(), "restarts": gw.recovery.restarts,
-                       "alert_open": gw.alerts.open, **stats}
+                       "alert_open": bool(gw.alerts.open), "alerts": sorted(gw.alerts.open),
+                       "in_flight": gw.in_flight, **stats}
+            wd = gw.watchdog
+            if wd is not None:
+                payload["watchdog"] = {
+                    "last_check_age": int(time.time() - wd.last_check) if wd.last_check else None,
+                    "last_result": wd.last_result,
+                    "token_expires_in": wd.token_expires_in,
+                }
             data = json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -262,6 +443,17 @@ def make_handler(gw: Gateway):
                 headers["Content-Length"] = str(len(body))
             is_messages = self.command == "POST" and self.path.startswith("/v1/messages")
             gw.bump("requests")
+            if is_messages:
+                with gw._stats_lock:
+                    gw.in_flight += 1
+            try:
+                self._relay_counted(raw, body, facts, headers, is_messages, started)
+            finally:
+                if is_messages:
+                    with gw._stats_lock:
+                        gw.in_flight -= 1
+
+        def _relay_counted(self, raw, body, facts, headers, is_messages, started) -> None:
             if facts.get("folded"):
                 gw.bump("folded", facts["folded"])
 
@@ -369,7 +561,8 @@ def _configure_logging() -> None:
     _log.setLevel(logging.INFO)
 
 
-def serve(port: int, upstream: str, restart_label: str) -> ThreadingHTTPServer:
+def serve(port: int, upstream: str, restart_label: str,
+          watch_interval: float = WATCH_INTERVAL) -> ThreadingHTTPServer:
     gw_holder: dict = {}
 
     def upstream_up() -> bool:
@@ -380,6 +573,11 @@ def serve(port: int, upstream: str, restart_label: str) -> ThreadingHTTPServer:
     gw_holder["gw"] = gw
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(gw))
     server.daemon_threads = True
+    if watch_interval > 0:
+        gw.watchdog = Watchdog(gw)
+        gw.watchdog.new_refusals()  # start reading the proxy log from its current end
+        threading.Thread(target=gw.watchdog.run, args=(watch_interval, threading.Event()),
+                         name="proxy-watchdog", daemon=True).start()
     return server
 
 
@@ -388,9 +586,12 @@ def main() -> int:
     port = int(os.environ.get("NB_MODEL_GATEWAY_PORT") or DEFAULT_PORT)
     upstream = os.environ.get("NB_MODEL_GATEWAY_UPSTREAM") or DEFAULT_UPSTREAM
     label = os.environ.get("NB_MODEL_GATEWAY_RESTART") or DEFAULT_RESTART_LABEL
-    server = serve(port, upstream, label)
-    # A restart after a crash resolves nothing it did not open itself.
-    Alerts().clear()
+    interval = float(os.environ.get("NB_MODEL_GATEWAY_WATCH_INTERVAL") or WATCH_INTERVAL)
+    server = serve(port, upstream, label, watch_interval=interval)
+    # Alerts from an earlier process: clear them, and let the watchdog raise
+    # again what is still true. (Until 2026-09-30 this was Alerts().clear(),
+    # which cleared nothing: a fresh process has no record of what is open.)
+    Alerts().clear_all()
     _log.info("model gateway listening on 127.0.0.1:%d -> %s", port, upstream)
     server.serve_forever()
     return 0

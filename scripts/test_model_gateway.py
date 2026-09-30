@@ -76,6 +76,7 @@ class Upstream:
 
     def __init__(self):
         self.script: list = [(200, b'{"ok": true}')]
+        self.routes: dict[str, tuple[int, bytes]] = {}
         self.requests: list[tuple[str, str, bytes]] = []
         outer = self
 
@@ -89,7 +90,10 @@ class Upstream:
                 n = int(self.headers.get("content-length") or 0)
                 body = self.rfile.read(n) if n else b""
                 outer.requests.append((self.command, self.path, body))
-                step = outer.script.pop(0) if len(outer.script) > 1 else outer.script[0]
+                if self.path in outer.routes:
+                    step = outer.routes[self.path]
+                else:
+                    step = outer.script.pop(0) if len(outer.script) > 1 else outer.script[0]
                 if step[0] == "stream":
                     self.send_response(200)
                     self.send_header("content-type", "text/event-stream")
@@ -240,6 +244,195 @@ class TestStaleToken(GatewayCase):
         self.upstream.script = [(403, b"nope")]
         status, _, body = self.call("GET", "/v1/models")
         self.assertEqual((status, body, self.restarts), (403, b"nope", 0))
+
+
+class TestGatewayProbes(GatewayCase):
+    def test_token_expiry_is_read_without_keeping_the_token(self):
+        self.upstream.routes["/token"] = (200, json.dumps({"token": "tid=abc;exp=1790000000;sku=x"}).encode())
+        self.assertEqual(self.gw.token_expiry(), 1790000000.0)
+        self.assertFalse(any("tid=abc" in str(v) for v in vars(self.gw).values()))
+
+    def test_token_expiry_is_none_when_the_proxy_does_not_say(self):
+        self.upstream.routes["/token"] = (404, b"nope")
+        self.assertIsNone(self.gw.token_expiry())
+
+    def test_probe_is_one_tiny_base_model_call(self):
+        self.upstream.script = [(403, b"forbidden")]
+        self.assertEqual(self.gw.probe(), 403)
+        method, path, body = self.upstream.requests[-1]
+        sent = json.loads(body)
+        self.assertEqual((method, path, sent["model"], sent["max_tokens"]),
+                         ("POST", "/v1/chat/completions", mg.PROBE_MODEL, 1))
+
+    def test_in_flight_counts_messages_requests_while_they_run(self):
+        seen = []
+        real_open = self.gw.open_upstream
+
+        def spy(*args, **kwargs):
+            seen.append(self.gw.in_flight)
+            return real_open(*args, **kwargs)
+        self.gw.open_upstream = spy
+        self.call()
+        self.call("GET", "/v1/models")
+        self.assertEqual(seen, [1, 0], "counted while relaying /v1/messages only")
+        self.assertEqual(self.gw.in_flight, 0, "and released when done")
+
+    def test_health_carries_the_watchdog(self):
+        self.gw.watchdog = mg.Watchdog(self.gw, log_path=Path(self._tmp.name) / "none.log")
+        self.gw.watchdog.last_result = "ok"
+        _, _, body = self.call("GET", "/_gateway/health")
+        self.assertEqual(json.loads(body)["watchdog"]["last_result"], "ok")
+
+
+class FakeGw:
+    """What the watchdog needs from a gateway, scripted."""
+
+    def __init__(self, test):
+        self.up = True
+        self.exp: float | None = 10_000.0
+        self.probes: list[int | None] = []
+        self.probed = 0
+        self.recovered = 0
+        self.alerts = mg.Alerts()
+        test_self = self
+
+        class R:
+            def recover(self_inner):
+                test_self.recovered += 1
+                return True
+        self.recovery = R()
+        self.in_flight = 0
+
+    def upstream_up(self):
+        return self.up
+
+    def token_expiry(self):
+        return self.exp
+
+    def probe(self):
+        self.probed += 1
+        return self.probes.pop(0) if self.probes else 200
+
+
+class TestWatchdog(unittest.TestCase):
+    NOW = 5_000.0
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, {"NB_REVIEW_QUEUE_DB": str(Path(self._tmp.name) / "q.db")})
+        self._env.start()
+        self.log = Path(self._tmp.name) / "copilot-api.log"
+        self.log.write_text("--> POST /v1/messages \x1b[33m403\x1b[0m 5ms\n")  # history, ignored
+        self.gw = FakeGw(self)
+        self.now = [self.NOW]
+        self.wd = mg.Watchdog(self.gw, log_path=self.log, clock=lambda: self.now[0])
+        self.wd.new_refusals()  # as serve() does: start at the log's current end
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def refuse(self, n=1):
+        with self.log.open("a") as f:
+            for _ in range(n):
+                f.write("--> POST /v1/messages \x1b[33m403\x1b[0m 106ms\n")
+
+    def open_alerts(self):
+        from scripts.review_queue import store as qs
+        return sorted(i.key for i in qs.Store().items(states=qs.WAITING) if i.source == mg.ALERT_SOURCE)
+
+    def test_healthy_proxy_is_left_alone(self):
+        self.assertEqual(self.wd.check(), "ok")
+        self.assertEqual((self.gw.recovered, self.gw.probed), (0, 0))
+        self.assertEqual(self.wd.token_expires_in, 5000)
+
+    def test_a_token_about_to_expire_is_restarted_before_anything_fails(self):
+        self.gw.exp = self.NOW + 120
+        result = self.wd.check()
+        self.assertTrue(result.startswith("restarted: its token expires in 2 min"), result)
+        self.assertEqual(self.gw.recovered, 1)
+
+    def test_an_expiring_token_waits_for_turns_in_progress(self):
+        # A restart kills requests mid-stream; while the token is still valid
+        # the watchdog lets them finish and tries again at the next check.
+        self.gw.exp = self.NOW + 240
+        self.gw.in_flight = 2
+        self.assertIn("waiting for 2 request(s) in flight", self.wd.check())
+        self.assertEqual(self.gw.recovered, 0)
+        self.gw.in_flight = 0
+        self.wd.check()
+        self.assertEqual(self.gw.recovered, 1)
+
+    def test_an_expired_token_restarts_even_with_turns_in_progress(self):
+        self.gw.exp = self.NOW - 5
+        self.gw.in_flight = 3
+        self.wd.check()
+        self.assertEqual(self.gw.recovered, 1)
+
+    def test_an_expired_token_is_restarted(self):
+        self.gw.exp = self.NOW - 600
+        self.assertIn("expired 10 min ago", self.wd.check())
+        self.assertEqual(self.gw.recovered, 1)
+
+    def test_logged_refusals_confirmed_by_a_probe_restart_the_proxy(self):
+        # Synapse and Gauntlet call the proxy directly; the log is how the
+        # watchdog sees their 403s.
+        self.refuse(3)
+        self.gw.probes = [403, 200]
+        result = self.wd.check()
+        self.assertTrue(result.startswith("restarted: 3 request(s) refused 403"), result)
+        self.assertEqual((self.gw.recovered, self.gw.probed), (1, 2))
+
+    def test_logged_refusals_the_probe_does_not_confirm_change_nothing(self):
+        self.refuse()
+        self.gw.probes = [200]
+        self.assertIn("not stale", self.wd.check())
+        self.assertEqual(self.gw.recovered, 0)
+
+    def test_old_refusals_in_the_log_are_history(self):
+        self.assertEqual(self.wd.check(), "ok")
+        self.assertEqual(self.gw.probed, 0)
+
+    def test_a_restart_that_does_not_help_raises_the_alert(self):
+        self.gw.exp = self.NOW - 1
+        self.gw.probes = [403]
+        self.assertIn("restart did not help", self.wd.check())
+        self.assertEqual(self.open_alerts(), [mg.ALERT_KEY])
+        self.gw.exp = self.NOW + 10_000
+        self.refuse()
+        self.gw.probes = [200]
+        self.wd.check()
+        self.gw.exp = self.NOW - 1
+        self.gw.probes = [200]
+        self.wd.check()
+        self.assertEqual(self.open_alerts(), [], "a restart that works clears it")
+
+    def test_a_proxy_down_past_the_grace_period_raises_then_clears(self):
+        self.gw.up = False
+        self.wd.check()
+        self.assertEqual(self.open_alerts(), [], "launchd gets its chance first")
+        self.now[0] += mg.DOWN_ALERT_AFTER
+        self.wd.check()
+        self.assertEqual(self.open_alerts(), [mg.DOWN_KEY])
+        self.gw.up = True
+        self.wd.check()
+        self.assertEqual(self.open_alerts(), [])
+
+    def test_a_rotated_log_is_read_from_the_start(self):
+        self.log.unlink()  # rotated: a new file, even one of the same size
+        self.log.write_text("--> POST /v1/messages \x1b[33m403\x1b[0m 1ms\n")
+        self.assertEqual(self.wd.new_refusals(), 1)
+
+    def test_a_truncated_log_is_read_from_the_start(self):
+        # Same file, now shorter than where the last read stopped.
+        self.log.write_text("--> GET / \x1b[33m403\x1b[0m 1ms\n")
+        self.assertEqual(self.wd.new_refusals(), 1)
+
+    def test_startup_clears_what_an_earlier_process_raised(self):
+        mg.Alerts().raise_("left over", key=mg.DOWN_KEY)
+        self.assertEqual(self.open_alerts(), [mg.DOWN_KEY])
+        mg.Alerts().clear_all()
+        self.assertEqual(self.open_alerts(), [])
 
 
 if __name__ == "__main__":

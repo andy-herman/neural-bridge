@@ -330,8 +330,16 @@ def model_gateway_check(base: str | None = None, timeout: float = 5.0) -> dict:
     if not health.get("upstream_up"):
         problems.append("the proxy behind the gateway is not answering")
     if health.get("alert_open"):
-        problems.append("the proxy refuses requests even after a restart (see the review queue)")
+        problems.append("open gateway alert(s): " + ", ".join(health.get("alerts") or ["?"])
+                        + " (see the review queue)")
+    watchdog = health.get("watchdog")
+    if watchdog is None:
+        problems.append("the proxy watchdog is not running")
+    elif (watchdog.get("last_check_age") or 0) > 900:
+        problems.append(f"the proxy watchdog last checked {watchdog['last_check_age'] // 60} min ago")
     facts = {k: health.get(k) for k in ("requests", "folded", "retried", "restarts")}
+    if watchdog:
+        facts["watchdog"] = watchdog.get("last_result")
     return {"ok": not problems, "facts": facts, "problems": problems}
 
 

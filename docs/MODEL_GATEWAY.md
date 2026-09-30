@@ -26,6 +26,19 @@ Verified 2026-09-30 through the gateway with Claude Code 2.1.286: `claude-sonnet
 - On a 403 for `/v1/messages`, the gateway restarts copilot-api (at most once every five minutes), waits for it to answer, and retries the request once.
 - If the retry is refused too, it raises a review-queue alert ("Copilot proxy refuses requests even after a restart") and clears it on the next success.
 
+## The proxy watchdog
+
+A thread inside the gateway checks the proxy every five minutes, so trouble is found before an agent turn runs into it.
+
+- **Token expiry.** The watchdog reads the Copilot token's expiry from copilot-api's `/token`, and never logs or keeps the token. On 2026-09-30 it read about 24 hours from the proxy's start with no refresh after that, which is almost certainly how the day's outage began. With less than ten minutes left, the watchdog restarts the proxy. While the token is still valid, it first waits for relayed requests to finish, since a restart kills them mid-stream. Once the token has expired, it restarts at once.
+- **Refusals from anything that uses the proxy.** It counts new 403 lines in copilot-api's own log, which also catches Synapse and Gauntlet: they call `:4141` directly, not through the gateway. It confirms with one probe, `max_tokens: 1` on `gpt-4.1`, a Copilot base model with no premium-request cost, before restarting.
+- **The proxy not answering.** launchd restarts it. If it is still down after ten minutes, the watchdog raises a review-queue alert ("Copilot proxy is not answering") and clears it when the proxy answers.
+- **A restart that does not help.** If a probe is still refused after a restart, the watchdog raises the same alert as the relay's 403 path.
+
+Restarts share the relay's five-minute rate limit, because both go through one `Recovery`.
+
+`/_gateway/health` carries `watchdog.last_check_age`, `last_result` and `token_expires_in` (seconds), plus `in_flight`. The memory canary fails when the watchdog is missing, or has not checked in for 15 minutes.
+
 ## Tool lists
 
 Every proxy-route call now passes `--strict-mcp-config` (`claude_env.mcp_args`). A turn loads exactly the MCP servers it was granted (`scripts/discord_bot/private_tools.py`), and otherwise none.
@@ -53,7 +66,7 @@ The memory canary reads `/_gateway/health` daily and fails if:
 | Log | `~/Library/Logs/neural-bridge/model-gateway.log`: method, path, status, duration, model, folded count; never request text, keys or headers |
 | Restart | `launchctl kickstart -k gui/$(id -u)/com.andyherman.neural-bridge.model-gateway` |
 | Bypass for one call | set `NB_COPILOT_API_BASE=http://localhost:4141` |
-| Config | `NB_MODEL_GATEWAY_PORT`, `NB_MODEL_GATEWAY_UPSTREAM`, `NB_MODEL_GATEWAY_RESTART` (the launchd label restarted on a 403) |
+| Config | `NB_MODEL_GATEWAY_PORT`, `NB_MODEL_GATEWAY_UPSTREAM`, `NB_MODEL_GATEWAY_RESTART` (the launchd label restarted on a 403), `NB_MODEL_GATEWAY_WATCH_INTERVAL` (seconds, `0` turns the watchdog off) |
 
 Changes to `scripts/model_gateway.py` or its plist deploy through auto-reload like the daemon: `install.sh` re-bootstraps the service.
 
