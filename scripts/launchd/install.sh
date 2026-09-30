@@ -34,6 +34,7 @@
 set -euo pipefail
 
 AGENTS=(
+    "com.andyherman.neural-bridge.model-gateway"
     "com.andyherman.neural-bridge.discord-bot"
     "com.andyherman.neural-bridge.publish-prep"
     "com.andyherman.neural-bridge.compile-nightly"

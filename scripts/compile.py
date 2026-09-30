@@ -430,7 +430,8 @@ def _claude_or_fallback(prompt: str, model: str, timeout: int) -> tuple[bool, st
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+             *claude_env.mcp_args()],
             capture_output=True,
             text=True,
             timeout=timeout,

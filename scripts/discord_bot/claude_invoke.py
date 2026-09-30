@@ -66,7 +66,8 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     # agent the whole shell, so it must not be settable per call site.
     if agent_id:
         env["NB_AGENT_ID"] = agent_id
-    # Route `claude -p` through the local copilot-api proxy so the fleet runs on
+    # Route `claude -p` through the model gateway and the local copilot-api
+    # proxy behind it (claude_env.proxy_base) so the fleet runs on
     # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
     # spending Claude Max weekly limits. copilot-api exposes the Anthropic
     # /v1/messages endpoint; the key is a placeholder (the proxy authenticates
@@ -172,10 +173,9 @@ def call_claude_sync(
         args.extend(["--effort", effort])
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
-    if mcp_config:
-        # Private MCP servers are loaded per call, only for turns that were
-        # granted them (see private_tools.py), never from user-wide config.
-        args.extend(["--mcp-config", mcp_config])
+    # Exactly the MCP servers this turn was granted (see private_tools.py),
+    # and otherwise none: never Andy's user-wide servers. See claude_env.
+    args.extend(claude_env.mcp_args(mcp_config))
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])

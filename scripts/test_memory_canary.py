@@ -233,7 +233,8 @@ class TestReviewQueueCheck(unittest.TestCase):
         healthy = {"total": 5, "ok": 5, "failed": 0}
         summary = {store: healthy for store in mc.WATCHED}
         with patch.object(mem, "read_events", return_value=[]), \
-                patch.object(mem, "summarize", return_value=summary):
+                patch.object(mem, "summarize", return_value=summary), \
+                patch.object(mc, "model_gateway_check", return_value={"ok": True, "facts": {}, "problems": []}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = mc.main(["--no-notify"])
@@ -251,7 +252,8 @@ class TestReviewQueueCheck(unittest.TestCase):
         healthy = {"total": 5, "ok": 5, "failed": 0}
         summary = {store: healthy for store in mc.WATCHED}
         with patch.object(mem, "read_events", return_value=[]), \
-                patch.object(mem, "summarize", return_value=summary):
+                patch.object(mem, "summarize", return_value=summary), \
+                patch.object(mc, "model_gateway_check", return_value={"ok": True, "facts": {}, "problems": []}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = mc.main(["--no-notify"])
