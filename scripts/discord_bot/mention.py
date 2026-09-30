@@ -134,6 +134,10 @@ def effort_for(agent_id: str) -> str:
 MODEL_PER_AGENT: dict[str, str] = {
     "luna": "claude-opus-5",       # 2026-09-30
     "research": "claude-opus-5",   # 2026-09-30
+    # The writing agents, on Sonnet 5 (2026-09-30).
+    "content": "claude-sonnet-5",
+    "social": "claude-sonnet-5",
+    "docs-editor": "claude-sonnet-5",
 }
 
 
