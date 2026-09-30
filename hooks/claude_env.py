@@ -85,8 +85,14 @@ def proxy_supports(model: str) -> bool:
 # in, they fill the 200-character error snippet and hide the line that
 # matters: on 2026-09-30 Luna's turn showed "connectors are disabled ... ⚠
 # Claude Op" and nothing else, when the second, cut-off warning was the cause.
+# Warnings Claude Code prints on every proxy-route call. True, and never the
+# reason a call failed: the fleet uses no claude.ai connectors, and the proxy's
+# dotted model ids (claude-opus-4.8) read to Claude Code as the retired
+# Claude Opus 4. On 2026-09-30 the second one, cut to "Claude Op", was all the
+# daemon showed of a failure whose cause was an API error on stdout.
 BENIGN_STDERR = (
     "claude.ai connectors are disabled",
+    "was retired on",
 )
 
 ERROR_SNIPPET_LIMIT = 300
@@ -95,15 +101,17 @@ ERROR_SNIPPET_LIMIT = 300
 def error_snippet(stdout: str | None, stderr: str | None, *, limit: int = ERROR_SNIPPET_LIMIT) -> str:
     """One line naming why a `claude -p` call failed, for logs and Discord.
 
-    Claude Code prints the API's own error on stdout ("API Error: 400 ...");
-    stderr carries CLI warnings. Preference order: the API error line, then
+    Claude Code prints the API's own error on stdout ("API Error: 400 ...",
+    or "Failed to authenticate. API Error: 403 forbidden" when the proxy's
+    upstream token has gone stale); stderr carries CLI warnings. Preference
+    order: the line carrying the API error, then
     stderr with the benign proxy-route warnings removed, then raw stderr,
     then the tail of stdout, then a marker. The 2026-09-25 flush outage and
     the 2026-09-30 Luna failure were both invisible for want of this.
     """
     out_lines = [l.strip() for l in (stdout or "").splitlines() if l.strip()]
     err_lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
-    api_error = next((l for l in out_lines if l.startswith("API Error")), "")
+    api_error = next((l for l in out_lines if "API Error" in l), "")
     if api_error:
         text = api_error
     else:

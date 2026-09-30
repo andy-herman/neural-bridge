@@ -71,13 +71,23 @@ class TestErrorSnippet(unittest.TestCase):
         self.assertEqual(claude_env.error_snippet(out, self.CONNECTORS),
                          'API Error: 400 {"error":{"message":"prefill"}}')
 
-    def test_benign_connectors_warning_is_dropped_so_the_real_warning_shows(self):
-        # Luna, 2026-09-30: the visible snippet was the connectors line plus
-        # "⚠ Claude Op"; the cause was the second line.
-        err = f"⚠ {self.CONNECTORS}\n⚠ Claude Opus is not available with the Claude Pro plan. If you have updated your subscription plan recently, run /logout and /login for the plan to take effect.\n"
+    RETIRED = "⚠ Claude Opus 4 was retired on June 15, 2026. Consider switching to a newer model."
+
+    def test_luna_2026_09_30_names_the_403(self):
+        # Replayed with Claude Code 2.1.207 against a proxy answering 403
+        # "forbidden", as copilot-api did once its upstream token went stale.
+        # The daemon showed the connectors line and "⚠ Claude Op" (the
+        # retirement warning); the cause was on stdout, after "Failed to
+        # authenticate.", where a startswith("API Error") check never looked.
+        out = "Failed to authenticate. API Error: 403 forbidden\n"
+        err = f"⚠ {self.CONNECTORS}\n{self.RETIRED}\n"
+        self.assertEqual(claude_env.error_snippet(out, err),
+                         "Failed to authenticate. API Error: 403 forbidden")
+
+    def test_benign_warnings_are_dropped_so_a_real_warning_shows(self):
+        err = f"⚠ {self.CONNECTORS}\n{self.RETIRED}\n⚠ Something that actually matters\n"
         snip = claude_env.error_snippet("", err)
-        self.assertTrue(snip.startswith("⚠ Claude Opus is not available with the Claude Pro plan"), snip)
-        self.assertNotIn("connectors", snip)
+        self.assertEqual(snip, "⚠ Something that actually matters")
 
     def test_only_benign_lines_fall_back_to_them(self):
         self.assertEqual(claude_env.error_snippet("", self.CONNECTORS), self.CONNECTORS)

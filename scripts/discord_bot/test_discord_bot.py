@@ -369,18 +369,18 @@ class TestCallClaude(unittest.TestCase):
 
     def test_nonzero_exit_names_the_real_cause_not_the_connectors_warning(self):
         # 2026-09-30: Luna posted "exit_1:⚠ claude.ai connectors are disabled ...
-        # ⚠ Claude Op" to Discord. The connectors line is printed on every
-        # proxy-route call; the cut-off second line was the cause.
+        # ⚠ Claude Op" to Discord. Both stderr lines are printed on every
+        # proxy-route call; the cause was the 403 on stdout, which the old
+        # stderr[:200] report discarded. Output replayed with Claude Code 2.1.207.
         stderr = ("⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth "
                   "source is set and takes precedence over your claude.ai login · Unset it to load "
                   "your organization's connectors\n"
-                  "⚠ Claude Opus is not available with the Claude Pro plan. If you have updated your "
-                  "subscription plan recently, run /logout and /login for the plan to take effect.\n")
+                  "⚠ Claude Opus 4 was retired on June 15, 2026. Consider switching to a newer model.\n")
         with patch("scripts.discord_bot.claude_invoke.subprocess.run",
-                   return_value=_FakeResult(1, "", stderr)):
+                   return_value=_FakeResult(1, "Failed to authenticate. API Error: 403 forbidden\n", stderr)):
             ok, _, err = claude_invoke.call_claude_sync("prompt", "model", 30)
         self.assertFalse(ok)
-        self.assertTrue(err.startswith("exit_1:⚠ Claude Opus is not available with the Claude Pro plan"), err)
+        self.assertEqual(err, "exit_1:Failed to authenticate. API Error: 403 forbidden")
         # And an API error on stdout beats both warnings.
         with patch("scripts.discord_bot.claude_invoke.subprocess.run",
                    return_value=_FakeResult(1, 'API Error: 404 {"error":{"message":"model not found"}}', stderr)):
