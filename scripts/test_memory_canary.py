@@ -7,6 +7,7 @@ fleet that must NOT be mistaken for either.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -191,6 +192,48 @@ class TestCanaryClassification(unittest.TestCase):
         text = format_report(evaluate(summary, had_traffic=True, watched=WATCH), 7)
         self.assertIn("luna_notes", text)
         self.assertIn("honcho_capture", text)
+
+
+class TestModelGatewayCheck(unittest.TestCase):
+    def _health(self, payload):
+        import io
+        from scripts import memory_canary as mc
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with patch("urllib.request.urlopen", return_value=Resp(json.dumps(payload).encode())):
+            return mc.model_gateway_check()
+
+    HEALTHY = {"upstream_up": True, "alert_open": False, "alerts": [], "requests": 5, "folded": 1,
+               "retried": 0, "restarts": 0,
+               "watchdog": {"last_check_age": 60, "last_result": "ok", "token_expires_in": 80000}}
+
+    def test_healthy(self):
+        self.assertTrue(self._health(self.HEALTHY)["ok"])
+
+    def test_open_alert_and_stalled_watchdog_are_problems(self):
+        bad = {**self.HEALTHY, "alert_open": True, "alerts": ["upstream_down"],
+               "watchdog": {"last_check_age": 3600, "last_result": "ok"}}
+        result = self._health(bad)
+        self.assertFalse(result["ok"])
+        text = " ".join(result["problems"])
+        self.assertIn("upstream_down", text)
+        self.assertIn("watchdog last checked 60 min ago", text)
+
+    def test_missing_watchdog_is_a_problem(self):
+        result = self._health({k: v for k, v in self.HEALTHY.items() if k != "watchdog"})
+        self.assertIn("watchdog is not running", " ".join(result["problems"]))
+
+    def test_unreachable_gateway_is_a_problem(self):
+        from scripts import memory_canary as mc
+        with patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            result = mc.model_gateway_check()
+        self.assertFalse(result["ok"])
+        self.assertIn("unreachable", result["problems"][0])
 
 
 class TestReviewQueueCheck(unittest.TestCase):
