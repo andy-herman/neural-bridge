@@ -402,5 +402,42 @@ class TestCallClaude(unittest.TestCase):
         self.assertEqual(err, "claude_cli_not_found")
 
 
+class TestCallWithFallback(unittest.TestCase):
+    """Scheduled jobs (Luna's check-ins, the Sunday publish prep) run on a
+    Claude 5 model through the model gateway and must not come back empty
+    when that fails."""
+
+    def _run(self, results, model="claude-sonnet-5"):
+        calls, logged = [], []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        with patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+            out = claude_invoke.call_claude_sync_with_fallback("p", model, timeout=30, log=logged.append)
+        return out, calls, logged
+
+    def test_success_needs_no_fallback(self):
+        out, calls, logged = self._run([(True, "draft", "")])
+        self.assertEqual(out, (True, "draft", "", "claude-sonnet-5"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["timeout"], 30)
+
+    def test_claude_5_failure_retries_once_on_the_default(self):
+        out, calls, logged = self._run([(False, "", "exit_1:API Error: 400 prefill"), (True, "draft", "")])
+        self.assertEqual(out, (True, "draft", "", claude_invoke.DEFAULT_MODEL))
+        self.assertEqual([c["model"] for c in calls], ["claude-sonnet-5", claude_invoke.DEFAULT_MODEL])
+        self.assertIn("retrying on", logged[0])
+
+    def test_timeout_is_not_retried(self):
+        out, calls, _ = self._run([(False, "", "timeout")])
+        self.assertEqual((out[0], len(calls)), (False, 1))
+
+    def test_a_4x_failure_is_not_retried(self):
+        out, calls, _ = self._run([(False, "", "exit_1:boom")], model="claude-opus-4.8")
+        self.assertEqual((out[0], len(calls)), (False, 1))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

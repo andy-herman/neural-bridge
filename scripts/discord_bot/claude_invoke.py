@@ -212,6 +212,34 @@ def call_claude_sync(
         return True, result.stdout, ""
 
 
+def call_claude_sync_with_fallback(
+    prompt: str,
+    model: str,
+    *,
+    log=None,
+    **kwargs,
+) -> tuple[bool, str, str, str]:
+    """call_claude_sync on `model`, retried once on DEFAULT_MODEL when a
+    Claude 5 call fails for any reason but a timeout. Returns (ok, stdout,
+    error_reason, model_used).
+
+    Claude 5 answers only through the model gateway (scripts/model_gateway.py),
+    so this keeps a gateway outage from costing a scheduled job its output.
+    For stateless calls only: agent turns carry a session, and their fallback
+    (agent_runtime) has to decide what happens to it.
+    """
+    ok, stdout, err = call_claude_sync(prompt, model=model, **kwargs)
+    if ok or claude_env.proxy_supports(model) or err == "timeout":
+        return ok, stdout, err, model
+    message = f"claude call on {model} failed ({err[:120]}); retrying on {DEFAULT_MODEL}"
+    if log is not None:
+        log(message)
+    else:
+        print(message, file=sys.stderr)
+    ok, stdout, err = call_claude_sync(prompt, model=DEFAULT_MODEL, **kwargs)
+    return ok, stdout, err, DEFAULT_MODEL
+
+
 async def call_claude(
     prompt: str,
     model: str = DEFAULT_MODEL,

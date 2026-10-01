@@ -200,7 +200,7 @@ class TestGenerate(unittest.TestCase):
     def test_uses_lunas_model(self):
         from unittest.mock import patch
         calls, fake = self._calls([(True, "hi", "")])
-        with patch.object(ci, "call_claude_sync", side_effect=fake):
+        with patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
             self.assertEqual(ci.generate("p"), (True, "hi", ""))
         self.assertEqual(calls[0]["model"], ci.model_for("luna"))
 
@@ -208,7 +208,7 @@ class TestGenerate(unittest.TestCase):
         from unittest.mock import patch
         calls, fake = self._calls([(False, "", "exit_1:API Error: 400 prefill"), (True, "hi", "")])
         with patch.object(ci, "model_for", return_value="claude-opus-5"), \
-                patch.object(ci, "call_claude_sync", side_effect=fake):
+                patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
             self.assertEqual(ci.generate("p"), (True, "hi", ""))
         self.assertEqual([c["model"] for c in calls], ["claude-opus-5", ci.DEFAULT_MODEL])
 
@@ -216,7 +216,7 @@ class TestGenerate(unittest.TestCase):
         from unittest.mock import patch
         calls, fake = self._calls([(False, "", "timeout")])
         with patch.object(ci, "model_for", return_value="claude-opus-5"), \
-                patch.object(ci, "call_claude_sync", side_effect=fake):
+                patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
             self.assertFalse(ci.generate("p")[0])
         self.assertEqual(len(calls), 1)
 
