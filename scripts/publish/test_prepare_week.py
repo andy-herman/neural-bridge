@@ -249,5 +249,48 @@ class TestGenerateKoreanTranslation(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestLinkedInModel(unittest.TestCase):
+    """The LinkedIn variant runs on the content agent's model (Sonnet 5),
+    falling back once to the fleet default."""
+
+    def _generate(self, results):
+        from unittest.mock import patch
+        import tempfile
+        from scripts.publish import prepare_week as pw
+        calls = []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "voice.md"
+            corpus.write_text("voice")
+            with patch.object(pw, "VOICE_CORPUS", corpus), \
+                    patch.object(pw, "LINKEDIN_PROMPT_TEMPLATE", corpus), \
+                    patch.object(pw, "build_linkedin_prompt", return_value="PROMPT"), \
+                    patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+                result = pw.generate_linkedin_variant(object(), dry_run=False)
+        return result, calls
+
+    def test_runs_on_the_content_agents_model(self):
+        from scripts.discord_bot.mention import model_for
+        result, calls = self._generate([(True, " post ", "")])
+        self.assertEqual(result, (True, "post"))
+        self.assertEqual(calls[0]["model"], model_for("content"))
+        self.assertEqual(calls[0]["model"], "claude-sonnet-5")
+
+    def test_a_failed_claude_5_call_falls_back_and_still_produces_a_post(self):
+        from scripts.discord_bot.claude_invoke import DEFAULT_MODEL
+        result, calls = self._generate([(False, "", "exit_1:API Error: 400 prefill"), (True, "post", "")])
+        self.assertEqual(result, (True, "post"))
+        self.assertEqual([c["model"] for c in calls], ["claude-sonnet-5", DEFAULT_MODEL])
+
+    def test_a_double_failure_names_the_model_it_ended_on(self):
+        from scripts.discord_bot.claude_invoke import DEFAULT_MODEL
+        result, _ = self._generate([(False, "", "exit_1:a"), (False, "", "exit_1:b")])
+        self.assertEqual(result, (False, f"claude call failed on {DEFAULT_MODEL}: exit_1:b"))
+
+
 if __name__ == "__main__":
     unittest.main()

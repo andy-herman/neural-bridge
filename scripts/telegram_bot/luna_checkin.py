@@ -44,8 +44,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 from scripts.discord_bot.claude_invoke import (  # noqa: E402
     DEFAULT_MODEL,
-    call_claude_sync,
-    claude_env,
+    call_claude_sync_with_fallback,
     sanitize_untrusted_text,
 )
 from scripts.discord_bot.keychain import get_token  # noqa: E402
@@ -236,15 +235,9 @@ def send_telegram(chat_id: int, text: str, token: str, timeout: int = 15) -> boo
 
 def generate(prompt: str) -> tuple[bool, str, str]:
     """Run the check-in on Luna's model, falling back once to the fleet
-    default when a Claude 5 call fails (Claude 5 answers only through the
-    model gateway; see agent_runtime for the same rule on her turns)."""
-    model = model_for(AGENT_ID) or DEFAULT_MODEL
-    ok, stdout, err = call_claude_sync(prompt, model=model, timeout=CHECKIN_TIMEOUT,
-                                       effort=CHECKIN_EFFORT)
-    if not ok and not claude_env.proxy_supports(model) and err != "timeout":
-        print(f"check-in on {model} failed ({err[:120]}); retrying on {DEFAULT_MODEL}", file=sys.stderr)
-        ok, stdout, err = call_claude_sync(prompt, model=DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT,
-                                           effort=CHECKIN_EFFORT)
+    default when a Claude 5 call fails (claude_invoke.call_claude_sync_with_fallback)."""
+    ok, stdout, err, _model = call_claude_sync_with_fallback(
+        prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT)
     return ok, stdout, err
 
 
