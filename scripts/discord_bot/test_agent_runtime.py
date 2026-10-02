@@ -62,7 +62,7 @@ class TestRunAgentTurn(unittest.TestCase):
 
         return fake
 
-    def _patched(self, *, call_results, is_new=False, exists=True):
+    def _patched(self, *, call_results, is_new=False, exists=True, model=None):
         """Patch the runtime's collaborators. Returns a context manager stack."""
         from contextlib import ExitStack
         stack = ExitStack()
@@ -78,6 +78,7 @@ class TestRunAgentTurn(unittest.TestCase):
         stack.enter_context(patch.object(agent_runtime, "add_dirs_for", return_value=[]))
         stack.enter_context(patch.object(agent_runtime, "timeout_for", return_value=99))
         stack.enter_context(patch.object(agent_runtime, "effort_for", return_value="low"))
+        stack.enter_context(patch.object(agent_runtime, "model_for", return_value=model))
         stack.enter_context(patch.object(agent_runtime, "max_response_chars_for", return_value=50))
         stack.enter_context(patch.object(agent_runtime, "truncate_response",
                                          side_effect=lambda t, limit: t[:limit]))
@@ -183,6 +184,57 @@ class TestRunAgentTurn(unittest.TestCase):
             _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1,
                                             message_content="hi")))
         self.assertNotIn("model", self.calls[0])
+
+    def test_per_agent_model_is_used(self):
+        stack, _ = self._patched(call_results=[(True, "ok", "")], model="claude-opus-5")
+        with stack:
+            _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi")))
+        self.assertEqual(self.calls[0]["model"], "claude-opus-5")
+
+    def test_request_override_beats_the_per_agent_model(self):
+        stack, _ = self._patched(call_results=[(True, "ok", "")], model="claude-opus-5")
+        with stack:
+            _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi",
+                                            model="claude-opus-4.8")))
+        self.assertEqual(self.calls[0]["model"], "claude-opus-4.8")
+
+    def test_claude_5_failure_falls_back_on_the_same_session(self):
+        # A resumed session carries across models (verified live 2026-09-30),
+        # so the fallback keeps the conversation instead of resetting it.
+        stack, store = self._patched(call_results=[(False, "", "exit_1:API Error: 400 prefill"),
+                                                   (True, "answer", "")], model="claude-opus-5")
+        with stack:
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi")))
+        self.assertTrue(res.ok)
+        self.assertTrue(res.model_fallback)
+        self.assertEqual([c["model"] for c in self.calls], ["claude-opus-5", agent_runtime.DEFAULT_MODEL])
+        self.assertEqual([c["resume"] for c in self.calls], [True, True])
+        self.assertEqual(self.calls[0]["session_id"], self.calls[1]["session_id"])
+        store.reset.assert_not_called()
+
+    def test_new_session_fallback_uses_a_fresh_id(self):
+        stack, store = self._patched(call_results=[(False, "", "exit_1:boom"), (True, "answer", "")],
+                                     is_new=True, model="claude-opus-5")
+        with stack:
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi")))
+        self.assertTrue(res.ok)
+        self.assertEqual(self.calls[1]["session_id"], "fresh-session-id")
+        self.assertFalse(self.calls[1]["resume"])
+
+    def test_timeout_does_not_fall_back(self):
+        stack, _ = self._patched(call_results=[(False, "", "timeout")], is_new=True, model="claude-opus-5")
+        with stack:
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi")))
+        self.assertFalse(res.ok)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_4x_failure_does_not_fall_back(self):
+        stack, _ = self._patched(call_results=[(False, "", "exit_1:boom")], is_new=True,
+                                 model="claude-opus-4.8")
+        with stack:
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1, message_content="hi")))
+        self.assertFalse(res.model_fallback)
+        self.assertEqual(len(self.calls), 1)
 
     def test_effort_and_timeout_come_from_policy(self):
         stack, _ = self._patched(call_results=[(True, "ok", "")])

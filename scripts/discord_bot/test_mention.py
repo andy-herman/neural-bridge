@@ -297,6 +297,24 @@ class TestNotesBudget(unittest.TestCase):
         self.assertIn("Decisions Andy has made", kept)
 
 
+class TestModelPolicy(unittest.TestCase):
+    def test_luna_and_research_run_opus_5_and_others_the_default(self):
+        from scripts.discord_bot import mention as mn
+        self.assertEqual(mn.model_for("luna"), "claude-opus-5")
+        self.assertEqual(mn.model_for("research"), "claude-opus-5")
+        self.assertIsNone(mn.model_for("security-reviewer"))
+
+    def test_writing_agents_run_sonnet_5(self):
+        from scripts.discord_bot import mention as mn
+        for agent in ("content", "social", "docs-editor"):
+            self.assertEqual(mn.model_for(agent), "claude-sonnet-5", agent)
+
+    def test_every_listed_model_is_a_claude_id(self):
+        from scripts.discord_bot import mention as mn
+        for agent, model in mn.MODEL_PER_AGENT.items():
+            self.assertRegex(model, r"^claude-(opus|sonnet|haiku)-[0-9]", agent)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

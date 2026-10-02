@@ -42,7 +42,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from hooks import discord_post  # noqa: E402
-from scripts.discord_bot.claude_invoke import call_claude_sync  # noqa: E402
+from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude_sync_with_fallback  # noqa: E402
+from scripts.discord_bot.mention import model_for  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BLOG_REPO = Path.home() / "Development" / "neural-bridge-blog"
@@ -260,9 +261,14 @@ def generate_linkedin_variant(candidate: Candidate, *, dry_run: bool) -> tuple[b
     prompt = build_linkedin_prompt(candidate)
     if dry_run:
         return True, f"<dry-run: would call claude with prompt of {len(prompt)} chars>"
-    ok, stdout, err = call_claude_sync(prompt, timeout=CLAUDE_TIMEOUT)
+    # The LinkedIn variant is the content agent's work, so it runs on the
+    # content agent's model (Sonnet 5 since 2026-09-30), falling back once to
+    # the fleet default if that fails: a Sunday prep that writes nothing is
+    # the failure this has to avoid.
+    ok, stdout, err, model = call_claude_sync_with_fallback(
+        prompt, model_for("content") or DEFAULT_MODEL, timeout=CLAUDE_TIMEOUT)
     if not ok:
-        return False, f"claude call failed: {err}"
+        return False, f"claude call failed on {model}: {err}"
     return True, stdout.strip()
 
 

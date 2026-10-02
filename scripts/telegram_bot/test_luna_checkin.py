@@ -167,7 +167,9 @@ class TestCheckinCompanionSetup(unittest.TestCase):
         self.stack.enter_context(patch.object(ci, "load_default_env"))
         self.stack.enter_context(patch.object(ci, "gather_context", return_value="Synthetic context"))
         self.stack.enter_context(patch.object(ci, "gather_notes", return_value="Synthetic notes"))
-        self.model = self.stack.enter_context(patch.object(ci, "call_claude_sync", return_value=(True, "[PASS]", "")))
+        self.model = self.stack.enter_context(patch.object(
+            ci, "call_claude_sync_with_fallback", return_value=(True, "[PASS]", "", ci.model_for("luna")),
+        ))
         self.send = self.stack.enter_context(patch.object(ci, "send_telegram"))
         self.token = self.stack.enter_context(patch.object(ci, "get_token"))
         self.telemetry = self.stack.enter_context(patch.object(ci.mem, "record"))
@@ -205,6 +207,7 @@ class TestCheckinCompanionSetup(unittest.TestCase):
         self.assertEqual(prompt.count(standard), 1)
         self.assertIn("[PASS]", prompt)
         self.assertIn("Telegram path is text-only", prompt)
+        self.assertEqual(self.model.call_args.args[1], ci.model_for("luna"))
         self.assertEqual(self.model.call_args.kwargs, {"timeout": 240, "effort": "low"})
         self.assertEqual(ci.MAX_TELEGRAM_CHARS, 3900)
         self.send.assert_not_called()
@@ -246,6 +249,59 @@ class TestAllowedChatIds(unittest.TestCase):
         import os
         os.environ[ci.ALLOWED_USERS_ENV] = "abc,789"
         self.assertEqual(ci.allowed_chat_ids(), [789])
+
+
+class TestGenerate(unittest.TestCase):
+    """Check-ins run on Luna's model and survive a Claude 5 failure."""
+
+    def _calls(self, results):
+        calls = []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        return calls, fake
+
+    def test_uses_lunas_model(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(True, "hi", "")])
+        with patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+            self.assertEqual(ci.generate("p"), (True, "hi", ""))
+        self.assertEqual(calls[0]["model"], ci.model_for("luna"))
+
+    def test_claude_5_failure_retries_once_on_the_default(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(False, "", "exit_1:API Error: 400 prefill"), (True, "hi", "")])
+        with patch.object(ci, "model_for", return_value="claude-opus-5"), \
+                patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+            self.assertEqual(ci.generate("p"), (True, "hi", ""))
+        self.assertEqual([c["model"] for c in calls], ["claude-opus-5", ci.DEFAULT_MODEL])
+
+    def test_timeout_is_not_retried(self):
+        from unittest.mock import patch
+        calls, fake = self._calls([(False, "", "timeout")])
+        with patch.object(ci, "model_for", return_value="claude-opus-5"), \
+                patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+            self.assertFalse(ci.generate("p")[0])
+        self.assertEqual(len(calls), 1)
+
+    def test_fallback_keeps_full_contract_and_checkin_settings(self):
+        prompt = ci.build_checkin_prompt("morning", "Synthetic context", "Synthetic notes")
+        with patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=[
+            (False, "", "synthetic model failure"), (True, "[PASS]", ""),
+        ]) as model:
+            self.assertEqual(ci.generate(prompt), (True, "[PASS]", ""))
+        self.assertEqual(model.call_count, 2)
+        for call in model.call_args_list:
+            self.assertEqual(call.args, (prompt,))
+            self.assertEqual(call.args[0].count(companion.load_companion_standard()), 1)
+            self.assertEqual(call.kwargs["timeout"], 240)
+            self.assertEqual(call.kwargs["effort"], "low")
+        self.assertEqual(
+            [call.kwargs["model"] for call in model.call_args_list],
+            [ci.model_for("luna"), ci.DEFAULT_MODEL],
+        )
 
 
 if __name__ == "__main__":

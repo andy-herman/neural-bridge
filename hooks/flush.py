@@ -172,7 +172,8 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
+            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+             *claude_env.mcp_args()],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -186,9 +187,9 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     if result.returncode != 0:
         # Claude Code prints the API's own error on stdout; stderr carries CLI
         # warnings, which is all this used to report ("claude.ai connectors
-        # are disabled...") while the real 400 went unseen.
-        api_error = next((l for l in (result.stdout or "").splitlines() if l.startswith("API Error")), "")
-        snippet = (api_error or result.stderr or "")[:200].replace("\n", " ")
+        # are disabled...") while the real 400 went unseen. Shared with the
+        # daemon: hooks/claude_env.error_snippet.
+        snippet = claude_env.error_snippet(result.stdout, result.stderr)
         return False, result.stdout, f"exit_{result.returncode}:{snippet}"
     return True, result.stdout, ""
 

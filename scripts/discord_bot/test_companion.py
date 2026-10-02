@@ -96,6 +96,17 @@ class TestNativeCompanionEntry(unittest.TestCase):
         manifest = ROOT / "plugins/neural-bridge-core/.claude-plugin/plugin.json"
         self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["name"], "neural-bridge-core")
 
+    def test_companion_release_versions_and_skill_descriptions_match(self):
+        manifest = json.loads(
+            (ROOT / "plugins/neural-bridge-core/.claude-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
+        entry = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == manifest["name"])
+        self.assertEqual(manifest["version"], "0.10.0")
+        self.assertEqual(entry["version"], manifest["version"])
+        for metadata in (manifest, entry):
+            self.assertIn("companion-standard", metadata["description"])
+
     def test_recruiter_keeps_the_future_authoring_entry(self):
         recruiter = (mention.AGENTS_DIR / "recruiter.md").read_text(encoding="utf-8")
         self.assertIn(f"skills: [{companion.COMPANION_SKILL_ID}]", recruiter.split("\n---\n", 1)[1])
@@ -158,7 +169,11 @@ class TestActualCompanionPrompts(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(f"This is a {transport.title()} DM turn.", prompt)
                     self.assertIn(mention.SURFACE_CAPABILITIES[transport], prompt)
                     self.assertIn(f"ceiling: {mention.max_response_chars_for(agent_id)} characters", prompt)
-                    self.assertNotIn("model", call.kwargs)
+                    model = mention.model_for(agent_id)
+                    if model:
+                        self.assertEqual(call.kwargs["model"], model)
+                    else:
+                        self.assertNotIn("model", call.kwargs)
                     self.assertEqual(call.kwargs["allowed_tools"], mention.allowed_tools_for(agent_id))
                     self.assertEqual(call.kwargs["add_dirs"], mention.add_dirs_for(agent_id))
                     self.assertEqual(call.kwargs["timeout"], mention.timeout_for(agent_id))
@@ -179,7 +194,7 @@ class TestActualCompanionPrompts(unittest.IsolatedAsyncioTestCase):
     async def test_resume_failure_retries_once_with_identical_contract_and_settings(self):
         self.store.get_or_create.return_value = (SimpleNamespace(session_id="existing-session"), False)
         self.model.side_effect = [(False, "", "synthetic resume failure"), (True, "reply", "")]
-        result = await ar.run_agent_turn(self.request(transport="telegram"))
+        result = await ar.run_agent_turn(self.request("loid", transport="telegram"))
         self.assertTrue(result.ok)
         self.assertTrue(result.resume_retried)
         first, second = self.model.await_args_list
@@ -190,7 +205,48 @@ class TestActualCompanionPrompts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.kwargs["session_id"], "fresh-session")
         for key in ("allowed_tools", "add_dirs", "timeout", "effort", "mcp_config"):
             self.assertEqual(first.kwargs[key], second.kwargs[key])
-        self.store.reset.assert_called_once_with(24680, "luna")
+        self.store.reset.assert_called_once_with(24680, "loid")
+
+    async def test_upstream_model_fallback_keeps_full_contract_and_authority(self):
+        for is_new_session in (True, False):
+            with self.subTest(is_new_session=is_new_session):
+                self.store.reset_mock()
+                self.store.get_or_create.return_value = (
+                    SimpleNamespace(session_id="existing-session"), is_new_session,
+                )
+                self.model.reset_mock()
+                self.model.side_effect = [(False, "", "synthetic model failure"), (True, "reply", "")]
+                result = await ar.run_agent_turn(self.request(transport="telegram"))
+                self.assertTrue(result.ok)
+                self.assertTrue(result.model_fallback)
+                self.assertFalse(result.resume_retried)
+                first, second = self.model.await_args_list
+                self.assert_full_standard(first.args[0])
+                self.assertEqual(first.args, second.args)
+                self.assertEqual(first.kwargs["model"], mention.model_for("luna"))
+                self.assertEqual(second.kwargs["model"], ar.DEFAULT_MODEL)
+                self.assertEqual(first.kwargs["resume"], not is_new_session)
+                self.assertEqual(second.kwargs["resume"], not is_new_session)
+                for key in ("allowed_tools", "add_dirs", "timeout", "effort", "mcp_config"):
+                    self.assertEqual(first.kwargs[key], second.kwargs[key])
+                if is_new_session:
+                    self.store.reset.assert_called_once_with(24680, "luna")
+                    self.assertEqual(second.kwargs["session_id"], "fresh-session")
+                else:
+                    self.store.reset.assert_not_called()
+                    self.assertEqual(second.kwargs["session_id"], "existing-session")
+                self.store.touch.assert_called_once_with(24680, "luna")
+
+    async def test_new_luna_timeout_does_not_trigger_model_or_resume_retry(self):
+        self.model.return_value = (False, "", "timeout")
+        result = await ar.run_agent_turn(self.request(transport="telegram"))
+        self.assertFalse(result.ok)
+        self.assertFalse(result.model_fallback)
+        self.assertFalse(result.resume_retried)
+        self.assert_full_standard(self.model.await_args.args[0])
+        self.model.assert_awaited_once()
+        self.store.reset.assert_not_called()
+        self.store.touch.assert_not_called()
 
     async def test_stateless_keeps_pin_and_skips_store_and_retry(self):
         for ok in (True, False):
@@ -209,9 +265,9 @@ class TestActualCompanionPrompts(unittest.IsolatedAsyncioTestCase):
                 self.model.assert_awaited_once()
                 self.assertEqual(self.store.mock_calls, [])
 
-    async def test_fresh_failure_does_not_retry(self):
+    async def test_fleet_default_fresh_failure_does_not_retry(self):
         self.model.return_value = (False, "", "synthetic fresh failure")
-        result = await ar.run_agent_turn(self.request())
+        result = await ar.run_agent_turn(self.request("loid"))
         self.assertFalse(result.ok)
         self.assertFalse(result.resume_retried)
         self.assert_full_standard(self.model.await_args.args[0])

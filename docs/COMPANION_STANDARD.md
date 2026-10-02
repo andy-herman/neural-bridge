@@ -46,6 +46,8 @@ The standard guides attention, honest continuity, respectful disagreement,
 concrete repair and pressure-free endings. It grants no new tools, models,
 effort, timeouts, private access, memory sharing, schedules or automatic actions.
 Role frontmatter is not a declaration of deployed NB model/tool grants.
+Integration preserves the current NB role-model routing, model fallback and
+strict MCP configuration; the companion contract does not select those settings.
 
 Discord action/attachment execution and approval remain transport-owned.
 Telegram conversation paths are text-only; a suggested handoff or draft is
@@ -68,4 +70,35 @@ authored prompt clauses; they do not generate or score model replies.
 Neither static inclusion nor a design example proves companionship quality,
 perfect memory, well-being benefits or native preload. No live private-service
 call, paid model trial, deployment, restart, push or automatic handoff is part of
-this implementation.
+the initial source-only acceptance.
+
+## Release and controlled pickup
+
+The companion release advances the plugin version from `0.9.0` to `0.10.0`
+in both `plugin.json` and the marketplace plugin entry. Claude skips updates
+when the computed version is unchanged, so the version bump is required for
+existing `0.9.0` installations to receive the skill and charter changes.
+See [Claude plugin loading and versions](https://code.claude.com/docs/en/plugins/loading#versions-and-updates).
+
+After guarded publication and merge, update only this marketplace and plugin:
+
+```sh
+claude plugin marketplace update neural-bridge
+claude plugin update neural-bridge-core@neural-bridge --scope user
+```
+
+Verify the installed version, all fourteen preload entries and the skill's
+content hash against the merged source. Downloaded cache files do not establish
+preloading in an already-running session: the owner must start a new Claude
+session or use `/reload-plugins`. Native missing-skill warnings remain weaker
+than the NB required-contract path.
+
+NB bridges load their deployed repository, not that native plugin cache. Their
+existing auto-reload watcher can advance main and run the broad launchd installer
+plus restart loaded Telegram bridges after a merge. Coordinate the idle-watcher
+pause, in-flight work, deployed rollback revision and approved targeted pickup
+**before merging**; use only the pause/drain/targeted-restart coordination in the
+[pause-first operator runbook](MOONBASE_TELEMETRY.md#operator-runbook-separately-approved-live-pilot).
+No telemetry configuration change is required for companion pickup.
+Do not point persistent services at an ephemeral worktree, run the broad installer
+as a substitute for a drain, or report a source merge as live prompt loading.

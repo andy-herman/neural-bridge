@@ -66,7 +66,8 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     # agent the whole shell, so it must not be settable per call site.
     if agent_id:
         env["NB_AGENT_ID"] = agent_id
-    # Route `claude -p` through the local copilot-api proxy so the fleet runs on
+    # Route `claude -p` through the model gateway and the local copilot-api
+    # proxy behind it (claude_env.proxy_base) so the fleet runs on
     # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
     # spending Claude Max weekly limits. copilot-api exposes the Anthropic
     # /v1/messages endpoint; the key is a placeholder (the proxy authenticates
@@ -172,10 +173,9 @@ def call_claude_sync(
         args.extend(["--effort", effort])
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
-    if mcp_config:
-        # Private MCP servers are loaded per call, only for turns that were
-        # granted them (see private_tools.py), never from user-wide config.
-        args.extend(["--mcp-config", mcp_config])
+    # Exactly the MCP servers this turn was granted (see private_tools.py),
+    # and otherwise none: never Andy's user-wide servers. See claude_env.
+    args.extend(claude_env.mcp_args(mcp_config))
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
@@ -202,10 +202,42 @@ def call_claude_sync(
         if result.returncode != 0:
             if result.returncode < 0:
                 span.outcome = "cancelled"
-            snippet = (result.stderr or "")[:200].replace("\n", " ")
+            # What the agent posts to Discord as "I hit an error". Until
+            # 2026-09-30 this was stderr[:200], which on the proxy route is
+            # the connectors warning and the first word of whatever mattered.
+            # The API error Claude Code prints on stdout was discarded.
+            snippet = claude_env.error_snippet(result.stdout, result.stderr)
             return False, result.stdout, f"exit_{result.returncode}:{snippet}"
         span.outcome = "succeeded"
         return True, result.stdout, ""
+
+
+def call_claude_sync_with_fallback(
+    prompt: str,
+    model: str,
+    *,
+    log=None,
+    **kwargs,
+) -> tuple[bool, str, str, str]:
+    """call_claude_sync on `model`, retried once on DEFAULT_MODEL when a
+    Claude 5 call fails for any reason but a timeout. Returns (ok, stdout,
+    error_reason, model_used).
+
+    Claude 5 answers only through the model gateway (scripts/model_gateway.py),
+    so this keeps a gateway outage from costing a scheduled job its output.
+    For stateless calls only: agent turns carry a session, and their fallback
+    (agent_runtime) has to decide what happens to it.
+    """
+    ok, stdout, err = call_claude_sync(prompt, model=model, **kwargs)
+    if ok or claude_env.proxy_supports(model) or err == "timeout":
+        return ok, stdout, err, model
+    message = f"claude call on {model} failed ({err[:120]}); retrying on {DEFAULT_MODEL}"
+    if log is not None:
+        log(message)
+    else:
+        print(message, file=sys.stderr)
+    ok, stdout, err = call_claude_sync(prompt, model=DEFAULT_MODEL, **kwargs)
+    return ok, stdout, err, DEFAULT_MODEL
 
 
 async def call_claude(

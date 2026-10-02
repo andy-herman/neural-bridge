@@ -92,7 +92,10 @@ class TestClaudeArgs(unittest.TestCase):
         self.assertEqual(a[a.index("--mcp-config") + 1], "/p/mcp.json")
         self.assertIn(TOOL, a[a.index("--allowedTools") + 1])
 
-    def test_no_mcp_config_by_default(self):
+    def test_no_mcp_server_by_default(self):
+        # Not "no flag": without --strict-mcp-config Claude Code loads every
+        # user-level MCP server (about 150 tools, Kling's paid ones among them)
+        # into an ungranted turn. The default is an empty config, strictly.
         seen = {}
 
         def fake_run(args, **kwargs):
@@ -104,7 +107,10 @@ class TestClaudeArgs(unittest.TestCase):
 
         with patch.object(claude_invoke.subprocess, "run", side_effect=fake_run):
             claude_invoke.call_claude_sync("hi", allowed_tools="Read")
-        self.assertNotIn("--mcp-config", seen["args"])
+        args = seen["args"]
+        self.assertIn("--strict-mcp-config", args)
+        self.assertEqual(args[args.index("--mcp-config") + 1], '{"mcpServers":{}}')
+        self.assertEqual(args.count("--mcp-config"), 1)
 
 
 class TestRuntimeGrant(unittest.TestCase):
