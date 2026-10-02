@@ -76,7 +76,7 @@ WIKI_LOG = KNOWLEDGE_DIR / "log.md"
 DRY_RUN_DIR = REPO_ROOT / "docs" / "compile"
 COMPILE_STATE_FILE = SCRIPTS_DIR / ".compile_state.json"
 FILING_GATE_PROMPT = SCRIPTS_DIR / "prompts" / "filing_gate_v1.md"
-CONCEPT_WRITER_PROMPT = SCRIPTS_DIR / "prompts" / "concept_writer_v1.md"
+CONCEPT_WRITER_PROMPT = SCRIPTS_DIR / "prompts" / "concept_writer_v2.md"
 FLUSH_SCRIPT = HOOKS_DIR / "flush.py"
 
 sys.path.insert(0, str(HOOKS_DIR))
@@ -94,7 +94,7 @@ from scripts import outbound_guard  # noqa: E402
 # gate was calibrated on claude-sonnet-5 (#158); rerun scripts/eval_filing_gate.py
 # after any model change before trusting its verdicts.
 DEFAULT_MODEL = claude_env.PIPELINE_MODEL
-COMPILER_VERSION = "1.3"  # bumped: multi-vote filing gate (memory-poisoning defense)
+COMPILER_VERSION = "1.4"  # bumped: concept writer v2 (keeps caveats, marks inferences, no invented links)
 DEFAULT_TIMEOUT = 120
 WRITER_TIMEOUT = 240  # concept-writer call is longer-form; give it more time
 DEFAULT_VOTES = 3  # filing-gate passes per candidate; conservative majority (see call_filing_gate_voted)
