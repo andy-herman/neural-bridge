@@ -125,6 +125,60 @@ def wrap_untrusted(text: str, tag: str, framing: str | None = None) -> str:
 
 VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
+# This separate caller never enters Invocation or the conversational retry path.
+PUBLIC_RESEARCH_FLAGS = (
+    "--bare", "--safe-mode", "--restricted", "--tools", "--allowedTools",
+    "--disable-slash-commands", "--no-session-persistence", "--no-chrome",
+    "--setting-sources", "--strict-mcp-config", "--mcp-config",
+    "--system-prompt", "--session-id", "--effort", "--max-turns",
+    "--output-format", "--model",
+)
+
+
+def start_public_research(
+    *,
+    executable: str,
+    cwd: Path,
+    system_prompt: str,
+    model: str,
+    effort: str,
+    session_id: str,
+) -> subprocess.Popen:
+    """Start a restricted, stateless child of the finite bridge's supervisor.
+
+    The caller verifies offline CLI capabilities before reaching here and owns
+    the process group, stdin, timeout, cancellation and reaping. No prompt is
+    placed on argv, and no model input is sent until that supervisor is ready.
+    """
+    if os.environ.get("NB_CLAUDE_DIRECT") or effort not in VALID_EFFORTS:
+        raise ValueError("public_research_policy_unavailable")
+    routed = _subprocess_env(agent_id="research")
+    env = {
+        "PATH": os.defpath,
+        "HOME": str(cwd),
+        "TMPDIR": str(cwd),
+        "CLAUDE_CONFIG_DIR": str(cwd),
+        "LANG": "C.UTF-8",
+        "ANTHROPIC_BASE_URL": routed["ANTHROPIC_BASE_URL"],
+        "ANTHROPIC_API_KEY": routed["ANTHROPIC_API_KEY"],
+        "NB_AGENT_ID": "research",
+        "NB_NO_DISCORD": "1",
+        "NB_SKIP_WIKI_RECALL": "1",
+    }
+    args = [
+        executable, "-p", "--output-format", "json", "--model", model,
+        "--effort", effort, "--bare", "--safe-mode", "--restricted",
+        "--tools", "WebSearch,WebFetch", "--allowedTools", "WebSearch,WebFetch",
+        "--disable-slash-commands", "--no-session-persistence", "--no-chrome",
+        "--setting-sources", "", "--max-turns", "6",
+        "--system-prompt", system_prompt, "--session-id", session_id,
+        *claude_env.mcp_args(),
+    ]
+    return subprocess.Popen(
+        args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, cwd=cwd, env=env,
+    )
+
 
 def call_claude_sync(
     prompt: str,
