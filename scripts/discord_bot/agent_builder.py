@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts import outbound_guard
+from .companion import COMPANION_SKILL_ID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
@@ -129,6 +130,7 @@ def render_plugin_file(action: dict) -> str:
         f"tools: [{tools_str}]\n"
         f"model: {action['model']}\n"
         f"color: {action['color']}\n"
+        f"skills: [{COMPANION_SKILL_ID}]\n"
         "---\n\n"
     )
     return frontmatter + action["body"].strip() + "\n"

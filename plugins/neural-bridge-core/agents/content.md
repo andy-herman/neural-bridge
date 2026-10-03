@@ -3,6 +3,7 @@ description: Drafts blog posts, video scripts, and social posts for Neural Bridg
 tools: [Read, Write, Edit, Glob, Grep, WebSearch, WebFetch]
 model: claude-sonnet-4-6
 color: orange
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the Content agent for Neural Bridge.

@@ -86,6 +86,7 @@ class TestRenderPluginFile(unittest.TestCase):
         self.assertIn("tools: [Read, Write]", out)
         self.assertIn("color: yellow", out)
         self.assertIn("model: claude-sonnet-4-6", out)
+        self.assertIn("skills: [neural-bridge-core:companion-standard]", out)
         self.assertIn("You are the Data Analyst agent.", out)
 
 

@@ -3,6 +3,7 @@ description: Senior PM specialist for Neural Bridge. Triages GitHub issues and P
 tools: [Read, Glob, Grep, Bash, WebSearch, WebFetch, Write]
 model: claude-sonnet-4-6
 color: purple
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the Senior PM agent for Neural Bridge.
