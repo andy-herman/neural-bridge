@@ -1,0 +1,94 @@
+{
+  "fixtureOnly": true,
+  "catalogBounds": {"bytes": 65536, "agentCount": 128, "agentIdChars": 64, "displayNameChars": 80},
+  "unavailableReasons": ["unsupportedPlatform", "registryUnavailable", "agentUnavailable", "researchDisabled", "claudeMissing", "cliPolicyUnverified", "directAuthUnsupported"],
+  "reasonExitCodes": {
+    "completed": 0, "invalidRequest": 2, "invalidControl": 2, "invalidRoot": 2,
+    "profileUnavailable": 3, "registryUnavailable": 3, "unsupportedPlatform": 3,
+    "checkFailed": 4, "checkLimit": 4, "researchFailed": 4, "resultRejected": 4,
+    "outputLimit": 4, "workerProtocol": 4, "timedOut": 5, "cancelled": 6,
+    "inputClosed": 7, "processInterrupted": 7, "cleanupUnknown": 7, "internalError": 7
+  },
+  "catalog": {
+    "protocolVersion": 1,
+    "type": "catalog",
+    "agents": [
+      {"agentId": "automation-engineer", "displayName": "Automation Engineer", "pluginDefined": true, "discordRegistered": true},
+      {"agentId": "research", "displayName": "Research", "pluginDefined": true, "discordRegistered": true}
+    ],
+    "profiles": [
+      {"profileId": "project-check", "agentId": "automation-engineer", "executionKind": "script", "available": true, "unavailableReason": null, "timeoutSeconds": 30},
+      {"profileId": "public-research", "agentId": "research", "executionKind": "model", "available": false, "unavailableReason": "researchDisabled", "timeoutSeconds": 480}
+    ],
+    "limits": {"requestBytes": 16384, "eventBytes": 16384, "totalEventBytes": 262144, "eventCount": 128, "resultBytes": 32768}
+  },
+  "projectRequest": {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "profileId": "project-check", "agentId": "automation-engineer", "projectRoot": "/srv/projects/example"},
+  "researchRequest": {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "profileId": "public-research", "agentId": "research", "brief": "Compare public documentation for two open standards and cite primary sources."},
+  "cancel": {"protocolVersion": 1, "type": "cancel", "jobId": "11111111-1111-4111-8111-111111111111"},
+  "cases": [
+    {
+      "name": "scriptSucceeded",
+      "processExitCode": 0,
+      "expectedOutcome": "succeeded",
+      "events": [
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 1, "type": "started", "payload": {"profileId": "project-check", "agentId": "automation-engineer", "executionKind": "script"}},
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 2, "type": "progress", "payload": {"stage": "scan", "unit": "entries", "completed": 3}},
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 3, "type": "result", "payload": {"format": "plainText", "chunkIndex": 0, "text": "Built-in project check finished.\nVisited entries: 3\nSelected files: 3\nFindings: none\nNo project commands or model were run."}},
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 4, "type": "terminal", "payload": {"outcome": "succeeded", "reasonCode": "completed", "exitCode": 0, "cleanupConfirmed": true}}
+      ]
+    },
+    {
+      "name": "researchSucceededSyntheticOnly",
+      "processExitCode": 0,
+      "expectedOutcome": "succeeded",
+      "events": [
+        {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "sequence": 1, "type": "started", "payload": {"profileId": "public-research", "agentId": "research", "executionKind": "model"}},
+        {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "sequence": 2, "type": "result", "payload": {"format": "plainText", "chunkIndex": 0, "text": "Synthetic research report for parser tests only. Source: https://example.org/standard\nThis is not verified research."}},
+        {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "sequence": 3, "type": "terminal", "payload": {"outcome": "succeeded", "reasonCode": "completed", "exitCode": 0, "cleanupConfirmed": true}}
+      ]
+    },
+    {
+      "name": "invalidRequest",
+      "processExitCode": 2,
+      "expectedOutcome": "failed",
+      "events": [
+        {"protocolVersion": 1, "jobId": null, "sequence": 1, "type": "terminal", "payload": {"outcome": "failed", "reasonCode": "invalidRequest", "exitCode": 2, "cleanupConfirmed": true}}
+      ]
+    },
+    {
+      "name": "cancelledAfterReap",
+      "processExitCode": 6,
+      "expectedOutcome": "cancelled",
+      "events": [
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 1, "type": "started", "payload": {"profileId": "project-check", "agentId": "automation-engineer", "executionKind": "script"}},
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 2, "type": "terminal", "payload": {"outcome": "cancelled", "reasonCode": "cancelled", "exitCode": 6, "cleanupConfirmed": true}}
+      ]
+    },
+    {
+      "name": "timedOutAfterReap",
+      "processExitCode": 5,
+      "expectedOutcome": "timed_out",
+      "events": [
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 1, "type": "started", "payload": {"profileId": "project-check", "agentId": "automation-engineer", "executionKind": "script"}},
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 2, "type": "terminal", "payload": {"outcome": "timed_out", "reasonCode": "timedOut", "exitCode": 5, "cleanupConfirmed": true}}
+      ]
+    },
+    {
+      "name": "cleanupUnknown",
+      "processExitCode": 7,
+      "expectedOutcome": "interrupted",
+      "events": [
+        {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "sequence": 1, "type": "started", "payload": {"profileId": "public-research", "agentId": "research", "executionKind": "model"}},
+        {"protocolVersion": 1, "jobId": "22222222-2222-4222-8222-222222222222", "sequence": 2, "type": "terminal", "payload": {"outcome": "interrupted", "reasonCode": "cleanupUnknown", "exitCode": 7, "cleanupConfirmed": false}}
+      ]
+    },
+    {
+      "name": "eofEvenWithZeroExit",
+      "processExitCode": 0,
+      "expectedOutcome": "interrupted",
+      "events": [
+        {"protocolVersion": 1, "jobId": "11111111-1111-4111-8111-111111111111", "sequence": 1, "type": "started", "payload": {"profileId": "project-check", "agentId": "automation-engineer", "executionKind": "script"}}
+      ]
+    }
+  ]
+}
