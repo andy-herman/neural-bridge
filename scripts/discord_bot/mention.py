@@ -677,6 +677,7 @@ def build_mention_prompt(
     *,
     agent_id: str,
     agent_definition: str,
+    fleet_code: str,
     channel_kind: str,
     history: list[dict],
     message_content: str,
@@ -691,8 +692,12 @@ def build_mention_prompt(
     # the agent's own stores. Records one UTILIZE event per turn either way;
     # see hooks/wiki_recall.py for why an empty result is still "ok".
     wiki_block = _wiki_recall_block(agent_id, message_content)
+    # The fleet code (FLEET_CODE.md, loaded by scripts.fleet_code) is trusted
+    # and goes in unsanitized, ahead of the charter, which is sanitized above.
+    # Substituted first so nothing substituted later can inject the token.
     rendered = (
         template
+        .replace("{fleet_code}", fleet_code)
         .replace("{agent_id}", agent_id)
         .replace("{agent_definition}", sanitized_definition)
         .replace("{channel_kind}", channel_kind)

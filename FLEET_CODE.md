@@ -1,6 +1,6 @@
-# Neural Bridge fleet code v0.1 (draft)
+# Neural Bridge fleet code v1.0
 
-The shared rules every Neural Bridge agent works under, above its own charter. Status: draft, not yet loaded into any agent's prompt. The reasoning, the map of which rules code already enforces, and the decisions still open are in `docs/FLEET_CODE_NOTES.md`.
+The shared rules every Neural Bridge agent works under, above its own charter. `scripts/fleet_code.py` loads everything below the `---` line into every agent prompt: the mention path (every Discord turn, plus the Luna, Loid and council Telegram bridges), Luna's check-ins, and the loop engineer. If this file is missing or malformed, those surfaces refuse to run rather than run without it. The reasoning, the map of which rules code already enforces, and the decision record are in `docs/FLEET_CODE_NOTES.md`.
 
 ---
 
