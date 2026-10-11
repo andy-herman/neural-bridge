@@ -19,7 +19,7 @@ The queue inverts that: producers write items, and the bot brings each one to An
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
 | capture | compile quarantine, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
-| alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | not yet, see shadow week | Acknowledge, Snooze 1 day |
+| alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | yes, since 2026-10-11 | Acknowledge, Snooze 1 day |
 
 In Telegram:
 
@@ -62,12 +62,14 @@ The pusher also writes `review-queue-status.json` beside the database. The failu
 
 ## Shadow week, then alerts go through the queue
 
-Alerts are queued from day one, but the bot pushes only the kinds in `health.DEFAULT_PUSH_KINDS` (captures), overridable with `NB_QUEUE_PUSH_KINDS`. For the first week the producers' existing Telegram messages remain the push, so nothing arrives twice, and `/queue` already lists the alerts.
+Alerts were queued from day one, but for the first week the bot pushed only captures and the producers' existing Telegram messages remained the push, so nothing arrived twice. The bot pushes the kinds in `health.DEFAULT_PUSH_KINDS`, overridable with `NB_QUEUE_PUSH_KINDS`.
 
-**Cutover** happens after a clean week, meaning:
+**Cutover** happened on 2026-10-11, after a clean week, meaning:
 
 - `health` passed every day;
-- every direct alert has a matching item (`python -m scripts.review_queue list --all --kind alert`).
+- every direct alert had a matching item (`python -m scripts.review_queue list --all --kind alert`).
+
+The week turned up one false alarm: the memory canary called Luna's and Echo's stores SILENT because other agents had run, though none of their readers had. Stores now name their readers (`readers` in `scripts/memory_canary.py`) and stay idle until one of them takes a turn.
 
 The steps:
 

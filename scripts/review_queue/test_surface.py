@@ -346,13 +346,13 @@ class TestHealth(unittest.TestCase):
         self.assertIn(f"{other.id} (gh exploded)", text)
         self.assertFalse(result["ok"])
 
-    def test_push_kinds_default_to_captures_until_the_shadow_week_ends(self):
+    def test_push_kinds_default_to_captures_and_alerts(self):
         import os
         saved = os.environ.pop(health.PUSH_KINDS_ENV, None)
         try:
-            self.assertEqual(health.push_kinds(), (st.CAPTURE,))
-            os.environ[health.PUSH_KINDS_ENV] = "capture, alert, bogus"
             self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT))
+            os.environ[health.PUSH_KINDS_ENV] = "capture, bogus"
+            self.assertEqual(health.push_kinds(), (st.CAPTURE,))
         finally:
             os.environ.pop(health.PUSH_KINDS_ENV, None)
             if saved is not None:
