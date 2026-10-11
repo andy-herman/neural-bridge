@@ -7,6 +7,9 @@ each one with buttons; every decision and its outcome is logged.
 
     store.py      SQLite store: items, append-only events, Telegram renders
     captures.py   compile quarantine producer, and the file/reject applier
+    questions.py  flush open-question producer, the answer applier, the backlog
+    actions.py    gated Discord actions (open_pr_with_changes) and their applier
+    appliers.py   what a decision does, per kind (bridge and CLI share it)
     render.py     Telegram card text and buttons (pure)
     surface.py    the pusher loop, button callbacks and /queue in Luna's bot
     health.py     read-back check (write, read, decide, confirm the event log)

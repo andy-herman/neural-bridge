@@ -4,13 +4,13 @@
 Flow:
   1. Agent emits `open_pr_with_changes` in its response.
   2. handlers.py validates the action (path traversal, repo allowlist,
-     agent permission, size caps) and stages a PRProposal in the STORE
-     instead of executing immediately.
-  3. Daemon posts a preview to Discord with a short id, asks Andy to
-     reply `approve <id>` (or `cancel <id>`) within the TTL.
+     agent permission, size caps) and stages it as an action item in the
+     review queue (scripts/review_queue/actions.py) instead of executing.
+  3. Daemon posts a preview to Discord with the item's id. Andy approves on
+     Telegram (the card in Luna's chat) or replies `approve <id>` /
+     `cancel <id>` in the channel, within a day.
   4. main.py's on_message intercepts those approval/cancel patterns
-     BEFORE mention routing and calls execute_approved_proposal() /
-     cancel_proposal().
+     BEFORE mention routing (handlers.handle_pr_approval).
   5. Execution: cd local clone → fetch → checkout default branch → pull
      → new branch → write files → git add+commit+push → gh pr create →
      return PR URL.
@@ -25,9 +25,9 @@ is staged (so Andy is never asked to approve a push the guard would refuse),
 again before execution touches the working tree, and finally screens exactly
 what the push would publish, after the commit and before `git push`.
 
-The store is in-memory only — proposals don't survive a daemon restart.
-If a proposal hasn't been approved within TTL_SECONDS, it's pruned and
-the next approval attempt finds nothing.
+Until 2026-10 proposals lived in an in-memory store for fifteen minutes and
+died with any daemon restart. The review queue holds them now, durably, for
+a day (actions.ACTION_TTL_SECONDS).
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ import subprocess as sp
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from scripts import outbound_guard
 
@@ -50,7 +49,6 @@ _logger = logging.getLogger("nb_discord.pr_proposals")
 
 # ---------- Constants ----------
 
-TTL_SECONDS = 15 * 60                # how long a proposal stays open for approval
 MAX_FILES_PER_PR = 10                # cap files per proposal
 MAX_FILE_BYTES = 200_000             # cap individual file size (~200KB)
 MAX_TOTAL_BYTES = 800_000            # cap aggregate payload (~800KB)
@@ -112,12 +110,6 @@ class PRProposal:
     pr_title: str
     pr_body: str
     created_at: float = field(default_factory=time.time)
-
-    def expires_at(self) -> float:
-        return self.created_at + TTL_SECONDS
-
-    def is_expired(self, now: float | None = None) -> bool:
-        return (now or time.time()) >= self.expires_at()
 
 
 def outbound_text(proposal: PRProposal) -> str:
@@ -254,70 +246,16 @@ def validate_open_pr_action(action: dict, *, agent_id: str, channel_id: int) -> 
 
 
 def _new_id() -> str:
-    """Short proposal id — short enough Andy can type it on mobile, long
-    enough to avoid collisions across the 15-min TTL window."""
+    """The proposal's own id. The review queue keys the action item by it;
+    Andy sees and types the queue item's id."""
     return secrets.token_hex(4)  # 8 hex chars
-
-
-# ---------- Store ----------
-
-class ProposalStore:
-    """In-memory map of pending proposals. Keyed by proposal_id, indexed
-    by (channel_id, agent_id) for the common 'most recent in this channel
-    by this agent' lookup."""
-
-    def __init__(self) -> None:
-        self._by_id: dict[str, PRProposal] = {}
-
-    def stage(self, proposal: PRProposal) -> str:
-        self._prune()
-        self._by_id[proposal.proposal_id] = proposal
-        return proposal.proposal_id
-
-    def get(self, proposal_id: str) -> PRProposal | None:
-        self._prune()
-        return self._by_id.get(proposal_id)
-
-    def pop(self, proposal_id: str) -> PRProposal | None:
-        self._prune()
-        return self._by_id.pop(proposal_id, None)
-
-    def peek_for_channel_agent(self, channel_id: int, agent_id: str) -> PRProposal | None:
-        """Most recent active proposal for this channel + agent. None if none."""
-        self._prune()
-        candidates = [
-            p for p in self._by_id.values()
-            if p.channel_id == channel_id and p.agent_id == agent_id
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda p: p.created_at)
-
-    def pop_for_channel_agent(self, channel_id: int, agent_id: str) -> PRProposal | None:
-        p = self.peek_for_channel_agent(channel_id, agent_id)
-        if p is None:
-            return None
-        return self.pop(p.proposal_id)
-
-    def all_active(self) -> Iterable[PRProposal]:
-        self._prune()
-        return list(self._by_id.values())
-
-    def _prune(self) -> None:
-        now = time.time()
-        expired = [pid for pid, p in self._by_id.items() if p.is_expired(now)]
-        for pid in expired:
-            del self._by_id[pid]
-
-
-STORE = ProposalStore()
 
 
 # ---------- Preview ----------
 
-def format_preview(proposal: PRProposal) -> str:
-    """Render the Discord preview block for a staged proposal."""
-    minutes = TTL_SECONDS // 60
+def format_preview(proposal: PRProposal, queue_id: str) -> str:
+    """Render the Discord preview block for a proposal staged as review
+    queue item `queue_id`."""
     files_block = "\n".join(
         f"  - `{path}` ({len(content.encode('utf-8')):,} bytes)"
         for path, content in proposal.files
@@ -329,8 +267,9 @@ def format_preview(proposal: PRProposal) -> str:
         f"- PR title: `{proposal.pr_title}`\n"
         f"- Files ({len(proposal.files)}):\n{files_block}\n"
         f"\n"
-        f"Reply `approve {proposal.proposal_id}` to ship, or `cancel {proposal.proposal_id}` to drop. "
-        f"Expires in {minutes} min. Plain `approve` / `cancel` also works if this is the only pending proposal."
+        f"Approve it on Telegram (the card in Luna's chat), or reply `approve {queue_id}` here to ship "
+        f"or `cancel {queue_id}` to drop. Expires in 24 hours. Plain `approve` / `cancel` also works "
+        f"if this is the only pending proposal."
     )
 
 

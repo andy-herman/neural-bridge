@@ -324,6 +324,30 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertIn("Chose X", log_file.read_text(encoding="utf-8"))
         self.assertIn("research sess-happy flushed", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
+    def _flush_with_questions(self, agent: str, questions: list[str], session: str = "sess-q") -> int:
+        data = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": questions,
+                           "proposed_concepts": []})
+        with patch("flush.subprocess.run", side_effect=self._mock_claude(data)):
+            return self._run_main(["--agent", agent, "--session-id", session,
+                                   "--transcript", str(self.transcript)])
+
+    def test_open_questions_reach_the_review_queue_for_attributed_agents_only(self):
+        from scripts.review_queue import store as st
+        db = self.tmp_path / "queue.db"
+        with patch.dict(os.environ, {st.DB_ENV: str(db)}):
+            self.assertEqual(self._flush_with_questions("research", ["Is the CTP draft final?", "(none)"]), 0)
+            self.assertEqual(self._flush_with_questions(flush.schema.UNATTRIBUTED, ["Anything?"], "s2"), 0)
+            items = st.Store(db).items()
+        self.assertEqual([(i.kind, i.agent, i.payload["question"]) for i in items],
+                         [(st.QUESTION, "research", "Is the CTP draft final?")])
+
+    def test_a_broken_queue_never_costs_the_flush(self):
+        with patch("scripts.review_queue.questions.raise_from_flush", side_effect=RuntimeError("db locked")):
+            self.assertEqual(self._flush_with_questions("research", ["Is it final?"]), 0)
+        log_file = flush.DAILY_LOGS_DIR / "research" / f"{flush.utc_today()}.md"
+        self.assertTrue(log_file.exists(), "the daily log is still written")
+        self.assertIn("questions:0 RuntimeError: db locked", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+
     def test_empty_session_skipped(self):
         empty_json = json.dumps({
             "decisions": [], "findings": [], "open_questions": [], "proposed_concepts": []
