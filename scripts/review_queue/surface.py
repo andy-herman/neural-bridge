@@ -16,7 +16,7 @@ Button presses are checked against the allowlist themselves; a press from
 anyone else does nothing and is logged.
 
 Which kinds are pushed is health.push_kinds(): captures from day one, alerts
-after the shadow week (docs/REVIEW_QUEUE.md).
+since the shadow week ended (docs/REVIEW_QUEUE.md).
 """
 
 from __future__ import annotations

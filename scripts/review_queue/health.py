@@ -34,11 +34,11 @@ APPLYING_MAX_AGE = 10 * 60
 
 STATUS_ENV = "NB_REVIEW_QUEUE_STATUS"
 
-# Which kinds Luna's bot pushes as cards. Alerts join after a clean shadow week
-# (docs/REVIEW_QUEUE.md): until then the producers' own Telegram messages stay
-# the push, so nothing arrives twice, and /queue already lists the alerts.
+# Which kinds Luna's bot pushes as cards. Alerts joined captures on 2026-10-11,
+# after a clean shadow week (docs/REVIEW_QUEUE.md); the producers' own Telegram
+# sends were removed at the same time, so nothing arrives twice.
 PUSH_KINDS_ENV = "NB_QUEUE_PUSH_KINDS"
-DEFAULT_PUSH_KINDS: tuple[str, ...] = (st.CAPTURE,)
+DEFAULT_PUSH_KINDS: tuple[str, ...] = (st.CAPTURE, st.ALERT)
 
 
 def push_kinds() -> tuple[str, ...]:

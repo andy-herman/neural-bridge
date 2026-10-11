@@ -41,6 +41,11 @@ agent traffic in the window, retrieve-stage stores are reported as IDLE. That
 distinction matters here specifically, because this fleet genuinely does sit
 dormant for weeks at a time, and a canary that fires every quiet day is a
 canary that gets muted and then misses the real outage.
+
+Some stores are read by only a few agents (Luna's notes by Luna alone), so
+fleet-wide traffic is not enough: a week of Loid turns and Luna check-ins once
+made Luna's untouched stores read SILENT. A store that names its readers is
+IDLE until one of those agents takes a turn.
 """
 
 from __future__ import annotations
@@ -59,12 +64,16 @@ from scripts.discord_bot import memory_telemetry as mem  # noqa: E402
 # Stores the canary knows about, with the stage that proves the layer is alive.
 # `traffic_gated` means the store only produces events when an agent actually
 # runs, so silence is expected during a quiet window and is reported as IDLE.
+# `readers` narrows that to the agents whose turns read the store, as wired in
+# scripts/discord_bot/mention.py; silence is only alarming once one of them ran.
 # lessons_digest was removed 2026-08-16. It resolved for 1 request in 7 over
 # its instrumented life and is retired; see docs/MEMORY_CONSOLIDATION.md.
 WATCHED: dict[str, dict] = {
-    "luna_notes":       {"stage": mem.RETRIEVE, "traffic_gated": True},
-    "luna_live_state":  {"stage": mem.RETRIEVE, "traffic_gated": True},
-    "echo_voice":       {"stage": mem.RETRIEVE, "traffic_gated": True},
+    "luna_notes":       {"stage": mem.RETRIEVE, "traffic_gated": True, "readers": ("luna",)},
+    "luna_live_state":  {"stage": mem.RETRIEVE, "traffic_gated": True, "readers": ("luna",)},
+    # mention.ECHO_VOICE_AGENTS; a test keeps the two in step.
+    "echo_voice":       {"stage": mem.RETRIEVE, "traffic_gated": True,
+                         "readers": ("content", "luna", "social")},
     "honcho_peer_card": {"stage": mem.RETRIEVE, "traffic_gated": True},
     "honcho_capture":   {"stage": mem.WRITE,    "traffic_gated": True},
     # Layer 4 (the wiki) was uninstrumented until 2026-09-22, which is how a
@@ -100,8 +109,12 @@ RATE_MIN_SAMPLES = 4
 
 
 def evaluate(summary: dict[str, dict], *, had_traffic: bool,
+             turns: dict[str, int] | None = None,
              watched: dict[str, dict] | None = None) -> dict[str, dict]:
     """Classify each watched store. Pure, so it is testable without a log file.
+
+    `turns` is agent_turns() for the window. When given, a store with
+    `readers` is IDLE unless one of its readers took a turn.
 
     Returns {store: {"status", "reason", "ok", "failed"}}.
     """
@@ -110,7 +123,12 @@ def evaluate(summary: dict[str, dict], *, had_traffic: bool,
     for store, cfg in watched.items():
         row = summary.get(store)
         if not row or row.get("total", 0) == 0:
-            if cfg.get("traffic_gated") and not had_traffic:
+            readers = cfg.get("readers")
+            if cfg.get("traffic_gated") and readers and turns is not None \
+                    and not any(turns.get(a) for a in readers):
+                out[store] = {"status": IDLE, "ok": 0, "failed": 0,
+                              "reason": f"no turns by {', '.join(readers)} in window"}
+            elif cfg.get("traffic_gated") and not had_traffic:
                 out[store] = {"status": IDLE, "ok": 0, "failed": 0,
                               "reason": "no agent traffic in window"}
             else:
@@ -155,6 +173,23 @@ def had_agent_traffic(summary: dict[str, dict],
         for store, row in summary.items()
         if watched.get(store, {}).get("traffic_gated", True)
     )
+
+
+def agent_turns(events: list[dict]) -> dict[str, int]:
+    """Turns per agent in the window. mention.py records one progress_log
+    RETRIEVE per turn, for every agent. hooks/session_start.py records the same
+    event for Claude Code sessions (detail "session_start: ..."); those never
+    read Luna's or Echo's stores, so they are not turns here.
+    """
+    out: dict[str, int] = {}
+    for e in events:
+        if e.get("store") != "progress_log" or e.get("stage") != mem.RETRIEVE:
+            continue
+        if str(e.get("detail") or "").startswith("session_start:"):
+            continue
+        agent = e.get("agent_id") or "?"
+        out[agent] = out.get(agent, 0) + 1
+    return out
 
 
 def format_report(results: dict[str, dict], window_days: int,
@@ -384,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(answers, indent=2) if args.json else format_gates(answers, args.days))
             return 0
         summary = mem.summarize(events)
-        results = evaluate(summary, had_traffic=had_agent_traffic(summary))
+        results = evaluate(summary, had_traffic=had_agent_traffic(summary),
+                           turns=agent_turns(events))
     except Exception as exc:  # canary infrastructure itself failed
         print(f"memory canary could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
