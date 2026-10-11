@@ -18,7 +18,7 @@ Neural Bridge is the substrate where the work compounds.
 
 ```
 1. Agents          fourteen .md plugin files, each a specialist
-2. Skills          inherited from user-level Claude Code settings
+2. Skills          plugin-shipped standards/skills + user-level skills
 3. Transport       Discord (mention any agent from any device)
 4. Shared state    knowledge/ wiki + daily-logs + filing gate + lint
 5. Orchestration   Discord daemon + senior-pm + cross-agent handoff
@@ -28,9 +28,9 @@ Neural Bridge is the substrate where the work compounds.
 
 | Agent | Role |
 |---|---|
-| `luna` | Executive assistant: calendar and Gmail via MCP, proactive scheduling, handoffs |
+| `luna` | AI operations colleague: read-only calendar/inbox CLIs, recommendations and approved handoffs |
 | `research` | Deep reading, citations, threat model write-ups |
-| `teaching-prep` | INFO 310 lecture material, slide outlines, exercises |
+| `teaching-prep` | Professor: INFO 310A-only instructional peer, source-grounded review and authorized corpus notes |
 | `content` | Long-form drafts for the blog and LinkedIn |
 | `social` | Short-form posts, X drafts, social copy |
 | `senior-pm` | Issue triage, kanban moves, weekly summaries |
@@ -45,6 +45,10 @@ Neural Bridge is the substrate where the work compounds.
 
 `@` the registered identities in `#neural-bridge` on Discord. They read the relevant context, respond, and can hand off to each other (including multi-round `/squad-discuss` sessions).
 
+### Companion standard
+
+All fourteen charters preload one [plugin-shipped conversation standard](plugins/neural-bridge-core/skills/companion-standard/SKILL.md). NB wrappers also load its full body explicitly for Discord, Luna/Loid Telegram, Council Loid and Luna check-ins; missing or unreadable contract setup stops before model invocation. Luna, Loid and Professor keep distinct voices and current authority. Yor's external Hermes path is unchanged. [Loading, boundaries and design-test limits](docs/COMPANION_STANDARD.md) distinguish source behavior from native-plugin or generated-output verification.
+
 ## Memory pipeline
 
 Daily logs are cheap and per-agent. Concepts are expensive and cross-agent. Promoting a daily log entry into a concept article passes through a filing gate that asks one question: **PROMOTE, QUARANTINE, or REJECT?**
@@ -55,11 +59,11 @@ Background and threat model: [Memory Poisoning in Personal Agentic AI Substrates
 
 ## Discord orchestrator
 
-Thirteen bot identities, one daemon, one asyncio loop. Each agent has its own Discord application and Message Content Intent. A separate Telegram bridge carries Luna DMs and Loid (voice and text); Honcho supplies a shared peer-memory card of Andy across all agents. The daemon:
+Thirteen bot identities, one daemon, one asyncio loop. Each agent has its own Discord application and Message Content Intent. Separate Telegram bridges carry Luna DMs and Loid (transcribed voice and text); an available Honcho card supplies bounded context, not identical full memory across agents or Hermes. The daemon:
 
 - Routes `@agent` mentions to the right specialist
-- Loads the agent's plugin definition into the prompt
-- Calls `claude -p` with the right tool allowlist (Read / Write / Edit / WebSearch / WebFetch — never Bash)
+- Loads the shared companion standard and role body into the prompt
+- Calls `claude -p` with the existing per-agent tool allowlist (most roles have no Bash; Luna/Loid CLI grants remain narrow)
 - Extracts a single fenced ` ```actions ` block from the reply, validates it, executes via `gh`
 - Posts the response back as the agent's bot
 - Tracks per-channel turn budget so cross-agent chains can't run away
@@ -82,6 +86,7 @@ application-level Fleet heartbeat. No operational endpoint is added.
 .claude-plugin/marketplace.json    plugin marketplace declaration
 plugins/neural-bridge-core/        the core plugin
   agents/                          fourteen specialist .md definitions
+  skills/companion-standard/       single shared conversation contract
 hooks/                             session_start, user_prompt_submit, session_end, flush, wiki_recall, guards, schema
 scripts/                           compile (filing gate), lint, discord_bot/
   discord_bot/                     daemon, mention routing, GitHub actions

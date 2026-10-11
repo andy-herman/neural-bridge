@@ -314,6 +314,7 @@ async def _invoke_loid(text: str, history: list[dict]) -> tuple[bool, str]:
     result = await run_agent_turn(
         TurnRequest(
             agent_id="loid",
+            transport="telegram",
             conversation_key=0,
             message_content=text,
             channel_kind="COUNCIL (shared Telegram room with Andy and Yor)",

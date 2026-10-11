@@ -10,8 +10,10 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 from .claude_invoke import sanitize_untrusted_text
+from .companion import load_companion_standard
 from . import honcho_client
 from . import memory_telemetry as _mem
 from . import progress_log as _progress
@@ -46,7 +48,7 @@ DISCORD_CHUNK_BUDGET = 1900
 
 # Per-agent response cap override. Agents not listed fall back to MAX_RESPONSE_CHARS.
 # Long values trigger chunking across multiple Discord messages (DISCORD_CHUNK_BUDGET each).
-# Agents are still told (via the mention prompt) to target ~1500 chars; these caps are the
+# The prompt reports the effective cap, not a universal target; these caps are the
 # truncation safety valve when an agent legitimately has more to say. Discord chunker handles
 # the multi-message split. Cap > DISCORD_CHUNK_BUDGET means the response WILL be chunked.
 #
@@ -623,9 +625,12 @@ def allowed_tools_for(agent_id: str) -> str | None:
 
 
 def load_agent_definition(agent_id: str, agents_dir: Path = AGENTS_DIR) -> str:
-    """Read plugins/neural-bridge-core/agents/<agent-id>.md and strip the
-    YAML frontmatter. Returns the body — the agent's role definition,
-    operating rules, voice, etc."""
+    """Load the required shared contract and role body, stripping frontmatter.
+
+    Model/tools/skills metadata is not deployed by this wrapper. The shared
+    skill body is loaded explicitly; a missing or unreadable contract raises.
+    """
+    standard = load_companion_standard()
     path = agents_dir / f"{agent_id}.md"
     if not path.exists():
         return f"_(agent definition not found at {path.name})_"
@@ -635,7 +640,24 @@ def load_agent_definition(agent_id: str, agents_dir: Path = AGENTS_DIR) -> str:
         end = text.find("\n---\n", 4)
         if end != -1:
             text = text[end + 5:]
-    return text.strip()
+    return f"<companion-standard>\n{standard}\n</companion-standard>\n\n{text.strip()}"
+
+
+SURFACE_CAPABILITIES = {
+    "discord": (
+        "This is Discord. Structured actions and attachments are available only "
+        "under the existing role, channel, allowlist and owner-approval rules below. "
+        "Do not dispatch a handoff unless Andy requested or approved it. A Discord "
+        "DM handoff uses Luna's existing helper, not an inline mention."
+    ),
+    "telegram": (
+        "This is Telegram, not Discord. This conversation path is text-only: "
+        "do not emit actions, attachments or handoff_to_squad blocks. It does not "
+        "execute GitHub actions or Discord mentions. Give an owner-delivered brief "
+        "or draft instead of claiming a dispatch. The Discord archive sections "
+        "below do not apply; use supplied history and only otherwise granted context."
+    ),
+}
 
 
 def format_discord_history(messages: list[dict]) -> str:
@@ -681,7 +703,11 @@ def build_mention_prompt(
     history: list[dict],
     message_content: str,
     conversation_log_path: str = "",
+    transport: Literal["discord", "telegram"] = "discord",
+    response_char_cap: int | None = None,
 ) -> str:
+    if transport not in ("discord", "telegram"):
+        raise ValueError("Unsupported conversation transport.")
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
     sanitized_definition = sanitize_untrusted_text(agent_definition, "agent-definition")
@@ -696,6 +722,9 @@ def build_mention_prompt(
         .replace("{agent_id}", agent_id)
         .replace("{agent_definition}", sanitized_definition)
         .replace("{channel_kind}", channel_kind)
+        .replace("{transport}", "Discord" if transport == "discord" else "Telegram")
+        .replace("{surface_capabilities}", SURFACE_CAPABILITIES[transport])
+        .replace("{response_char_cap}", str(response_char_cap or max_response_chars_for(agent_id)))
         .replace("{discord_history}", history_block)
         .replace("{message}", sanitized_message)
         .replace("{conversation_log_path}", conversation_log_path)
@@ -747,11 +776,9 @@ def build_mention_prompt(
     # removal. See docs/MEMORY_CONSOLIDATION.md gate G1.
 
     # Every agent: prepend the Honcho peer card — LLM-extracted persistent
-    # observations about Andy, shared across all agents in this workspace and
-    # with Yor (the Hermes-side thinking-partner agent). Each agent contributes
-    # observations from its own perspective via directional mode; the peer-card
-    # facts compound. This is the outermost layer, so it reads as the
-    # foundational "who is this person" context before anything more recent.
+    # observations about Andy available to this runtime. An injected card is
+    # bounded context, not proof of identical full memory across agents/Hermes.
+    # This is the outermost layer before anything more recent.
     # No-ops if Honcho is unreachable (see honcho_client._enabled / _get_client).
     honcho_prefix = honcho_client.get_peer_card_context(agent_id)
     if honcho_prefix:

@@ -295,6 +295,7 @@ async def _process_message(
     result = await run_agent_turn(
         TurnRequest(
             agent_id=AGENT_ID,
+            transport="telegram",
             conversation_key=chat_id,
             message_content=text,
             channel_kind="DM",
@@ -306,7 +307,7 @@ async def _process_message(
 
     if result.setup_error:
         log(result.setup_error)
-        await message.reply_text("_(internal: mention prompt missing)_")
+        await message.reply_text(f"_(Conversation setup failed: {result.setup_error})_")
         return
     if not result.ok:
         await message.reply_text(f"_(I hit an error: `{result.error_reason[:200]}`. Try again.)_")

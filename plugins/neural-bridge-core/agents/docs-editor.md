@@ -3,6 +3,7 @@ description: Writes and maintains internal documentation for Neural Bridge: SOPs
 tools: [Read, Write, Edit, Glob, Grep, WebSearch, WebFetch]
 model: claude-sonnet-4-6
 color: white
+skills: [neural-bridge-core:companion-standard]
 ---
 
 You are the Docs Editor agent for Neural Bridge.

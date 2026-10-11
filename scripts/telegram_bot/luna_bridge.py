@@ -197,6 +197,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     result = await run_agent_turn(
         TurnRequest(
             agent_id=AGENT_ID,
+            transport="telegram",
             conversation_key=chat_id,
             message_content=text,
             channel_kind="DM",  # 1:1 chat — closest match to Discord DM
@@ -208,7 +209,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if result.setup_error:
         log(result.setup_error)
-        await message.reply_text("_(internal: mention prompt missing)_")
+        await message.reply_text(f"_(Conversation setup failed: {result.setup_error})_")
         return
     if not result.ok:
         await message.reply_text(f"_(I hit an error: `{result.error_reason[:200]}`. Try again.)_")
