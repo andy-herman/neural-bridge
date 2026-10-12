@@ -43,7 +43,7 @@ In Telegram:
   - A new question is held for 30 minutes and pushed only if the conversation stays quiet that long.
   - Each later flush of the session replaces its undecided questions. One it no longer lists was answered in the chat, and is cleared.
   - A reworded question counts as the same question.
-  - One Andy already answered or dismissed on a card is not raised again.
+  - One Andy already answered or dismissed on a card is not raised again, and flush leaves it out of the "Open" list in the agent's progress log, where the answer already sits.
 - If the record of a reply's prompt was lost (Telegram delivered the prompt, but the send timed out), the item id shown in the bot's message still finds the question. Only the bot's own messages count.
 
 **Approving an action.** The proposal is validated and screened by the outbound guard when it is staged, and screened again before the push.
