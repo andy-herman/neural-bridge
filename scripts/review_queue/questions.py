@@ -17,7 +17,9 @@ the same session, so a question the agent has just asked Andy in the chat is
   - a question worded like one already live in the session is the same
     question, and one worded like one Andy already answered or dismissed is
     not raised again (flush rewords questions from turn to turn, and an
-    answer given on a card never reaches the session's transcript).
+    answer given on a card never reaches the session's transcript). For the
+    same reason, unanswered() keeps such a question out of the "Open" list
+    flush writes to the agent's progress log.
 
 Answer. Andy replies to the card in Telegram (or runs the CLI `answer`). The
 applier appends a dated entry to the agent's progress.md, so its next session
@@ -105,6 +107,25 @@ def same_question(a: str, b: str) -> bool:
     return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= SAME_QUESTION
 
 
+_DECIDED = (st.DECIDED, st.APPLYING, st.APPLIED, st.APPLY_FAILED)
+
+
+def _decided_in_session(store: st.Store, agent: str, session_id: str) -> list[st.Item]:
+    return [i for i in store.items(states=_DECIDED, kinds=(st.QUESTION,))
+            if i.source == SOURCE and i.agent == agent and i.payload.get("session_id") == session_id]
+
+
+def unanswered(agent: str, session_id: str, open_questions: list[str], *,
+               store: st.Store | None = None) -> list[str]:
+    """`open_questions` without the ones Andy already answered or dismissed on
+    a card in this session."""
+    if not agent or agent == UNATTRIBUTED or not open_questions:
+        return list(open_questions)
+    handled = [str(i.payload.get("question", "")) for i in
+               _decided_in_session(store or st.Store(), agent, session_id)]
+    return [q for q in open_questions if not any(same_question(q, h) for h in handled)]
+
+
 def raise_from_flush(agent: str, session_id: str, open_questions: list[str], *,
                      complete: bool = True, store: st.Store | None = None,
                      now: int | None = None) -> list[st.Item]:
@@ -122,7 +143,7 @@ def raise_from_flush(agent: str, session_id: str, open_questions: list[str], *,
             if i.source == SOURCE and i.agent == agent and i.payload.get("session_id") == session_id]
     live = [i for i in mine if i.state in (st.OPEN, st.SNOOZED) and i.resolved_at is None]
     # Decided by Andy. A cleared (superseded) one may come back if it resurfaces.
-    handled = [i for i in mine if i.state in (st.DECIDED, st.APPLYING, st.APPLIED, st.APPLY_FAILED)]
+    handled = [i for i in mine if i.state in _DECIDED]
     still_open: set[str] = set()
     created = []
     for q in open_questions:

@@ -341,6 +341,23 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertEqual([(i.kind, i.agent, i.payload["question"]) for i in items],
                          [(st.QUESTION, "research", "Is the CTP draft final?")])
 
+    def test_progress_open_list_skips_questions_answered_on_a_card(self):
+        # 2026-10-12: Andy answered Luna's question on its card; the next flush
+        # still wrote it under "Open" in her progress log, right below the answer.
+        from scripts.review_queue import questions, store as st
+        db = self.tmp_path / "queue.db"
+        agents = self.tmp_path / "Agents"
+        agents.mkdir()
+        with patch.dict(os.environ, {st.DB_ENV: str(db)}), \
+                patch("scripts.discord_bot.progress_log.AGENTS_BASE", agents):
+            [item] = questions.raise_from_flush("research", "sess-q", ["Is the CTP draft final yet?"])
+            st.Store(db).decide(item.id, st.ANSWER, actor="t", data={"answer": "Yes."})
+            self._flush_with_questions("research", ["Is the CTP draft final yet, or still in review?",
+                                                    "Who owns the CAF summary?"])
+        text = (agents / "research" / "progress.md").read_text(encoding="utf-8")
+        self.assertIn("Who owns the CAF summary?", text)
+        self.assertNotIn("still in review", text)
+
     def test_a_broken_queue_never_costs_the_flush(self):
         with patch("scripts.review_queue.questions.raise_from_flush", side_effect=RuntimeError("db locked")):
             self.assertEqual(self._flush_with_questions("research", ["Is it final?"]), 0)

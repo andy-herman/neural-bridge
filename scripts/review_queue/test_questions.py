@@ -122,6 +122,22 @@ class TestConversations(StoreCase):
         self.assertEqual(self.store.get(mine.id).state, st.SUPERSEDED)
         self.assertEqual(self.store.get(other.id).state, st.SNOOZED)
 
+    def test_unanswered_drops_what_was_answered_or_dismissed_on_a_card(self):
+        answered, dismissed, waiting = self.flush(["Draft a nudge to the recruiter before the Friday flight?",
+                                                   "Move the dentist to next week?",
+                                                   "Which calendar gets the school dates?"])
+        self.store.decide(answered.id, st.ANSWER, actor="t", data={"answer": "No."})
+        self.store.decide(dismissed.id, st.REJECT, actor="t")
+        listed = ["Draft a nudge (politely) to the recruiter before the Friday flight?",
+                  "Move the dentist appointment to next week?",
+                  "Which calendar gets the school dates?",
+                  "Book the airport ride?"]
+        self.assertEqual(q.unanswered("luna", "s1", listed, store=self.store),
+                         ["Which calendar gets the school dates?", "Book the airport ride?"])
+        self.assertEqual(q.unanswered("luna", "s2", listed, store=self.store), listed,
+                         "another session's answers do not apply")
+        self.assertEqual(q.unanswered(q.UNATTRIBUTED, "s1", listed, store=self.store), listed)
+
     def test_same_question(self):
         self.assertTrue(q.same_question("Ship the post Monday?", "ship the post on Monday"))
         self.assertFalse(q.same_question("Ship the post Monday?", "Which calendar gets school dates?"))

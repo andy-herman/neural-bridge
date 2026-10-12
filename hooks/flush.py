@@ -152,7 +152,7 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
             session_id=session_id,
             decisions=data.get("decisions", []),
             findings=data.get("findings", []),
-            open_questions=data.get("open_questions", []),
+            open_questions=_still_open(agent, session_id, data.get("open_questions", [])),
             source=hook_event,
         )
         if not entry:
@@ -170,6 +170,20 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
         return ok, reason
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def _still_open(agent: str, session_id: str, open_questions: list[str]) -> list[str]:
+    """The session's open questions minus those Andy already answered or
+    dismissed on a review queue card. An answer given there lands in the
+    progress log but never in the transcript, so flush keeps listing the
+    question as open. If the queue cannot be read, nothing is dropped."""
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        return questions.unanswered(agent, session_id, open_questions)
+    except Exception:
+        return list(open_questions)
 
 
 def _queue_questions(agent: str, data: dict, session_id: str, *, complete: bool = True) -> tuple[int, str]:
