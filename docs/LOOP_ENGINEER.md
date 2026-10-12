@@ -23,7 +23,9 @@ agent-ready ──claim──▶ agent-running ──PR opened──▶ agent-re
 - **agent-running** — claimed, in progress. Claiming is an atomic GitHub label
   swap, so two processes never grab the same issue.
 - **agent-review** — a draft PR is open and green (no new test failures). Yours
-  to review and merge. Nothing auto-merges, ever.
+  to review and merge: it arrives as a card in Luna's Telegram chat (the review
+  queue), with Merge once CI passes and Close. Nothing auto-merges, ever; a
+  merge is always your two taps, on the commit you saw (docs/REVIEW_QUEUE.md).
 - **agent-blocked** — needs a human decision (today: the diff exceeded the size
   cap). The branch is kept for inspection.
 - **agent-failed** — escalated: tests still failing after the strike budget, an

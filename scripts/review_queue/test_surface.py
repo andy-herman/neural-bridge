@@ -85,7 +85,7 @@ class SurfaceCase(unittest.IsolatedAsyncioTestCase):
             store=self.store, repo=tmp, chat_ids=lambda: {ANDY}, log=self.logs.append,
             push_kinds=(st.CAPTURE,),
             appliers={st.CAPTURE: apply_capture, st.ALERT: lambda item: (True, "")},
-            capture_sync=lambda: ([], []))
+            capture_sync=lambda: ([], []), pr_sync=lambda: ([], []))
         self.context = SimpleNamespace(bot=self.bot)
         self._status_env = health.STATUS_ENV
         import os
@@ -350,7 +350,7 @@ class TestHealth(unittest.TestCase):
         import os
         saved = os.environ.pop(health.PUSH_KINDS_ENV, None)
         try:
-            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION))
+            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW))
             os.environ[health.PUSH_KINDS_ENV] = "capture, bogus"
             self.assertEqual(health.push_kinds(), (st.CAPTURE,))
         finally:
@@ -390,7 +390,7 @@ class SliceBCase(SurfaceCase):
         self.surface = QueueSurface(
             store=self.store, repo=Path(self._tmp.name), chat_ids=lambda: {ANDY}, log=self.logs.append,
             push_kinds=(st.QUESTION, st.ACTION),
-            appliers={st.QUESTION: record, st.ACTION: record}, capture_sync=lambda: ([], []))
+            appliers={st.QUESTION: record, st.ACTION: record}, capture_sync=lambda: ([], []), pr_sync=lambda: ([], []))
 
     def question(self, agent="luna"):
         item, _ = self.store.raise_item(source="flush", key=f"q-{agent}", kind=st.QUESTION,
@@ -525,6 +525,90 @@ class TestActions(SliceBCase):
         self.assertEqual(self.store.get(item.id).state, st.SUPERSEDED)
         self.assertIn("Expired undecided", render.card_text(self.store.get(item.id)))
 
+
+
+# ---------- slice C: loop-engineer PR reviews ----------
+
+class TestPrReviews(SurfaceCase):
+    SHA = "a1b2c3d" + "0" * 33
+
+    def setUp(self):
+        super().setUp()
+        self.merged: list[tuple[str, dict]] = []
+        self.synced = 0
+
+        def record(item):
+            self.merged.append((item.verb, dict(item.payload)))
+            return True, "https://github.com/andy-herman/neural-bridge/pull/212"
+
+        def pr_sync():
+            self.synced += 1
+            return [], []
+
+        self.surface = QueueSurface(
+            store=self.store, repo=Path(self._tmp.name), chat_ids=lambda: {ANDY}, log=self.logs.append,
+            push_kinds=(st.PR_REVIEW,), appliers={st.PR_REVIEW: record},
+            capture_sync=lambda: ([], []), pr_sync=pr_sync)
+
+    def pr_item(self, checks="green", sha=None):
+        sha = sha or self.SHA
+        item, _ = self.store.raise_item(
+            source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW,
+            title="PR #212: fix: retry the flush (#88)", detail=f"Issue #88 · checks · head {sha[:7]}",
+            ref="https://github.com/andy-herman/neural-bridge/pull/212",
+            payload={"repo": "neural-bridge", "number": 212, "issue": 88, "head_sha": sha,
+                     "checks": checks, "mergeable": "MERGEABLE", "draft": True})
+        return item
+
+    async def confirm(self, item, shown_text):
+        query = FakeQuery(ANDY, render.callback(item.id, "approve!"))
+        query.message.text = shown_text
+        await self.surface.on_callback(SimpleNamespace(callback_query=query), self.context)
+        await self.surface.apply_pending()
+        return query
+
+    async def test_merge_is_hidden_until_the_checks_pass(self):
+        item = self.pr_item(checks="pending")
+        await self.surface.tick(self.bot, now=T0)
+        self.assertEqual(self.synced, 1, "the tick syncs the loop's PRs")
+        self.assertEqual(FakeBot.buttons(self.bot.sent[0]["reply_markup"]),
+                         [render.callback(item.id, "reject"), render.callback(item.id, "snooze")])
+        self.assertIn("once the checks pass", self.bot.sent[0]["text"])
+        query = await self.press(render.callback(item.id, "approve"))
+        self.assertEqual(query.answers, ["Merge appears once the checks pass."])
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_two_taps_merge_exactly_the_commit_on_the_confirm_screen(self):
+        item = self.pr_item()
+        self.assertIn(render.callback(item.id, "approve"), [d for row in render.keyboard(item) for _, d in row])
+        await self.press(render.callback(item.id, "approve"))
+        screen = self.bot.edits[-1]["text"]
+        self.assertIn("deploys the fleet", screen)
+        self.assertIn("head a1b2c3d", screen)
+        await self.confirm(item, shown_text="... head a1b2c3d ...")
+        self.assertEqual(self.merged, [(st.APPROVE, {**item.payload, "approved_sha": self.SHA})])
+        self.assertEqual(self.store.get(item.id).state, st.APPLIED)
+        self.assertIn("Merged", render.card_text(self.store.get(item.id)))
+
+    async def test_a_push_between_the_two_taps_is_not_merged(self):
+        item = self.pr_item()
+        await self.press(render.callback(item.id, "approve"))
+        new = "f9e8d7c" + "1" * 33
+        self.store.raise_item(source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW,
+                              title=item.title, detail=f"Issue #88 · head {new[:7]}", ref=item.ref,
+                              payload={**item.payload, "head_sha": new})
+        query = await self.confirm(item, shown_text="... head a1b2c3d ...")
+        self.assertEqual(query.answers, ["The PR changed since that screen. Look again."])
+        self.assertEqual(self.merged, [])
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_close_takes_two_taps(self):
+        item = self.pr_item(checks="failing")
+        await self.press(render.callback(item.id, "reject"))
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+        self.assertIn("agent-blocked", self.bot.edits[-1]["text"])
+        await self.press(render.callback(item.id, "reject!"))
+        self.assertEqual(self.merged[0][0], st.REJECT)
 
 if __name__ == "__main__":
     unittest.main()

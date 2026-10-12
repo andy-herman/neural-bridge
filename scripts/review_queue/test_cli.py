@@ -127,5 +127,17 @@ class TestCli(unittest.TestCase):
         [kept] = st.Store(self.db).items(kinds=(st.QUESTION,))
         self.assertEqual((kept.agent, kept.payload["question"]), ("research", "Keep this one?"))
 
+    def test_approving_a_pr_review_records_the_head_and_needs_green(self):
+        store = st.Store(self.db)
+        sha = "a1b2c3d" + "0" * 33
+        item, _ = store.raise_item(source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW,
+                                   title="PR #212", payload={"number": 212, "head_sha": sha,
+                                                             "checks": "pending", "mergeable": "MERGEABLE"})
+        self.assertEqual(self.run_cli("decide", item.id, "approve")[0], 1, "not while checks run")
+        store.raise_item(source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW, title="PR #212",
+                         payload={"number": 212, "head_sha": sha, "checks": "green", "mergeable": "MERGEABLE"})
+        self.assertEqual(self.run_cli("decide", item.id, "approve")[0], 0)
+        self.assertEqual(st.Store(self.db).get(item.id).payload["approved_sha"], sha)
+
 if __name__ == "__main__":
     unittest.main()

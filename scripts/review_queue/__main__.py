@@ -151,7 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "decide":
-        ok = store.decide(args.id, args.verb, actor=actor, note=args.note)
+        data = None
+        item = store.get(args.id)
+        if item is not None and item.kind == st.PR_REVIEW and args.verb == st.APPROVE:
+            from scripts.review_queue import pr_reviews
+            if not pr_reviews.mergeable_now(item.payload):
+                print(f"not mergeable yet: {item.detail}", file=sys.stderr)
+                return 1
+            # The head `show` displayed is the one that gets merged.
+            data = {"approved_sha": item.payload.get("head_sha", "")}
+        ok = store.decide(args.id, args.verb, actor=actor, note=args.note, data=data)
         print("recorded; Luna's bridge applies it within a minute" if ok
               else "not waiting on a decision (already decided, cleared, or unknown)")
         return 0 if ok else 1

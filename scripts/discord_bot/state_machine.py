@@ -1,13 +1,22 @@
 """GitHub label state machine for Neural Bridge issues.
 
-Six states from the prior PM-Led Agent Workflow:
+Eight states: six from the prior PM-Led Agent Workflow, two from the loop engineer:
 
     agent-inbox    → not yet picked up
     agent-ready    → senior-pm has triaged, ready for specialist pickup
     agent-running  → specialist is actively working
     needs-human    → paused for Andy specifically (decision, info, secret)
-    agent-review   → work done, awaiting senior-pm QA
+    agent-review   → work done, awaiting review (a loop-engineer PR waits as a
+                     card in Andy's review queue)
+    agent-blocked  → the loop engineer stopped for a human decision (diff over
+                     the cap, or Andy closed its PR from the queue)
+    agent-failed   → the loop engineer escalated (strikes spent, test tampering,
+                     infra error)
     agent-done     → closed (issue is also closed via gh issue close)
+
+One vocabulary for both the Discord side and scripts/loop_engineer/: the two
+loop states are listed here so triage and label handling know every state an
+issue can be in.
 
 Plus tag labels that travel orthogonally:
     pm-managed     → created via PM intake (set on issue creation)
@@ -36,6 +45,8 @@ STATE_LABELS = (
     "agent-running",
     "needs-human",
     "agent-review",
+    "agent-blocked",
+    "agent-failed",
     "agent-done",
 )
 
@@ -44,9 +55,11 @@ STATE_LABEL_SET = set(STATE_LABELS)
 CANONICAL_TRANSITIONS = {
     "agent-inbox": {"agent-ready", "needs-human"},
     "agent-ready": {"agent-running", "needs-human"},
-    "agent-running": {"agent-review", "needs-human"},
+    "agent-running": {"agent-review", "needs-human", "agent-blocked", "agent-failed"},
     "needs-human": {"agent-ready", "agent-running", "agent-done"},
-    "agent-review": {"agent-done", "agent-running"},  # back to running if review fails
+    "agent-review": {"agent-done", "agent-running", "agent-blocked"},  # back to running if review fails
+    "agent-blocked": {"agent-ready", "agent-done"},
+    "agent-failed": {"agent-ready", "agent-done"},
     "agent-done": set(),
 }
 
