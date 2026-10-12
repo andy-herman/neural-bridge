@@ -168,6 +168,23 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _queue_questions(agent: str, data: dict, session_id: str) -> tuple[int, str]:
+    """Put this session's open questions in the review queue, where Andy can
+    answer them from Telegram (scripts/review_queue/questions.py). Never
+    raises: a queue that is unavailable must not cost the flush. Returns
+    (items created, reason)."""
+    if agent == schema.UNATTRIBUTED:
+        return 0, "unattributed"
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        created = questions.raise_from_flush(agent, session_id, data.get("open_questions", []))
+        return len(created), "queued"
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+
+
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
     try:
@@ -422,6 +439,9 @@ def main() -> int:
     write_queue(args.agent, args.session_id, "flushed")
     _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
     _progress_append(args.agent, parsed, args.session_id, args.hook_event)
+    queued, why = _queue_questions(args.agent, parsed, args.session_id)
+    if queued or why not in ("queued", "unattributed"):
+        write_queue(args.agent, args.session_id, f"questions:{queued} {why}"[:120])
 
     if not args.no_discord:
         header = f"**Flush** | agent: `{args.agent}` | {ended_at}"

@@ -14,12 +14,14 @@ The fleet went dormant because every path waited for Andy to start a conversatio
 
 The queue inverts that: producers write items, and the bot brings each one to Andy with the decision attached.
 
-## What is live (slice A)
+## What is live (slices A and B)
 
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
 | capture | compile quarantine, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
 | alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | yes, since 2026-10-11 | Acknowledge, Snooze 1 day |
+| question | `hooks/flush.py`: each open question a session left, for attributed agents | yes | Answer, Dismiss, Snooze 1 day; or reply to the card |
+| action | the Discord daemon: an agent's `open_pr_with_changes`, after validation | yes | Open the PR (confirms with a second tap), Reject |
 
 In Telegram:
 
@@ -32,6 +34,27 @@ In Telegram:
 - the PR title carries `review queue <id>`;
 - the work happens in the private worktree `.trees/review-queue`, never in the shared checkout;
 - the diff must stay inside `knowledge/` and pass the outbound guard before anything is pushed.
+
+**Answering a question.** Reply to the card, or tap Answer and reply to the prompt it sends. The reply is taken before Luna's chat handler sees it, so it never becomes a conversation turn. The applier appends a dated entry to the agent's `Agents/<id>/progress.md` with the question and the answer, so the agent's next session opens with both. Dismiss records that Andy saw it.
+
+- The card shows a one-line summary of the question. Email addresses, links, and phone and account numbers are removed, and the full text stays in the local database. Questions from Loid and Echo, whose material is private, show no text at all. Read and answer those at the desk with `show` and `answer`.
+- Unattributed sessions (generic Claude Code) raise no questions. Nothing would read the answer: flush writes them no progress log, and session_start injects none.
+
+**Approving an action.** The proposal is validated and screened by the outbound guard when it is staged, and screened again before the push.
+
+- Open the PR pushes the branch and opens the pull request. Nothing merges.
+- `approve <id>` and `cancel <id>` in the Discord channel still work and decide the same item, so whichever lands second is told it was already handled.
+- An action expires after 24 hours, because its files were written against main as it stood then. Until 2026-10 these proposals lived in memory for 15 minutes and died with any daemon restart.
+
+**The question backlog.** Before the queue existed, flush had written 339 open questions into `daily-logs/`, May to October 2026, all from unattributed sessions. Most are stale. Triage them once, at the desk:
+
+```bash
+python -m scripts.review_queue backlog --month 2026-08
+python -m scripts.review_queue backlog keep ID --agent AGENT
+python -m scripts.review_queue backlog close
+```
+
+`keep` turns a question into a live item routed to an agent, so the answer lands in that agent's progress log. `close` records the triage; the rest stay in `daily-logs/`, unanswered.
 
 ## The producer contract
 

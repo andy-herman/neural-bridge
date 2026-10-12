@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 import discord
@@ -30,9 +31,10 @@ from .attachment_ingest import (
     format_prompt_block as ingest_format_prompt_block,
     ingest_attachments,
 )
+from scripts.review_queue import actions as queue_actions
+from scripts.review_queue import store as queue_store
+
 from .pr_proposals import (
-    STORE as PR_STORE,
-    execute_proposal,
     format_preview as format_pr_preview,
     is_approval_text,
     is_cancel_text,
@@ -590,22 +592,27 @@ async def _execute_action_batch(
                 else:
                     results.append(f"❌ close_issue #{action['issue_number']}: `{r.error}`")
             elif atype == "open_pr_with_changes":
-                # Two-phase: validate + stage; don't execute yet. The push
-                # happens only after Andy replies `approve <id>` in this
-                # channel (intercepted by handle_pr_approval below).
+                # Two-phase: validate, then stage in the review queue; don't
+                # execute yet. The push happens only after Andy approves the
+                # card on Telegram or replies `approve <id>` in this channel
+                # (intercepted by handle_pr_approval below).
                 validated = validate_open_pr_action(
                     action, agent_id=agent_id, channel_id=channel_id,
                 )
                 if not validated.ok:
                     results.append(f"❌ open_pr_with_changes: `{validated.error}`")
                 else:
-                    PR_STORE.stage(validated.proposal)
-                    pr_previews.append(format_pr_preview(validated.proposal))
-                    results.append(
-                        f"🛫 Staged PR proposal `{validated.proposal.proposal_id}` for "
-                        f"`{validated.proposal.repo.gh_slug}` "
-                        f"(awaiting `approve {validated.proposal.proposal_id}` in this channel)"
-                    )
+                    try:
+                        item = queue_actions.stage(validated.proposal)
+                    except Exception as exc:
+                        results.append(f"❌ open_pr_with_changes: could not queue it for approval: "
+                                       f"`{type(exc).__name__}: {exc}`")
+                    else:
+                        pr_previews.append(format_pr_preview(validated.proposal, item.id))
+                        results.append(
+                            f"🛫 Staged PR proposal `{item.id}` for `{validated.proposal.repo.gh_slug}` "
+                            f"(approve it on Telegram, or `approve {item.id}` in this channel)"
+                        )
             elif atype == "search_conversation_memory":
                 # Semantic search via Ollama bge-m3 embeddings + sqlite-vec.
                 # Run in a thread so we don't block the asyncio loop on the
@@ -728,6 +735,9 @@ async def handle_pr_approval(client, message, config: BotConfig) -> bool:
     handled (caller should `return` and skip mention routing), False
     otherwise (no pending proposal, or text doesn't match).
 
+    Proposals are review queue action items, so this decides the same item
+    the Telegram card does; whichever lands second hears it was handled.
+
     Only authorized users (Andy) can approve/cancel — the auth check is
     upstream in on_message before this is called.
     """
@@ -740,60 +750,72 @@ async def handle_pr_approval(client, message, config: BotConfig) -> bool:
     if not approval_ok and not cancel_ok:
         return False
 
+    store = queue_store.Store()
     # Specific id → look up directly. Generic approve/cancel → pick the
     # most recent pending proposal in this channel by this agent.
     target_id = approval_id or cancel_id
     if target_id:
-        proposal = PR_STORE.get(target_id)
-        if proposal is None or proposal.channel_id != channel_id or proposal.agent_id != agent_id:
+        item = store.get(target_id)
+        if (item is None or item.kind != queue_store.ACTION or item.agent != agent_id
+                or int(item.payload.get("channel_id") or 0) != channel_id):
             # Don't claim a proposal that belongs to another agent or channel.
             return False
     else:
-        proposal = PR_STORE.peek_for_channel_agent(channel_id, agent_id)
-        if proposal is None:
+        item = queue_actions.latest_open(store, channel_id=channel_id, agent_id=agent_id)
+        if item is None:
             return False
+    slug = item.payload.get("repo", "?")
 
-    if cancel_ok:
-        PR_STORE.pop(proposal.proposal_id)
-        await message.channel.send(
-            f"_Cancelled PR proposal `{proposal.proposal_id}` for `{proposal.repo.gh_slug}`. "
-            f"No branch was created. Nothing pushed._"
-        )
-        log(f"PR_APPROVAL cancel: agent={agent_id} id={proposal.proposal_id}")
+    if item.state not in (queue_store.OPEN, queue_store.SNOOZED):
+        await message.channel.send(f"_Proposal `{item.id}` was already handled ({item.state.replace('_', ' ')})._")
+        return True
+    if queue_actions.is_stale(item, int(time.time())):
+        store.expire(item.id, actor="discord", reason="expired: not decided within 24 hours")
+        await message.channel.send(f"_Proposal `{item.id}` expired (over 24 hours old). Nothing pushed; "
+                                   f"ask the agent to propose it again._")
         return True
 
-    # Approval path. Pop first (so a second `approve` doesn't double-fire
-    # while we're pushing), then execute in a thread (synchronous git/gh).
-    PR_STORE.pop(proposal.proposal_id)
+    actor = f"discord:{message.author.id}"
+    verb = queue_store.REJECT if cancel_ok else queue_store.APPROVE
+    if not store.decide(item.id, verb, actor=actor):
+        await message.channel.send(f"_Proposal `{item.id}` was already handled._")
+        return True
+    if not store.claim(item.id, actor="discord"):
+        # Luna's bridge picked it up first; the card shows the outcome.
+        await message.channel.send(f"_Recorded. The review queue is applying `{item.id}`._")
+        return True
+
+    if cancel_ok:
+        store.finish(item.id, True, "dropped; nothing was pushed", actor="discord", resolve=True)
+        await message.channel.send(
+            f"_Cancelled PR proposal `{item.id}` for `{slug}`. No branch was created. Nothing pushed._"
+        )
+        log(f"PR_APPROVAL cancel: agent={agent_id} id={item.id}")
+        return True
+
+    branch = item.payload.get("branch", "?")
+    decided = store.get(item.id) or item  # carries the verb the applier reads
     await message.channel.send(
-        f"_Approved `{proposal.proposal_id}` — opening PR against `{proposal.repo.gh_slug}` "
-        f"on branch `{proposal.branch}`. This takes ~10–20 seconds._"
+        f"_Approved `{item.id}` — opening PR against `{slug}` on branch `{branch}`. "
+        f"This takes ~10–20 seconds._"
     )
     import asyncio as _asyncio
     loop = _asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, lambda: execute_proposal(proposal))
+        ok, result = await loop.run_in_executor(None, lambda: queue_actions.apply(decided))
     except Exception as exc:
-        await message.channel.send(
-            f"❌ PR `{proposal.proposal_id}` crashed during execution: "
-            f"`{type(exc).__name__}: {exc}`"
-        )
-        log(f"PR_APPROVAL execute CRASH: agent={agent_id} id={proposal.proposal_id} {type(exc).__name__}: {exc}")
-        return True
+        ok, result = False, f"crashed during execution: {type(exc).__name__}: {exc}"
+    store.finish(item.id, ok, result, actor="discord", resolve=ok)
 
-    if result.ok:
+    if ok:
         await message.channel.send(
-            f"✅ PR opened: {result.pr_url}\n"
-            f"_(branch: `{result.branch}` on `{proposal.repo.gh_slug}`. "
-            f"Review, edit, merge from your end.)_"
+            f"✅ PR opened: {result}\n"
+            f"_(branch: `{branch}` on `{slug}`. Review, edit, merge from your end.)_"
         )
-        log(f"PR_APPROVAL ok: agent={agent_id} id={proposal.proposal_id} url={result.pr_url}")
+        log(f"PR_APPROVAL ok: agent={agent_id} id={item.id} url={result}")
     else:
-        await message.channel.send(
-            f"❌ PR `{proposal.proposal_id}` failed: `{result.error}`"
-            + (f"\n_(branch `{result.branch}` may have been pushed; check manually.)_" if result.branch else "")
-        )
-        log(f"PR_APPROVAL fail: agent={agent_id} id={proposal.proposal_id} err={result.error}")
+        await message.channel.send(f"❌ PR `{item.id}` failed: `{result}`")
+        log(f"PR_APPROVAL fail: agent={agent_id} id={item.id} err={result}")
     return True
 
 

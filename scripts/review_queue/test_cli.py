@@ -93,5 +93,39 @@ class TestCli(unittest.TestCase):
             self.run_cli("raise", "--source", "s", "--key", "k", "--kind", "probe", "--title", "t")
 
 
+    def test_answer_records_the_text_and_apply_writes_it(self):
+        from scripts.review_queue import questions
+        [item] = questions.raise_from_flush("research", "s1", ["Is it final?"], store=st.Store(self.db))
+        rc, out = self.run_cli("answer", item.id, "Yes, as of Friday.")
+        self.assertEqual(rc, 0)
+        self.assertEqual(st.Store(self.db).get(item.id).payload["answer"], "Yes, as of Friday.")
+        agents = Path(self._tmp.name) / "Agents"
+        agents.mkdir()
+        with mock.patch("scripts.discord_bot.progress_log.AGENTS_BASE", agents):
+            rc, out = self.run_cli("apply", item.id)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Yes, as of Friday.", (agents / "research" / "progress.md").read_text())
+        self.assertEqual(self.run_cli("answer", item.id, "again")[0], 1)
+
+    def test_backlog_keep_and_close(self):
+        logs = Path(self._tmp.name) / "daily-logs" / "_unattributed"
+        logs.mkdir(parents=True)
+        (logs / "2026-05-12.md").write_text(
+            "## Session 1\n\n```yaml\nsession_id: 11111111-aaaa\n```\n\n"
+            "### Open questions\n\n- Keep this one?\n- Stale one?\n")
+        with mock.patch.object(cli, "REPO_ROOT", Path(self._tmp.name)):
+            rc, out = self.run_cli("backlog")
+            self.assertIn("2 shown, 2 in the backlog, 0 kept", out)
+            first = out.splitlines()[0].split()[0]
+            self.assertEqual(self.run_cli("backlog", "keep", first)[0], 2, "keep needs --agent")
+            rc, out = self.run_cli("backlog", "keep", first, "--agent", "research")
+            self.assertIn("queued", out)
+            rc, out = self.run_cli("backlog", "close")
+            self.assertIn("1 kept as questions, 1 left", out)
+            rc, out = self.run_cli("backlog")
+            self.assertIn("was closed", out)
+        [kept] = st.Store(self.db).items(kinds=(st.QUESTION,))
+        self.assertEqual((kept.agent, kept.payload["question"]), ("research", "Keep this one?"))
+
 if __name__ == "__main__":
     unittest.main()

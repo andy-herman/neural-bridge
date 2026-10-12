@@ -8,8 +8,11 @@ that same bot:
     pushable kind, redraws cards whose item changed (decided, applied,
     cleared), wakes snoozed items, runs pending applies, and writes the
     heartbeat the health check and the failure watcher read
-  - button callbacks: approve (two taps), reject (two taps), acknowledge,
-    snooze a day, retry
+  - button callbacks: approve and reject (two taps where they publish or
+    delete), acknowledge, answer, snooze a day, retry
+  - answers: a reply to a question's card, or to the prompt its Answer button
+    sends, is the answer. It is handled before Luna's chat handler sees the
+    message, so an answer never turns into a conversation turn.
   - /queue: everything still waiting on Andy, with a button per item
 
 Button presses are checked against the allowlist themselves; a press from
@@ -26,18 +29,21 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
 
-from . import captures, health, render
+from . import actions, appliers, captures, health, render
 from . import store as st
 
 TICK_SECONDS = 15
 CAPTURE_SYNC_SECONDS = 600
 LIST_LIMIT = 10
 CAPTURE_SYNC_KEY = "capture_sync"
+# Runs before Luna's own text handler (group 0), so a queue answer stops there.
+ANSWER_HANDLER_GROUP = -1
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
@@ -57,7 +63,7 @@ def _message_gone(exc: Exception) -> bool:
     return isinstance(exc, BadRequest) and "not found" in str(exc).lower()
 
 
-Applier = Callable[[st.Item], tuple[bool, str]]
+Applier = appliers.Applier
 
 
 class QueueSurface:
@@ -70,11 +76,7 @@ class QueueSurface:
         self.chat_ids = chat_ids
         self.log = log
         self.push_kinds = push_kinds if push_kinds is not None else health.push_kinds()
-        self.appliers = appliers if appliers is not None else {
-            st.CAPTURE: lambda item: captures.apply(item, repo=repo),
-            st.ALERT: lambda item: (True, ""),
-            st.PROBE: lambda item: (True, ""),
-        }
+        self.appliers = appliers if appliers is not None else _default_appliers(repo)
         self._capture_sync = capture_sync or (lambda: captures.sync(store, repo))
         self._last_capture_sync = 0
         self._apply_lock = asyncio.Lock()
@@ -88,6 +90,8 @@ class QueueSurface:
     def install(self, app: Application) -> None:
         app.add_handler(CallbackQueryHandler(self.on_callback, pattern=r"^q:"))
         app.add_handler(CommandHandler("queue", self.cmd_queue))
+        app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, self.on_reply),
+                        group=ANSWER_HANDLER_GROUP)
 
     async def start(self, app: Application) -> None:
         self.log(f"QUEUE surface starting: db={self.store.path} push={','.join(self.push_kinds) or 'none'}")
@@ -123,6 +127,9 @@ class QueueSurface:
         stale = self.store.fail_stale_applying(now - health.APPLYING_MAX_AGE, now=now)
         if stale:
             self.log(f"QUEUE apply interrupted, marked failed: {stale}")
+        expired = actions.expire_stale(self.store, now)
+        if expired:
+            self.log(f"QUEUE actions expired undecided: {expired}")
 
         if now - self._last_capture_sync >= CAPTURE_SYNC_SECONDS:
             self._last_capture_sync = now
@@ -196,7 +203,8 @@ class QueueSurface:
             ok, result = await asyncio.to_thread(applier, item)
         except Exception as exc:
             ok, result = False, f"{type(exc).__name__}: {exc}"
-        self.store.finish(item.id, ok, result, actor="applier", resolve=item.kind == st.CAPTURE)
+        self.store.finish(item.id, ok, result, actor="applier",
+                          resolve=item.kind in appliers.RESOLVES_ON_APPLY)
         self.log(f"QUEUE applied {item.kind} {item.id} {item.verb}: ok={ok} {result[:160]}")
 
     def _kick(self, bot) -> None:
@@ -254,6 +262,34 @@ class QueueSurface:
             await redraw(item)
             return
 
+        if action == render.ANSWER:
+            if item.kind != st.QUESTION or item.state not in (st.OPEN, st.SNOOZED):
+                await query.answer("Already handled.")
+                await redraw(item)
+                return
+            await query.answer("Reply with your answer.")
+            if chat_id is not None:
+                try:
+                    prompt = await context.bot.send_message(
+                        chat_id=chat_id, text=render.answer_prompt_text(item),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=ForceReply(selective=True, input_field_placeholder="Your answer"))
+                    self.store.add_prompt(item.id, chat_id, prompt.message_id)
+                except TelegramError as exc:
+                    self.log(f"QUEUE answer prompt failed for {item.id}: {exc}")
+            return
+
+        if action in (render.APPROVE, render.REJECT) and not render.needs_confirm(item.kind, action):
+            verb = st.APPROVE if action == render.APPROVE else st.REJECT
+            if not self.store.decide(item.id, verb, actor=actor):
+                await query.answer("Already handled.")
+            else:
+                await query.answer("Recorded.")
+                self.log(f"QUEUE decided {item.kind} {item.id}: {verb}")
+                self._kick(context.bot)
+            await redraw(self.store.get(item.id))
+            return
+
         if action in (render.APPROVE, render.REJECT):
             if item.state != st.OPEN:
                 await query.answer("Already handled.")
@@ -300,6 +336,28 @@ class QueueSurface:
 
         await query.answer()
 
+    async def on_reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """A reply to a question's card or answer prompt is the answer. Any
+        other message returns untouched, and Luna's handler takes it."""
+        message = update.message
+        if message is None or message.reply_to_message is None or not message.text:
+            return
+        if not self._authorized(update.effective_user):
+            return
+        chat_id = message.chat.id
+        item_id = self.store.prompt_item(chat_id, message.reply_to_message.message_id)
+        item = self.store.get(item_id) if item_id else None
+        if item is None or item.kind != st.QUESTION:
+            return
+        actor = f"telegram:{update.effective_user.id}"
+        if self.store.decide(item.id, st.ANSWER, actor=actor, data={"answer": message.text}):
+            self.log(f"QUEUE answered question {item.id} ({len(message.text)} chars)")
+            await message.reply_text(f"Saved for {item.agent or 'the agent'}.")
+            self._kick(context.bot)
+        else:
+            await message.reply_text("That question was already handled.")
+        raise ApplicationHandlerStop
+
     async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update.effective_user) or update.message is None:
             return
@@ -308,3 +366,7 @@ class QueueSurface:
             render.list_text(waiting, limit=LIST_LIMIT), parse_mode=ParseMode.HTML,
             reply_markup=_markup(render.list_keyboard(waiting, limit=LIST_LIMIT)),
             link_preview_options=_NO_PREVIEW)
+
+
+def _default_appliers(repo: Path) -> dict[str, Applier]:
+    return appliers.defaults(repo)
