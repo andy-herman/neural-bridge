@@ -41,6 +41,10 @@ import schema  # noqa: E402
 DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
+# Every turn of a resumed conversation flushes the whole session, so a long one
+# would send its entire history each time. Earlier turns were flushed by
+# earlier turns; the tail is what this one adds.
+MAX_TRANSCRIPT_CHARS = 400_000
 
 
 def utc_iso() -> str:
@@ -168,7 +172,7 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
         return False, f"{type(exc).__name__}: {exc}"
 
 
-def _queue_questions(agent: str, data: dict, session_id: str) -> tuple[int, str]:
+def _queue_questions(agent: str, data: dict, session_id: str, *, complete: bool = True) -> tuple[int, str]:
     """Put this session's open questions in the review queue, where Andy can
     answer them from Telegram (scripts/review_queue/questions.py). Never
     raises: a queue that is unavailable must not cost the flush. Returns
@@ -179,28 +183,38 @@ def _queue_questions(agent: str, data: dict, session_id: str) -> tuple[int, str]
         if str(REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(REPO_ROOT))
         from scripts.review_queue import questions
-        created = questions.raise_from_flush(agent, session_id, data.get("open_questions", []))
+        created = questions.raise_from_flush(agent, session_id, data.get("open_questions", []),
+                                             complete=complete)
         return len(created), "queued"
     except Exception as exc:
         return 0, f"{type(exc).__name__}: {exc}"
 
 
 def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
-    """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
+    """Invoke `claude -p`. Return (ok, stdout, error_reason).
+
+    The prompt goes in on stdin. It embeds the whole session transcript, and
+    as an argument it failed to start at all once a session grew past about
+    700 KB ("Argument list too long"): until 2026-10-12 that killed most
+    flushes of long or resumed sessions, 943 of 1,323 in August, before they
+    logged a thing.
+    """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+            ["claude", "-p", "--output-format", "text", "--model", model,
              *claude_env.mcp_args()],
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=timeout,
-            stdin=subprocess.DEVNULL,
             env=_subprocess_env_for_claude(),
         )
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
     except FileNotFoundError:
         return False, "", "claude_cli_not_found"
+    except OSError as exc:
+        return False, "", f"spawn_failed:{type(exc).__name__}:{exc.errno}"
     if result.returncode != 0:
         # Claude Code prints the API's own error on stdout; stderr carries CLI
         # warnings, which is all this used to report ("claude.ai connectors
@@ -353,7 +367,36 @@ def write_failed(agent: str, session_id: str, raw_output: str, reason: str) -> N
     )
 
 
+def _tail(transcript: str, limit: int | None = None) -> tuple[str, bool]:
+    """(the transcript, or its last `limit` characters from a line start, and
+    whether it was cut)."""
+    limit = limit or MAX_TRANSCRIPT_CHARS
+    if len(transcript) <= limit:
+        return transcript, False
+    tail = transcript[-limit:]
+    tail = tail[tail.find("\n") + 1:] if "\n" in tail else tail
+    return (f"[The first {len(transcript) - len(tail):,} characters of this session were left out; "
+            f"earlier turns were flushed when they ended.]\n{tail}"), True
+
+
 def main() -> int:
+    """Never let an unexpected error vanish. session_end.py runs this detached
+    with output discarded, so an exception used to leave no trace at all: no
+    queue line, no telemetry, and a canary that kept reading "ok"."""
+    args = _parse_args()
+    try:
+        return _run(args)
+    except Exception as exc:
+        reason = f"failed:crash_{type(exc).__name__}"
+        try:
+            write_queue(args.agent, args.session_id, f"{reason}: {exc}"[:200])
+        except Exception:
+            pass
+        _telemetry(args.agent, ok=False, detail=f"{reason}: {exc}"[:200])
+        return 0
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flush a session transcript to a daily log")
     parser.add_argument("--agent", required=True)
     parser.add_argument("--session-id", required=True)
@@ -366,8 +409,10 @@ def main() -> int:
         action="store_true",
         help="Skip the Discord outbound push (per-invocation override of the keychain webhook).",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def _run(args: argparse.Namespace) -> int:
     transcript_path = Path(args.transcript)
     if not transcript_path.exists():
         write_queue(args.agent, args.session_id, "failed:transcript_missing")
@@ -385,6 +430,7 @@ def main() -> int:
         write_queue(args.agent, args.session_id, f"failed:read_transcript_{type(exc).__name__}")
         return 0
 
+    transcript_text, truncated = _tail(transcript_text)
     template = PROMPT_TEMPLATE.read_text(encoding="utf-8")
     prompt = build_prompt(template, args.agent, args.session_id, args.hook_event, transcript_text)
 
@@ -439,7 +485,7 @@ def main() -> int:
     write_queue(args.agent, args.session_id, "flushed")
     _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
     _progress_append(args.agent, parsed, args.session_id, args.hook_event)
-    queued, why = _queue_questions(args.agent, parsed, args.session_id)
+    queued, why = _queue_questions(args.agent, parsed, args.session_id, complete=not truncated)
     if queued or why not in ("queued", "unattributed"):
         write_queue(args.agent, args.session_id, f"questions:{queued} {why}"[:120])
 

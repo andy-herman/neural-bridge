@@ -365,10 +365,13 @@ class TestHealth(unittest.TestCase):
 class FakeReply:
     """An inbound text message that replies to `reply_to` (a message id)."""
 
-    def __init__(self, text: str, reply_to: int | None, chat_id: int = ANDY):
+    def __init__(self, text: str, reply_to: int | None, chat_id: int = ANDY,
+                 reply_to_text: str = "", reply_to_bot: bool = True, reply_to_sender: int = 5000):
         self.text = text
         self.chat = SimpleNamespace(id=chat_id)
-        self.reply_to_message = SimpleNamespace(message_id=reply_to) if reply_to is not None else None
+        self.reply_to_message = SimpleNamespace(
+            message_id=reply_to, text=reply_to_text,
+            from_user=SimpleNamespace(id=reply_to_sender, is_bot=reply_to_bot)) if reply_to is not None else None
         self.replies: list[str] = []
 
     async def reply_text(self, text, **kw):
@@ -403,9 +406,9 @@ class SliceBCase(SurfaceCase):
                                         payload={"channel_id": 42}, unique=True, now=created_at)
         return item
 
-    async def reply(self, text: str, reply_to: int | None, user: int = ANDY):
+    async def reply(self, text: str, reply_to: int | None, user: int = ANDY, **replied):
         from telegram.ext import ApplicationHandlerStop
-        msg = FakeReply(text, reply_to)
+        msg = FakeReply(text, reply_to, **replied)
         update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=user))
         stopped = False
         try:
@@ -470,6 +473,25 @@ class TestQuestions(SliceBCase):
         msg, stopped = await self.reply("second", card_id)
         self.assertTrue(stopped)
         self.assertEqual(msg.replies, ["That question was already handled."])
+
+    async def test_a_reply_to_a_prompt_whose_send_timed_out_still_answers(self):
+        # 2026-10-12: Telegram delivered the prompt, the send call timed out,
+        # and the prompt's message id was never recorded.
+        item = self.question()
+        self.bot.id = 5000
+        prompt = render.answer_prompt_text(item)
+        msg, stopped = await self.reply("The family one.", 9999, reply_to_text=prompt)
+        self.assertTrue(stopped)
+        self.assertEqual(self.store.get(item.id).payload["answer"], "The family one.")
+
+    async def test_an_id_in_someone_elses_message_answers_nothing(self):
+        item = self.question()
+        self.bot.id = 5000
+        for replied in ({"reply_to_bot": False, "reply_to_sender": ANDY},
+                        {"reply_to_bot": True, "reply_to_sender": 6000}):
+            msg, stopped = await self.reply("hijack", 9999, reply_to_text=f"see {item.id}", **replied)
+            self.assertFalse(stopped, replied)
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
 
     async def test_dismiss_is_one_tap(self):
         item = self.question()
