@@ -348,6 +348,58 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertTrue(log_file.exists(), "the daily log is still written")
         self.assertIn("questions:0 RuntimeError: db locked", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
+    def test_the_prompt_goes_in_on_stdin_not_as_an_argument(self):
+        # 2026-10-12: a 755 KB transcript as an argv entry failed with E2BIG
+        # before claude started, and the flush died without a trace.
+        calls = []
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [],
+                            "proposed_concepts": []})
+
+        def runner(argv, **kw):
+            calls.append((argv, kw))
+            return self._mock_claude(valid)()
+
+        self.transcript.write_text("x" * 50_000, encoding="utf-8")
+        with patch("flush.subprocess.run", side_effect=runner):
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-stdin",
+                                             "--transcript", str(self.transcript)]), 0)
+        argv, kw = calls[0]
+        self.assertIn("x" * 50_000, kw["input"])
+        self.assertTrue(all(len(a) < 1000 for a in argv), "no argument carries the transcript")
+
+    def test_a_process_that_cannot_start_is_logged_as_failed(self):
+        with patch("flush.subprocess.run", side_effect=OSError(7, "Argument list too long")):
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-e2big",
+                                             "--transcript", str(self.transcript)]), 0)
+        self.assertIn("research s-e2big failed", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+
+    def test_any_crash_is_recorded_not_lost(self):
+        with patch("flush.build_prompt", side_effect=KeyError("boom")), \
+                patch("flush._telemetry") as telemetry:
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-crash",
+                                             "--transcript", str(self.transcript)]), 0)
+        self.assertIn("research s-crash failed:crash_KeyError", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+        self.assertFalse(telemetry.call_args.kwargs["ok"])
+
+    def test_long_transcripts_keep_their_tail_and_skip_clearing(self):
+        text = "".join(f"line {i}\n" for i in range(100_000))
+        tail, cut = flush._tail(text, limit=10_000)
+        self.assertTrue(cut)
+        self.assertLess(len(tail), 10_200)
+        self.assertIn("line 99999", tail)
+        self.assertNotIn("line 0\n", tail)
+        self.assertEqual(flush._tail("short", limit=10_000), ("short", False))
+
+        seen = {}
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": ["Q?"],
+                            "proposed_concepts": []})
+        self.transcript.write_text(text, encoding="utf-8")
+        with patch("flush.subprocess.run", side_effect=self._mock_claude(valid)), \
+                patch.object(flush, "MAX_TRANSCRIPT_CHARS", 10_000), \
+                patch("flush._queue_questions", side_effect=lambda *a, **kw: seen.update(kw) or (0, "queued")):
+            self._run_main(["--agent", "research", "--session-id", "s-long", "--transcript", str(self.transcript)])
+        self.assertEqual(seen, {"complete": False}, "a cut transcript must not clear earlier questions")
+
     def test_empty_session_skipped(self):
         empty_json = json.dumps({
             "decisions": [], "findings": [], "open_questions": [], "proposed_concepts": []

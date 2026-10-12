@@ -39,6 +39,12 @@ In Telegram:
 
 - The card shows a one-line summary of the question. Email addresses, links, and phone and account numbers are removed, and the full text stays in the local database. Questions from Loid and Echo, whose material is private, show no text at all. Read and answer those at the desk with `show` and `answer`.
 - Unattributed sessions (generic Claude Code) raise no questions. Nothing would read the answer: flush writes them no progress log, and session_start injects none.
+- **Conversations are not duplicated.** Every turn of a Discord or Telegram conversation flushes the same session, so a question the agent has just asked in the chat counts as open as soon as the turn ends.
+  - A new question is held for 30 minutes and pushed only if the conversation stays quiet that long.
+  - Each later flush of the session replaces its undecided questions. One it no longer lists was answered in the chat, and is cleared.
+  - A reworded question counts as the same question.
+  - One Andy already answered or dismissed on a card is not raised again.
+- If the record of a reply's prompt was lost (Telegram delivered the prompt, but the send timed out), the item id shown in the bot's message still finds the question. Only the bot's own messages count.
 
 **Approving an action.** The proposal is validated and screened by the outbound guard when it is staged, and screened again before the push.
 

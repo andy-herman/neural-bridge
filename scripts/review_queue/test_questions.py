@@ -79,6 +79,55 @@ class TestRaiseFromFlush(StoreCase):
         self.assertEqual(self.store.items(), [])
 
 
+class TestConversations(StoreCase):
+    """A question Luna has just asked in the chat must not arrive as a card
+    seconds later (2026-10-12), and one answered in the chat must go away."""
+
+    def flush(self, questions, session="s1", now=T0, complete=True):
+        return q.raise_from_flush("luna", session, questions, store=self.store, now=now, complete=complete)
+
+    def test_a_new_question_is_held_until_the_conversation_goes_quiet(self):
+        [item] = self.flush(["Draft a nudge to the recruiter before Friday?"])
+        self.assertEqual((item.state, item.snooze_until), (st.SNOOZED, T0 + q.HOLD_SECONDS))
+        self.assertEqual(self.store.events(item.id)[-1]["event"], "held")
+        self.assertEqual(self.store.needing_render((st.QUESTION,)), [], "not pushed while held")
+        self.store.wake_due(T0 + q.HOLD_SECONDS)
+        self.assertEqual([i.id for i in self.store.needing_render((st.QUESTION,))], [item.id])
+
+    def test_answered_in_the_chat_means_the_next_flush_clears_it(self):
+        [item] = self.flush(["Draft a nudge to the recruiter before Friday?"])
+        self.flush([], now=T0 + 120)
+        self.assertEqual(self.store.get(item.id).state, st.SUPERSEDED)
+
+    def test_a_reworded_question_is_the_same_item(self):
+        [item] = self.flush(["Whether Andy wants a nudge drafted for the silent recruiter thread before he flies"])
+        again = self.flush(["Whether Andy wants a nudge drafted (politely) for the silent recruiter thread "
+                            "before he flies Friday"], now=T0 + 120)
+        self.assertEqual(again, [])
+        self.assertEqual(self.store.get(item.id).state, st.SNOOZED, "kept, not cleared and re-raised")
+
+    def test_a_question_answered_on_its_card_is_not_raised_again(self):
+        [item] = self.flush(["Whether Andy wants a nudge drafted for the silent recruiter thread before he flies"])
+        self.store.decide(item.id, st.ANSWER, actor="telegram", data={"answer": "No, I have a call."})
+        again = self.flush(["Whether Andy wants a nudge drafted for the 6-day-silent recruiter thread "
+                            "before he flies to Seoul"], now=T0 + 600)
+        self.assertEqual(again, [], "the card's answer never reaches the transcript, so flush still lists it")
+
+    def test_a_cut_transcript_clears_nothing_and_other_sessions_are_untouched(self):
+        [mine] = self.flush(["Ship the post on Monday?"])
+        [other] = self.flush(["Which calendar?"], session="s2")
+        self.flush([], now=T0 + 60, complete=False)
+        self.assertEqual(self.store.get(mine.id).state, st.SNOOZED)
+        self.flush([], now=T0 + 120)
+        self.assertEqual(self.store.get(mine.id).state, st.SUPERSEDED)
+        self.assertEqual(self.store.get(other.id).state, st.SNOOZED)
+
+    def test_same_question(self):
+        self.assertTrue(q.same_question("Ship the post Monday?", "ship the post on Monday"))
+        self.assertFalse(q.same_question("Ship the post Monday?", "Which calendar gets school dates?"))
+        self.assertFalse(q.same_question("", "anything"))
+
+
 class TestAnswer(StoreCase):
     def setUp(self):
         super().setUp()

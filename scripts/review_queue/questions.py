@@ -6,6 +6,19 @@ reads), each question becomes a question item. Unattributed sessions are
 skipped, for the same reason flush and session_start skip them: an answer would
 land somewhere nothing reads.
 
+Conversations. Every turn of a Discord or Telegram conversation is a flush of
+the same session, so a question the agent has just asked Andy in the chat is
+"open" the moment the turn ends. Pushing it then would duplicate the chat, so:
+
+  - a new question is held for HOLD_SECONDS and only pushed once the
+    conversation has been quiet that long;
+  - each flush of a session replaces that session's undecided questions: one
+    the new flush no longer lists was answered in the chat, and is cleared;
+  - a question worded like one already live in the session is the same
+    question, and one worded like one Andy already answered or dismissed is
+    not raised again (flush rewords questions from turn to turn, and an
+    answer given on a card never reaches the session's transcript).
+
 Answer. Andy replies to the card in Telegram (or runs the CLI `answer`). The
 applier appends a dated entry to the agent's progress.md, so its next session
 opens with the question and the answer. Dismiss records that he saw it.
@@ -28,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +56,9 @@ UNATTRIBUTED = "_unattributed"
 PRIVATE_AGENTS = frozenset({"loid", "echo"})
 
 TITLE_MAX = 120
+HOLD_SECONDS = 30 * 60
+# Word overlap at which two questions from one session are the same question.
+SAME_QUESTION = 0.6
 
 _NONE_RE = re.compile(r"^[\W_]*(none|n/?a|nothing)[\W_]*$", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
@@ -79,16 +96,43 @@ def question_key(agent: str, session_id: str, question: str) -> str:
     return hashlib.sha256(f"{agent}\n{session_id}\n{question.strip()}".encode()).hexdigest()[:16]
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def same_question(a: str, b: str) -> bool:
+    wa, wb = _words(a), _words(b)
+    return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= SAME_QUESTION
+
+
 def raise_from_flush(agent: str, session_id: str, open_questions: list[str], *,
-                     store: st.Store | None = None, now: int | None = None) -> list[st.Item]:
-    """Queue each real open question from one flushed session. Idempotent: a
-    session flushed twice raises nothing new. Returns the items created."""
+                     complete: bool = True, store: st.Store | None = None,
+                     now: int | None = None) -> list[st.Item]:
+    """Make the session's question items match this flush. Returns the items
+    created (each held for HOLD_SECONDS before it is pushed).
+
+    `complete` is False when flush saw only the tail of a long transcript: an
+    earlier question missing from it may still be open, so nothing is cleared.
+    """
     if not agent or agent == UNATTRIBUTED:
         return []
     store = store or st.Store()
+    now = now if now is not None else int(time.time())
+    mine = [i for i in store.items(kinds=(st.QUESTION,))
+            if i.source == SOURCE and i.agent == agent and i.payload.get("session_id") == session_id]
+    live = [i for i in mine if i.state in (st.OPEN, st.SNOOZED) and i.resolved_at is None]
+    # Decided by Andy. A cleared (superseded) one may come back if it resurfaces.
+    handled = [i for i in mine if i.state in (st.DECIDED, st.APPLYING, st.APPLIED, st.APPLY_FAILED)]
+    still_open: set[str] = set()
     created = []
     for q in open_questions:
         if not is_real(q):
+            continue
+        if any(same_question(q, str(i.payload.get("question", ""))) for i in handled):
+            continue
+        match = next((i for i in live if same_question(q, str(i.payload.get("question", "")))), None)
+        if match is not None:
+            still_open.add(match.id)
             continue
         item, is_new = store.raise_item(
             source=SOURCE, key=question_key(agent, session_id, q), kind=st.QUESTION,
@@ -96,7 +140,13 @@ def raise_from_flush(agent: str, session_id: str, open_questions: list[str], *,
             agent=agent, payload={"question": q.strip(), "session_id": session_id},
             unique=True, now=now)
         if is_new:
-            created.append(item)
+            store.hold(item.id, now + HOLD_SECONDS, actor=SOURCE, now=now)
+            created.append(store.get(item.id) or item)
+        still_open.add(item.id)
+    if complete:
+        for i in live:
+            if i.id not in still_open:
+                store.clear(source=SOURCE, key=i.key, now=now)
     return created
 
 

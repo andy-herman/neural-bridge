@@ -25,6 +25,7 @@ since the shadow week ended (docs/REVIEW_QUEUE.md).
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Callable
@@ -345,7 +346,8 @@ class QueueSurface:
         if not self._authorized(update.effective_user):
             return
         chat_id = message.chat.id
-        item_id = self.store.prompt_item(chat_id, message.reply_to_message.message_id)
+        item_id = (self.store.prompt_item(chat_id, message.reply_to_message.message_id)
+                   or self._question_named_in(message.reply_to_message, context.bot))
         item = self.store.get(item_id) if item_id else None
         if item is None or item.kind != st.QUESTION:
             return
@@ -357,6 +359,25 @@ class QueueSurface:
         else:
             await message.reply_text("That question was already handled.")
         raise ApplicationHandlerStop
+
+    def _question_named_in(self, replied_to, bot) -> str | None:
+        """The question a reply is for, read from the bot's own message.
+
+        Every card and answer prompt shows its item id. When the message's id
+        was never recorded (Telegram delivered the prompt but the send timed
+        out, as on 2026-10-12), the id in its text still finds the question.
+        Only this bot's messages count, so quoting an id cannot answer one.
+        """
+        sender = getattr(replied_to, "from_user", None)
+        bot_id = getattr(bot, "id", None)
+        if sender is None or not getattr(sender, "is_bot", False) or (bot_id and sender.id != bot_id):
+            return None
+        text = getattr(replied_to, "text", None) or getattr(replied_to, "caption", None) or ""
+        for candidate in reversed(re.findall(r"\b[0-9a-f]{6}\b", text)):
+            item = self.store.get(candidate)
+            if item is not None and item.kind == st.QUESTION:
+                return candidate
+        return None
 
     async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update.effective_user) or update.message is None:

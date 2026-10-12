@@ -388,6 +388,13 @@ class Store:
         return self._transition(item_id, (OPEN,), SNOOZED, actor=actor, event="snoozed",
                                 detail=str(until), now=now, extra={"snooze_until": until})
 
+    def hold(self, item_id: str, until: int, *, actor: str, now: int | None = None) -> bool:
+        """A producer keeps a new item back until `until` (a question asked in
+        a live conversation). Same mechanics as a snooze; logged as "held"."""
+        now = now if now is not None else _now()
+        return self._transition(item_id, (OPEN,), SNOOZED, actor=actor, event="held",
+                                detail=str(until), now=now, extra={"snooze_until": until})
+
     def wake_due(self, now: int | None = None) -> list[str]:
         """Snoozed items whose time is up go back to open. Returns their ids."""
         now = now if now is not None else _now()
