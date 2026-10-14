@@ -14,7 +14,7 @@ The fleet went dormant because every path waited for Andy to start a conversatio
 
 The queue inverts that: producers write items, and the bot brings each one to Andy with the decision attached.
 
-## What is live (slices A, B and C)
+## What is live (slices A to D)
 
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
@@ -23,10 +23,12 @@ The queue inverts that: producers write items, and the bot brings each one to An
 | question | `hooks/flush.py`: each open question a session left, for attributed agents | yes | Answer, Dismiss, Snooze 1 day; or reply to the card |
 | action | the Discord daemon: an agent's `open_pr_with_changes`, after validation | yes | Open the PR (confirms with a second tap), Reject |
 | pr_review | the loop engineer's open PRs (`eng/<issue>` branches), synced every 2 minutes by the bridge | yes | Merge (only while checks pass; confirms with a second tap), Close (confirms), Snooze 1 day |
+| publish | Sunday prep: the post the Monday run will publish | yes | Ready, Hold a week |
 
 In Telegram:
 
 - `/queue` lists everything waiting, with a button that opens each item's card.
+- Luna's morning check-in ends with "Review queue: N waiting, oldest X days" when anything waits. It adds the line only to a message she was sending anyway, so a quiet day stays quiet.
 - A card is redrawn when its item changes: decided, applied, failed (with a Retry button) or cleared.
 
 **Filing a capture.** The applier moves the quarantine file to `knowledge/concepts/` with `verdict: PROMOTE` and a `reviewed:` line, adds the concept to `knowledge/index.md`, and logs it in `knowledge/log.md`. Rejecting deletes the quarantine file; git history keeps the text. Either way:
@@ -66,6 +68,14 @@ In Telegram:
 - Close closes the PR with a comment, keeps the branch, and moves the issue to `agent-blocked`, so the loop does not retry it on its own.
 - A PR merged or closed on GitHub clears its card.
 - From the desk, `decide ID approve` records the head that `show` displays.
+
+**This week's post.** The blog publishes by date: its scheduled-publish workflow runs at Tuesday 01:00 UTC (Monday evening Pacific) and publishes the oldest post with `draft: true` and a `pubDate` on or before that day. Sunday prep picks the same post and raises a publish card.
+
+- Ready records that Andy has seen it; the workflow publishes as planned.
+- Hold a week moves the post's `pubDate` seven days past this Monday through a pull request on the blog, merged at once.
+  - The post stays a draft, so nothing becomes visible.
+  - The work happens in a throwaway worktree at origin/main, never in the blog's own checkout, and the push passes the outbound guard first.
+- An undecided card expires once the workflow has run.
 
 **Labels.** One vocabulary for the whole fleet: `scripts/discord_bot/state_machine.py` lists the loop engineer's `agent-blocked` and `agent-failed` beside the six PM-workflow states. The queue is where "waiting on Andy" is decided, and GitHub labels follow the decision.
 

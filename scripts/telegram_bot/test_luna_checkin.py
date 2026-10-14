@@ -221,5 +221,43 @@ class TestGenerate(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+
+class TestQueueLine(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from scripts.review_queue import store as st
+        self._tmp = tempfile.TemporaryDirectory()
+        self.st = st
+        self.store = st.Store(Path(self._tmp.name) / "q.db")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_nothing_waiting_says_nothing(self):
+        self.assertEqual(ci.queue_line(self.store), "")
+
+    def test_counts_and_ages_what_waits(self):
+        t0 = 1_800_000_000
+        self.store.raise_item(source="a", key="1", kind=self.st.ALERT, title="x", now=t0)
+        self.store.raise_item(source="a", key="2", kind=self.st.ALERT, title="y", now=t0 + 86400)
+        line = ci.queue_line(self.store, now=t0 + 3 * 86400)
+        self.assertEqual(line, "Review queue: 2 waiting, oldest 3 days. /queue lists them.")
+
+    def test_appended_to_a_morning_message_but_a_pass_stays_silent(self):
+        from unittest.mock import patch
+        sent = []
+        with patch.object(ci, "gather_context", return_value=""), \
+                patch.object(ci, "gather_notes", return_value=""), \
+                patch.object(ci, "queue_line", return_value="Review queue: 1 waiting."), \
+                patch.object(ci, "allowed_chat_ids", return_value=[1]), \
+                patch.object(ci, "get_token", return_value="t"), \
+                patch.object(ci, "send_telegram", side_effect=lambda cid, text, tok: sent.append(text) or True):
+            with patch.object(ci, "generate", return_value=(True, "Two things today.", "")):
+                self.assertEqual(ci.main(["--kind", "morning"]), 0)
+            with patch.object(ci, "generate", return_value=(True, "[PASS]", "")):
+                self.assertEqual(ci.main(["--kind", "morning"]), 0)
+        self.assertEqual(len(sent), 1, "a quiet day stays quiet even with items waiting")
+        self.assertTrue(sent[0].endswith("Review queue: 1 waiting."))
+
 if __name__ == "__main__":
     unittest.main()

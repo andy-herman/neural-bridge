@@ -459,7 +459,22 @@ def main(argv: list[str] | None = None) -> int:
     posted = post_discord(brief, dry_run=args.dry_run)
     if not posted and not args.dry_run:
         print("WARN: discord post returned False (webhook missing or HTTP error)", file=sys.stderr)
+    if not args.dry_run:
+        queue_publish_item(candidate, target_monday)
     return 0
+
+
+def queue_publish_item(candidate: Candidate, target_monday: date) -> None:
+    """A card in Andy's review queue: Ready, or Hold a week. Never fails the
+    prep: the Discord brief and the vault drafts are already out."""
+    try:
+        from scripts.review_queue import publish
+        item, created = publish.raise_for_week(
+            path=str(candidate.file_path.relative_to(BLOG_REPO)), slug=candidate.slug,
+            title=candidate.title, pub_date=candidate.pub_date, monday=target_monday)
+        print(f"review queue: {item.id} {'queued' if created else 'already queued'}", file=sys.stderr)
+    except Exception as exc:
+        print(f"WARN: could not queue the publish card: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

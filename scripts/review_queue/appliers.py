@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from . import actions, captures, pr_reviews, questions
+from . import actions, captures, pr_reviews, publish, questions
 from . import store as st
 
 Applier = Callable[[st.Item], tuple[bool, str]]
@@ -16,7 +16,7 @@ Applier = Callable[[st.Item], tuple[bool, str]]
 # left quarantine, an answered question and a pushed or dropped action are
 # finished, and so is a merged or closed PR. Alerts resolve only when their
 # producer clears them.
-RESOLVES_ON_APPLY = frozenset({st.CAPTURE, st.QUESTION, st.ACTION, st.PR_REVIEW})
+RESOLVES_ON_APPLY = frozenset({st.CAPTURE, st.QUESTION, st.ACTION, st.PR_REVIEW, st.PUBLISH})
 
 
 def defaults(repo: Path) -> dict[str, Applier]:
@@ -25,6 +25,7 @@ def defaults(repo: Path) -> dict[str, Applier]:
         st.QUESTION: lambda item: questions.apply(item),
         st.ACTION: lambda item: actions.apply(item),
         st.PR_REVIEW: lambda item: pr_reviews.apply(item),
+        st.PUBLISH: lambda item: publish.apply(item),
         st.ALERT: lambda item: (True, ""),
         st.PROBE: lambda item: (True, ""),
     }

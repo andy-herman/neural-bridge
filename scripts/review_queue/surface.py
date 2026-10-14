@@ -37,7 +37,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
-from . import actions, appliers, captures, health, pr_reviews, render
+from . import actions, appliers, captures, health, pr_reviews, publish, render
 from . import store as st
 
 TICK_SECONDS = 15
@@ -133,9 +133,9 @@ class QueueSurface:
         stale = self.store.fail_stale_applying(now - health.APPLYING_MAX_AGE, now=now)
         if stale:
             self.log(f"QUEUE apply interrupted, marked failed: {stale}")
-        expired = actions.expire_stale(self.store, now)
+        expired = actions.expire_stale(self.store, now) + publish.expire_stale(self.store, now)
         if expired:
-            self.log(f"QUEUE actions expired undecided: {expired}")
+            self.log(f"QUEUE expired undecided: {expired}")
 
         if now - self._last_capture_sync >= CAPTURE_SYNC_SECONDS:
             self._last_capture_sync = now

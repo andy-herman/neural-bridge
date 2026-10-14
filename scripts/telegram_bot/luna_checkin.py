@@ -205,6 +205,26 @@ def is_pass(response: str) -> bool:
         or stripped.upper() == PASS_TOKEN.upper()
 
 
+def queue_line(store=None, now: int | None = None) -> str:
+    """One line on what waits in the review queue, or "" when nothing does.
+    Appended only to a message Luna is sending anyway: a quiet day stays quiet,
+    and each waiting item already arrived as its own card."""
+    import time
+
+    try:
+        from scripts.review_queue import store as queue_store
+        store = store or queue_store.Store()
+        waiting = store.items(states=queue_store.WAITING)
+    except Exception:
+        return ""
+    if not waiting:
+        return ""
+    now = now if now is not None else int(time.time())
+    days = (now - min(i.created_at for i in waiting)) / 86400
+    oldest = f"{days:.0f} day{'s' if round(days) != 1 else ''}" if days >= 1 else "under a day"
+    return f"Review queue: {len(waiting)} waiting, oldest {oldest}. /queue lists them."
+
+
 def clean_for_telegram(response: str) -> str:
     text = (response or "").strip()
     if len(text) > MAX_TELEGRAM_CHARS:
@@ -280,6 +300,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     message = clean_for_telegram(stdout)
+    if args.kind == "morning":
+        line = queue_line()
+        if line:
+            message = f"{message}\n\n{line}"
     if args.dry_run:
         print(f"--- [{args.kind}] would send ({len(message)} chars) ---\n{message}")
         return 0
