@@ -246,7 +246,11 @@ class Store:
 
         A repeat raise of a live incident refreshes its detail (an alert's
         "overdue for 9 days" becomes "10 days") without logging an event: a
-        producer that re-reports hourly must not flood the log.
+        producer that re-reports hourly must not flood the log. While the item
+        still waits on Andy, its payload is refreshed too, and a payload change
+        bumps rev so its card is redrawn (a PR whose checks just went green
+        gains its Merge button). A decided item's payload is left alone: it is
+        what Andy decided on.
         """
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind!r}")
@@ -267,7 +271,12 @@ class Store:
                                        or row["ref"] != ref):
                         conn.execute("UPDATE items SET title = ?, detail = ?, ref = ? WHERE id = ?",
                                      (title, detail, ref, row["id"]))
-                        row = conn.execute("SELECT * FROM items WHERE id = ?", (row["id"],)).fetchone()
+                    new_payload = json.dumps(payload or {}, sort_keys=True)
+                    if (not unique and row["state"] in (OPEN, SNOOZED)
+                            and (row["payload"] or "{}") != new_payload):
+                        conn.execute("UPDATE items SET payload = ?, updated_at = ?, rev = rev + 1 "
+                                     "WHERE id = ?", (new_payload, now, row["id"]))
+                    row = conn.execute("SELECT * FROM items WHERE id = ?", (row["id"],)).fetchone()
                     conn.execute("COMMIT")
                     return Item.from_row(row), False
                 item_id = self._new_id(conn)

@@ -14,7 +14,7 @@ The fleet went dormant because every path waited for Andy to start a conversatio
 
 The queue inverts that: producers write items, and the bot brings each one to Andy with the decision attached.
 
-## What is live (slices A and B)
+## What is live (slices A, B and C)
 
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
@@ -22,6 +22,7 @@ The queue inverts that: producers write items, and the bot brings each one to An
 | alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | yes, since 2026-10-11 | Acknowledge, Snooze 1 day |
 | question | `hooks/flush.py`: each open question a session left, for attributed agents | yes | Answer, Dismiss, Snooze 1 day; or reply to the card |
 | action | the Discord daemon: an agent's `open_pr_with_changes`, after validation | yes | Open the PR (confirms with a second tap), Reject |
+| pr_review | the loop engineer's open PRs (`eng/<issue>` branches), synced every 2 minutes by the bridge | yes | Merge (only while checks pass; confirms with a second tap), Close (confirms), Snooze 1 day |
 
 In Telegram:
 
@@ -51,6 +52,22 @@ In Telegram:
 - Open the PR pushes the branch and opens the pull request. Nothing merges.
 - `approve <id>` and `cancel <id>` in the Discord channel still work and decide the same item, so whichever lands second is told it was already handled.
 - An action expires after 24 hours, because its files were written against main as it stood then. Until 2026-10 these proposals lived in memory for 15 minutes and died with any daemon restart.
+
+**Merging a loop-engineer PR.** Approving a PR means merging it once its checks pass.
+
+- The card shows the PR's head commit and the state of its checks. Each sync refreshes them, and the card is redrawn when they change.
+- Merge appears only while every check has passed and GitHub calls the PR mergeable. The confirm screen names the commit and says that merging deploys the fleet within about two minutes.
+- The second tap is refused if the head changed after the confirm screen was drawn.
+- The applier merges exactly the confirmed commit:
+  - it re-reads the PR, and refuses if the head moved or the checks are no longer green;
+  - it marks the draft ready;
+  - it squash-merges with `--match-head-commit`, using its own subject and body, so no tool trailer reaches main;
+  - it moves the issue to `agent-done`, and the PR's "Closes #n" closes it.
+- Close closes the PR with a comment, keeps the branch, and moves the issue to `agent-blocked`, so the loop does not retry it on its own.
+- A PR merged or closed on GitHub clears its card.
+- From the desk, `decide ID approve` records the head that `show` displays.
+
+**Labels.** One vocabulary for the whole fleet: `scripts/discord_bot/state_machine.py` lists the loop engineer's `agent-blocked` and `agent-failed` beside the six PM-workflow states. The queue is where "waiting on Andy" is decided, and GitHub labels follow the decision.
 
 **The question backlog.** Before the queue existed, flush had written 339 open questions into `daily-logs/`, May to October 2026, all from unattributed sessions. Most are stale. Triage them once, at the desk:
 

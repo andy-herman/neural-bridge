@@ -7,7 +7,8 @@ that same bot:
   - a pusher loop: every TICK_SECONDS it sends a card for each new item of a
     pushable kind, redraws cards whose item changed (decided, applied,
     cleared), wakes snoozed items, runs pending applies, and writes the
-    heartbeat the health check and the failure watcher read
+    heartbeat the health check and the failure watcher read. It also syncs
+    the quarantine (captures) and the loop engineer's open PRs.
   - button callbacks: approve and reject (two taps where they publish or
     delete), acknowledge, answer, snooze a day, retry
   - answers: a reply to a question's card, or to the prompt its Answer button
@@ -36,13 +37,14 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
-from . import actions, appliers, captures, health, render
+from . import actions, appliers, captures, health, pr_reviews, render
 from . import store as st
 
 TICK_SECONDS = 15
 CAPTURE_SYNC_SECONDS = 600
 LIST_LIMIT = 10
 CAPTURE_SYNC_KEY = "capture_sync"
+PR_SYNC_KEY = "pr_review_sync"
 # Runs before Luna's own text handler (group 0), so a queue answer stops there.
 ANSWER_HANDLER_GROUP = -1
 
@@ -71,7 +73,8 @@ class QueueSurface:
     def __init__(self, *, store: st.Store, repo: Path, chat_ids: Callable[[], set[int]],
                  log: Callable[[str], None], push_kinds: tuple[str, ...] | None = None,
                  appliers: dict[str, Applier] | None = None,
-                 capture_sync: Callable[[], object] | None = None):
+                 capture_sync: Callable[[], object] | None = None,
+                 pr_sync: Callable[[], object] | None = None):
         self.store = store
         self.repo = repo
         self.chat_ids = chat_ids
@@ -80,6 +83,8 @@ class QueueSurface:
         self.appliers = appliers if appliers is not None else _default_appliers(repo)
         self._capture_sync = capture_sync or (lambda: captures.sync(store, repo))
         self._last_capture_sync = 0
+        self._pr_sync = pr_sync or (lambda: pr_reviews.sync(store))
+        self._last_pr_sync = 0
         self._apply_lock = asyncio.Lock()
         self._send_failures: dict[str, int] = {}
         self._task: asyncio.Task | None = None
@@ -142,6 +147,17 @@ class QueueSurface:
             except Exception as exc:
                 self.store.meta_set(CAPTURE_SYNC_KEY, f"error {now} {type(exc).__name__}: {exc}"[:300])
                 self.log(f"QUEUE capture sync failed: {type(exc).__name__}: {exc}")
+
+        if now - self._last_pr_sync >= pr_reviews.SYNC_SECONDS:
+            self._last_pr_sync = now
+            try:
+                created, cleared = await asyncio.to_thread(self._pr_sync)
+                self.store.meta_set(PR_SYNC_KEY, f"ok {now}")
+                if created or cleared:
+                    self.log(f"QUEUE PR reviews: +{len(created)} -{len(cleared)}")
+            except Exception as exc:
+                self.store.meta_set(PR_SYNC_KEY, f"error {now} {type(exc).__name__}: {exc}"[:300])
+                self.log(f"QUEUE PR review sync failed: {type(exc).__name__}: {exc}")
 
         for item in self.store.needing_render(self.push_kinds):
             for chat_id in sorted(self.chat_ids()):
@@ -296,6 +312,10 @@ class QueueSurface:
                 await query.answer("Already handled.")
                 await redraw(item)
                 return
+            if item.kind == st.PR_REVIEW and action == render.APPROVE and not render.pr_mergeable(item):
+                await query.answer("Merge appears once the checks pass.")
+                await redraw(item)
+                return
             await query.answer()
             if chat_id is not None:
                 try:
@@ -312,7 +332,18 @@ class QueueSurface:
         if action in (render.APPROVE_CONFIRMED, render.REJECT_CONFIRMED, render.ACK):
             verb = {render.APPROVE_CONFIRMED: st.APPROVE, render.REJECT_CONFIRMED: st.REJECT,
                     render.ACK: st.ACKNOWLEDGE}[action]
-            if not self.store.decide(item.id, verb, actor=actor):
+            data = None
+            if item.kind == st.PR_REVIEW and verb == st.APPROVE:
+                # Merge exactly the commit the confirm screen showed. A push or
+                # a check change since then means Andy has not seen this one.
+                head = str(item.payload.get("head_sha") or "")
+                shown = render.shown_head(getattr(message, "text", None))
+                if not render.pr_mergeable(item) or not head or shown != head[:7]:
+                    await query.answer("The PR changed since that screen. Look again.")
+                    await redraw(item)
+                    return
+                data = {"approved_sha": head}
+            if not self.store.decide(item.id, verb, actor=actor, data=data):
                 await query.answer("Already handled.")
             else:
                 await query.answer("Recorded.")

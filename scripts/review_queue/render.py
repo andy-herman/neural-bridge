@@ -18,6 +18,7 @@ import html
 import re
 import time
 
+from . import pr_reviews
 from . import store as st
 
 CALLBACK_RE = re.compile(r"^q:([0-9a-f]{6}):([a-z]+!?)$")
@@ -42,8 +43,8 @@ _KIND_LABEL = {
 }
 
 # What approve/reject are called on each kind's buttons.
-_APPROVE_LABEL = {st.CAPTURE: "File it", st.ACTION: "Open the PR"}
-_REJECT_LABEL = {st.QUESTION: "Dismiss"}
+_APPROVE_LABEL = {st.CAPTURE: "File it", st.ACTION: "Open the PR", st.PR_REVIEW: "Merge"}
+_REJECT_LABEL = {st.QUESTION: "Dismiss", st.PR_REVIEW: "Close"}
 _CONFIRM_TEXT = {
     (st.CAPTURE, st.APPROVE): ("File this into the wiki? This opens a pull request that "
                                "moves it from quarantine into knowledge/concepts and merges it."),
@@ -51,8 +52,25 @@ _CONFIRM_TEXT = {
                               "quarantine and merges it. Git history keeps the text."),
     (st.ACTION, st.APPROVE): ("Push this branch and open the pull request? Nothing merges: "
                               "the PR waits for your review on GitHub."),
+    (st.PR_REVIEW, st.APPROVE): ("Merge it into main at the head shown above? Merging deploys the "
+                                 "fleet within about two minutes."),
+    (st.PR_REVIEW, st.REJECT): ("Close the pull request? The branch is kept, and the issue goes to "
+                                "agent-blocked so the loop does not retry it on its own."),
 }
-_CONFIRM_LABEL = {(st.CAPTURE, st.APPROVE): "Yes, file it", (st.ACTION, st.APPROVE): "Yes, open it"}
+_CONFIRM_LABEL = {(st.CAPTURE, st.APPROVE): "Yes, file it", (st.ACTION, st.APPROVE): "Yes, open it",
+                  (st.PR_REVIEW, st.APPROVE): "Yes, merge", (st.PR_REVIEW, st.REJECT): "Yes, close it"}
+
+_HEAD_RE = re.compile(r"\bhead ([0-9a-f]{7})\b")
+
+
+def shown_head(text: str | None) -> str | None:
+    """The short commit a PR card or confirm screen displayed."""
+    m = _HEAD_RE.search(text or "")
+    return m.group(1) if m else None
+
+
+def pr_mergeable(item: st.Item) -> bool:
+    return pr_reviews.mergeable_now(item.payload)
 
 
 def needs_confirm(kind: str, verb: str) -> bool:
@@ -83,10 +101,16 @@ def _status_line(item: st.Item) -> str:
     if item.state == st.SNOOZED:
         return f"Snoozed until {_when(item.snooze_until)}."
     if item.state in (st.DECIDED, st.APPLYING):
+        if item.kind == st.PR_REVIEW:
+            return "Merging…" if verb == st.APPROVE else "Closing the PR…"
         if item.kind == st.ACTION:
             return "Opening the PR…" if verb == st.APPROVE else "Dropping it…"
         return {st.APPROVE: "Filing it now…", st.REJECT: "Rejecting it now…",
                 st.ANSWER: "Saving your answer…"}.get(verb, "Recorded, applying now…")
+    if item.state == st.APPLIED and item.kind == st.PR_REVIEW:
+        if verb == st.APPROVE:
+            return f"Merged {_when(item.decided_at)}. It deploys within about two minutes."
+        return f"Closed {_when(item.decided_at)}. {item.result}."
     if item.state == st.APPLIED:
         if item.kind == st.ACTION:
             done = {st.APPROVE: "PR opened", st.REJECT: "Dropped; nothing was pushed"}.get(verb, "Done")
@@ -107,9 +131,18 @@ def _status_line(item: st.Item) -> str:
             return f"Cleared on its own {_when(item.resolved_at)}. Nothing to do."
         if item.kind == st.ACTION:
             return f"Expired undecided {_when(item.resolved_at)}. Nothing was pushed."
+        if item.kind == st.PR_REVIEW:
+            return f"Merged or closed on GitHub ({_when(item.resolved_at)}). Nothing to do."
         return f"No longer waiting ({_when(item.resolved_at)}). Nothing to do."
     if item.state == st.OPEN and item.kind == st.QUESTION:
         return "Reply to this card to answer."
+    if item.state == st.OPEN and item.kind == st.PR_REVIEW and not pr_mergeable(item):
+        checks = item.payload.get("checks")
+        if checks == pr_reviews.FAILING:
+            return "Checks are failing, so there is no Merge button. Close it, or let the loop fix it."
+        if checks == pr_reviews.GREEN:
+            return "Checks passed, but GitHub cannot merge it as is (a conflict with main?)."
+        return "Merge appears here once the checks pass."
     return ""
 
 
@@ -143,6 +176,8 @@ def keyboard(item: st.Item) -> list[list[tuple[str, str]]]:
                     [("Snooze 1 day", callback(item.id, SNOOZE))]]
         first = [(_APPROVE_LABEL.get(item.kind, "Approve"), callback(item.id, APPROVE)),
                  (_REJECT_LABEL.get(item.kind, "Reject"), callback(item.id, REJECT))]
+        if item.kind == st.PR_REVIEW and not pr_mergeable(item):
+            first = first[1:]
         if item.kind == st.ACTION:
             # No snooze: an action expires after a day (see actions.py).
             return [first]
