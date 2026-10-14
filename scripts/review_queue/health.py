@@ -37,10 +37,11 @@ STATUS_ENV = "NB_REVIEW_QUEUE_STATUS"
 # Which kinds Luna's bot pushes as cards. Alerts joined captures on 2026-10-11,
 # after a clean shadow week (docs/REVIEW_QUEUE.md); the producers' own Telegram
 # sends were removed at the same time, so nothing arrives twice. Questions and
-# actions (slice B) and PR reviews (slice C) have no other push to shadow, so
-# they are pushed at once.
+# actions (slice B), PR reviews (slice C) and publish items (slice D) have no
+# other push to shadow, so they are pushed at once.
 PUSH_KINDS_ENV = "NB_QUEUE_PUSH_KINDS"
-DEFAULT_PUSH_KINDS: tuple[str, ...] = (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW)
+DEFAULT_PUSH_KINDS: tuple[str, ...] = (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW,
+                                       st.PUBLISH)
 
 
 def push_kinds() -> tuple[str, ...]:

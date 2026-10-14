@@ -10,6 +10,7 @@ each one with buttons; every decision and its outcome is logged.
     questions.py  flush open-question producer, the answer applier, the backlog
     actions.py    gated Discord actions (open_pr_with_changes) and their applier
     pr_reviews.py the loop engineer's PRs: sync from GitHub, merge and close
+    publish.py    the week's blog post from Sunday prep: ready, or hold a week
     appliers.py   what a decision does, per kind (bridge and CLI share it)
     render.py     Telegram card text and buttons (pure)
     surface.py    the pusher loop, button callbacks and /queue in Luna's bot

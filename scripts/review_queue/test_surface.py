@@ -350,7 +350,8 @@ class TestHealth(unittest.TestCase):
         import os
         saved = os.environ.pop(health.PUSH_KINDS_ENV, None)
         try:
-            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW))
+            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW,
+                                                   st.PUBLISH))
             os.environ[health.PUSH_KINDS_ENV] = "capture, bogus"
             self.assertEqual(health.push_kinds(), (st.CAPTURE,))
         finally:

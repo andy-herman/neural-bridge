@@ -292,5 +292,30 @@ class TestLinkedInModel(unittest.TestCase):
         self.assertEqual(result, (False, f"claude call failed on {DEFAULT_MODEL}: exit_1:b"))
 
 
+
+class TestQueuePublishItem(unittest.TestCase):
+    def candidate(self):
+        from datetime import date
+        return prepare_week.Candidate(
+            file_path=prepare_week.BLOG_REPO / "src" / "content" / "posts" / "the-queue.mdx",
+            slug="the-queue", title="The queue", description="", pub_date=date(2026, 10, 19),
+            content_type="posts", body="")
+
+    def test_sunday_prep_raises_one_publish_card(self):
+        from datetime import date
+        from scripts.review_queue import store as st
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {st.DB_ENV: str(Path(tmp) / "q.db")}):
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+            items = st.Store().items()
+        self.assertEqual([(i.kind, i.payload["path"]) for i in items],
+                         [(st.PUBLISH, "src/content/posts/the-queue.mdx")])
+
+    def test_a_broken_queue_never_fails_the_prep(self):
+        from datetime import date
+        with mock.patch("scripts.review_queue.publish.raise_for_week", side_effect=RuntimeError("locked")):
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+
 if __name__ == "__main__":
     unittest.main()

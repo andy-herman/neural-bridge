@@ -43,8 +43,9 @@ _KIND_LABEL = {
 }
 
 # What approve/reject are called on each kind's buttons.
-_APPROVE_LABEL = {st.CAPTURE: "File it", st.ACTION: "Open the PR", st.PR_REVIEW: "Merge"}
-_REJECT_LABEL = {st.QUESTION: "Dismiss", st.PR_REVIEW: "Close"}
+_APPROVE_LABEL = {st.CAPTURE: "File it", st.ACTION: "Open the PR", st.PR_REVIEW: "Merge",
+                  st.PUBLISH: "Ready"}
+_REJECT_LABEL = {st.QUESTION: "Dismiss", st.PR_REVIEW: "Close", st.PUBLISH: "Hold a week"}
 _CONFIRM_TEXT = {
     (st.CAPTURE, st.APPROVE): ("File this into the wiki? This opens a pull request that "
                                "moves it from quarantine into knowledge/concepts and merges it."),
@@ -101,12 +102,18 @@ def _status_line(item: st.Item) -> str:
     if item.state == st.SNOOZED:
         return f"Snoozed until {_when(item.snooze_until)}."
     if item.state in (st.DECIDED, st.APPLYING):
+        if item.kind == st.PUBLISH:
+            return "Noted…" if verb == st.APPROVE else "Moving it a week…"
         if item.kind == st.PR_REVIEW:
             return "Merging…" if verb == st.APPROVE else "Closing the PR…"
         if item.kind == st.ACTION:
             return "Opening the PR…" if verb == st.APPROVE else "Dropping it…"
         return {st.APPROVE: "Filing it now…", st.REJECT: "Rejecting it now…",
                 st.ANSWER: "Saving your answer…"}.get(verb, "Recorded, applying now…")
+    if item.state == st.APPLIED and item.kind == st.PUBLISH:
+        if verb == st.APPROVE:
+            return f"Ready {_when(item.decided_at)}: the Monday run publishes it."
+        return f"Held {_when(item.decided_at)}: {item.result}."
     if item.state == st.APPLIED and item.kind == st.PR_REVIEW:
         if verb == st.APPROVE:
             return f"Merged {_when(item.decided_at)}. It deploys within about two minutes."
@@ -133,6 +140,8 @@ def _status_line(item: st.Item) -> str:
             return f"Expired undecided {_when(item.resolved_at)}. Nothing was pushed."
         if item.kind == st.PR_REVIEW:
             return f"Merged or closed on GitHub ({_when(item.resolved_at)}). Nothing to do."
+        if item.kind == st.PUBLISH:
+            return f"The Monday publish run has passed ({_when(item.resolved_at)}). Nothing to do."
         return f"No longer waiting ({_when(item.resolved_at)}). Nothing to do."
     if item.state == st.OPEN and item.kind == st.QUESTION:
         return "Reply to this card to answer."
@@ -178,8 +187,9 @@ def keyboard(item: st.Item) -> list[list[tuple[str, str]]]:
                  (_REJECT_LABEL.get(item.kind, "Reject"), callback(item.id, REJECT))]
         if item.kind == st.PR_REVIEW and not pr_mergeable(item):
             first = first[1:]
-        if item.kind == st.ACTION:
-            # No snooze: an action expires after a day (see actions.py).
+        if item.kind in (st.ACTION, st.PUBLISH):
+            # No snooze: an action expires after a day (actions.py), and a
+            # publish item once the Monday run has gone (publish.py).
             return [first]
         return [first, [("Snooze 1 day", callback(item.id, SNOOZE))]]
     if item.state == st.APPLY_FAILED:
