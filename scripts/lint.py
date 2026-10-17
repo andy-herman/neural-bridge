@@ -51,7 +51,7 @@ SETTINGS_FILE = REPO_ROOT / ".claude" / "settings.json"
 # An ADR still "proposed" after this long is either accepted in practice or dead.
 ADR_STALE_DAYS = 60
 
-DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # fleet route; see hooks/claude_env.py
 LINT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 60
 
@@ -452,14 +452,14 @@ def check_frontmatter(verbose: bool = False) -> list[Finding]:
 def call_imperative_check(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+            ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model),
              *claude_env.mcp_args()],
             capture_output=True,
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
-            # The copilot-api proxy, never an inherited base URL or API key.
-            env=claude_env.proxy_env(os.environ),
+            # The fleet route, never an inherited base URL or API key.
+            env=claude_env.fleet_env(os.environ),
         )
     except subprocess.TimeoutExpired:
         return False, None, "timeout"

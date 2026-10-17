@@ -28,7 +28,7 @@ if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 import claude_env  # noqa: E402
 
-DEFAULT_MODEL = "claude-opus-4.8"  # copilot-api id (dotted); fleet runs Opus 4.8 via Copilot
+DEFAULT_MODEL = "claude-opus-4-8"  # API id; claude_env.route_model() dots it for the proxy route
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
 
 
@@ -50,8 +50,8 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     """
     # Start from a copy with every Anthropic routing variable removed, so the
     # route below is the only one in play. Anything inherited (the desktop
-    # app's base URL, ~/.hermes/.env's credit-less API key) would otherwise
-    # win silently. See hooks/claude_env.py.
+    # app's base URL, an API key ~/.hermes/.env happened to load) would
+    # otherwise win silently. See hooks/claude_env.py.
     env = claude_env.direct_env(os.environ)
     env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_NO_DISCORD"] = "1"
@@ -66,26 +66,20 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     # agent the whole shell, so it must not be settable per call site.
     if agent_id:
         env["NB_AGENT_ID"] = agent_id
-    # Route `claude -p` through the model gateway and the local copilot-api
-    # proxy behind it (claude_env.proxy_base) so the fleet runs on
-    # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
-    # spending Claude Max weekly limits. copilot-api exposes the Anthropic
-    # /v1/messages endpoint; the key is a placeholder (the proxy authenticates
-    # with its own cached GitHub token). To revert to the Max login, set
-    # NB_CLAUDE_DIRECT=1 (and use a dashed model id like claude-opus-4-8, since
-    # the dotted DEFAULT_MODEL above is the copilot-api form).
+    # Route `claude -p` on the fleet route (claude_env.fleet_env) so the fleet
+    # never spends Claude Max weekly limits. Since 2026-10-16 that is the
+    # Anthropic API on Andy's own key whenever the key file exists; before,
+    # it was the model gateway and the copilot-api proxy behind it, still
+    # reachable with NB_MODEL_ROUTE=proxy. To use the Max login instead, set
+    # NB_CLAUDE_DIRECT=1.
     #
     # `route_via_proxy=False` opts a caller out entirely: the loop engineer uses
-    # it because its model ids are the dashed Anthropic form (claude-sonnet-5),
-    # not the dotted copilot-api form, and because an unattended coding run
-    # should not silently fail when the proxy is down. Everything conversational
-    # keeps the default.
+    # it so an unattended coding run stays on the Max login. Everything
+    # conversational keeps the default.
     if route_via_proxy and not os.environ.get("NB_CLAUDE_DIRECT"):
-        # Force the base URL so an ambient ANTHROPIC_BASE_URL (e.g. a shell that
-        # points at api.anthropic.com) can't silently bypass the proxy, and
-        # force the placeholder key: a real key from ~/.hermes/.env used to win
-        # over it via setdefault and was sent to the proxy on every turn.
-        env = claude_env.proxy_env(env)
+        # fleet_env forces the route: an ambient ANTHROPIC_BASE_URL or API key
+        # (e.g. one ~/.hermes/.env loaded) can't silently move the call.
+        env = claude_env.fleet_env(env)
     # Otherwise direct: env already carries no routing variables, so the call
     # reaches Anthropic on the Claude Code login.
     return env
@@ -159,14 +153,15 @@ def start_public_research(
         "TMPDIR": str(cwd),
         "CLAUDE_CONFIG_DIR": str(cwd),
         "LANG": "C.UTF-8",
-        "ANTHROPIC_BASE_URL": routed["ANTHROPIC_BASE_URL"],
-        "ANTHROPIC_API_KEY": routed["ANTHROPIC_API_KEY"],
         "NB_AGENT_ID": "research",
         "NB_NO_DISCORD": "1",
         "NB_SKIP_WIKI_RECALL": "1",
     }
+    # Only the route's own variables cross over: the key on the API route, the
+    # base URL and placeholder key on the proxy route.
+    env.update({k: routed[k] for k in claude_env.ROUTING_VARS if k in routed})
     args = [
-        executable, "-p", "--output-format", "json", "--model", model,
+        executable, "-p", "--output-format", "json", "--model", claude_env.route_model(model),
         "--effort", effort, "--bare", "--safe-mode", "--restricted",
         "--tools", "WebSearch,WebFetch", "--allowedTools", "WebSearch,WebFetch",
         "--disable-slash-commands", "--no-session-persistence", "--no-chrome",
@@ -222,7 +217,7 @@ def call_claude_sync(
     file may have been pruned by Claude Code's own cleanup. session_id must
     be a valid UUID; callers should use `session_store.SessionStore.get_or_create`.
     """
-    args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+    args = ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model)]
     if effort in VALID_EFFORTS:
         args.extend(["--effort", effort])
     if allowed_tools:
@@ -277,8 +272,10 @@ def call_claude_sync_with_fallback(
     Claude 5 call fails for any reason but a timeout. Returns (ok, stdout,
     error_reason, model_used).
 
-    Claude 5 answers only through the model gateway (scripts/model_gateway.py),
-    so this keeps a gateway outage from costing a scheduled job its output.
+    On the proxy route Claude 5 answers only through the model gateway
+    (scripts/model_gateway.py), so this keeps a gateway outage from costing a
+    scheduled job its output. On the API route proxy_supports() is always
+    true and there is no retry.
     For stateless calls only: agent turns carry a session, and their fallback
     (agent_runtime) has to decide what happens to it.
     """

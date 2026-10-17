@@ -172,3 +172,86 @@ class TestProxySupports(unittest.TestCase):
 
     def test_the_pipeline_model_is_supported(self):
         self.assertTrue(claude_env.proxy_supports(claude_env.PIPELINE_MODEL))
+
+
+class TestApiRoute(unittest.TestCase):
+    """The fleet's route since 2026-10-16: the Anthropic API on Andy's own key.
+
+    The root conftest starts every test with no key and NB_ANTHROPIC_KEY_FILE
+    pointing nowhere, so each test sets up exactly the key it means to have.
+    """
+
+    def setUp(self):
+        patcher = mock.patch.object(claude_env, "gateway_up", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _key_file(self, text: str) -> str:
+        import tempfile
+        handle = tempfile.NamedTemporaryFile("w", suffix=".key", delete=False)
+        handle.write(text)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_no_key_means_the_proxy_route(self):
+        self.assertIsNone(claude_env.api_key({}))
+        self.assertEqual(claude_env.route({}), claude_env.ROUTE_PROXY)
+
+    def test_the_key_file_selects_the_api_route(self):
+        path = self._key_file("# Anthropic API key for the fleet\n\nsk-ant-test-file\n")
+        env = {"NB_ANTHROPIC_KEY_FILE": path}
+        self.assertEqual(claude_env.api_key(env), "sk-ant-test-file")
+        self.assertEqual(claude_env.route(env), claude_env.ROUTE_API)
+
+    def test_the_env_key_wins_over_the_file(self):
+        path = self._key_file("sk-ant-test-file\n")
+        env = {"NB_ANTHROPIC_KEY_FILE": path, "NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}
+        self.assertEqual(claude_env.api_key(env), "sk-ant-test-env")
+
+    def test_an_inherited_anthropic_api_key_is_not_a_fleet_key(self):
+        # Whatever the parent loaded (e.g. ~/.hermes/.env) must not pick the route.
+        self.assertIsNone(claude_env.api_key({"ANTHROPIC_API_KEY": "sk-ant-inherited"}))
+        self.assertEqual(claude_env.route({"ANTHROPIC_API_KEY": "sk-ant-inherited"}), claude_env.ROUTE_PROXY)
+
+    def test_nb_model_route_proxy_overrides_a_configured_key(self):
+        env = {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env", "NB_MODEL_ROUTE": "proxy"}
+        self.assertEqual(claude_env.route(env), claude_env.ROUTE_PROXY)
+        self.assertEqual(claude_env.fleet_env({**INHERITED, **env})["ANTHROPIC_BASE_URL"],
+                         claude_env.DEFAULT_PROXY_BASE)
+
+    def test_api_env_sets_the_key_and_drops_every_inherited_route(self):
+        env = claude_env.fleet_env({**INHERITED, "NB_ANTHROPIC_API_KEY": "sk-ant-test-env"})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+        for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN"):
+            self.assertNotIn(key, env)
+        self.assertEqual(env["NB_AGENT_ID"], "research")
+
+    def test_api_env_drops_the_host_session_entrypoint(self):
+        # A desktop session's CLAUDE_CODE_ENTRYPOINT made a nested claude -p use
+        # the host login and ignore the key (2026-10-16).
+        env = claude_env.api_env({**INHERITED, "NB_ANTHROPIC_API_KEY": "sk-ant-test-env",
+                                  "CLAUDE_CODE_ENTRYPOINT": "claude-desktop"})
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+
+    def test_api_env_without_a_key_refuses_instead_of_using_the_max_login(self):
+        with self.assertRaises(RuntimeError):
+            claude_env.api_env(INHERITED)
+
+    def test_route_model_dashes_4x_ids_for_the_api(self):
+        env = {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}
+        self.assertEqual(claude_env.route_model("claude-opus-4.8", env), "claude-opus-4-8")
+        self.assertEqual(claude_env.route_model("claude-haiku-4.5", env), "claude-haiku-4-5")
+        self.assertEqual(claude_env.route_model("claude-opus-4-8", env), "claude-opus-4-8")
+        self.assertEqual(claude_env.route_model("claude-sonnet-5", env), "claude-sonnet-5")
+
+    def test_route_model_dots_4x_ids_for_the_proxy(self):
+        self.assertEqual(claude_env.route_model("claude-opus-4-8", {}), "claude-opus-4.8")
+        self.assertEqual(claude_env.route_model(claude_env.PIPELINE_MODEL, {}), "claude-opus-4.8")
+        self.assertEqual(claude_env.route_model("claude-opus-5", {}), "claude-opus-5")
+
+    def test_every_model_is_supported_on_the_api_route(self):
+        with mock.patch.dict(os.environ, {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}):
+            self.assertTrue(claude_env.proxy_supports("claude-opus-5"))
+        self.assertFalse(claude_env.proxy_supports("claude-opus-5"))

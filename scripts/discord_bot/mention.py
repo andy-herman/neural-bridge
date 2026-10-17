@@ -127,10 +127,11 @@ def effort_for(agent_id: str) -> str:
 
 
 # Per-agent model. Unlisted agents use claude_invoke.DEFAULT_MODEL
-# (claude-opus-4.8). Claude 5 ids answer only through the model gateway
-# (scripts/model_gateway.py, docs/MODEL_GATEWAY.md); agent_runtime retries a
-# failed Claude 5 turn once on the default, so a gateway outage costs a turn
-# its model, not its answer.
+# (claude-opus-4-8). On the proxy route Claude 5 ids answer only through the
+# model gateway (scripts/model_gateway.py, docs/MODEL_GATEWAY.md), and
+# agent_runtime retries a failed Claude 5 turn once on the default, so a
+# gateway outage costs a turn its model, not its answer. The API route
+# serves every id directly.
 MODEL_PER_AGENT: dict[str, str] = {
     "luna": "claude-opus-5",       # 2026-09-30
     "research": "claude-opus-5",   # 2026-09-30

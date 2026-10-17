@@ -378,13 +378,14 @@ def _subprocess_env_for_compile_claude() -> dict[str, str]:
     defense in depth so a webhook URL cannot leak into a child
     process's environment.
 
-    Always routes through the copilot-api proxy (see hooks/claude_env.py),
-    whatever it inherited. Before 2026-09-25 the route depended on the caller:
+    Always takes the fleet route (hooks/claude_env.py fleet_env: the Anthropic
+    API when a key is configured, else the copilot-api proxy), whatever it
+    inherited. Before 2026-09-25 the route depended on the caller:
     the nightly launchd run reached the Max login, a hand run from a desktop
     session inherited the app's base URL, and a shell that loaded
     ~/.hermes/.env sent a credit-less API key.
     """
-    env = claude_env.proxy_env(os.environ)
+    env = claude_env.fleet_env(os.environ)
     env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_AGENT"] = "compile"
     env["NB_SKIP_FLUSH"] = "1"
@@ -430,7 +431,7 @@ def _claude_or_fallback(prompt: str, model: str, timeout: int) -> tuple[bool, st
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model,
+            ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model),
              *claude_env.mcp_args()],
             capture_output=True,
             text=True,

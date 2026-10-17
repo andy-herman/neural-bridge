@@ -38,7 +38,7 @@ import claude_env  # noqa: E402
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 
-DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # fleet route; see hooks/claude_env.py
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
 # Every turn of a resumed conversation flushes the whole session, so a long one
@@ -105,14 +105,15 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     argv limit and crashing a flush. Verified 2026-09-23 that hooks do fire
     for nested `claude -p` calls and that their transcripts exist.
 
-    Always routes through the copilot-api proxy on a model it serves (see
-    claude_env). This hook inherits the environment of the session that just
-    ended, and until 2026-09-25 it called claude-sonnet-5 on whatever route
-    that happened to be: the proxy inside an agent turn, which rejects Claude
-    5, so every flush of an agent turn failed with exit 1 and no daily log or
-    progress entry was ever written.
+    Always takes the fleet route (claude_env.fleet_env: the Anthropic API when
+    a key is configured, else the copilot-api proxy), whatever it inherited.
+    This hook inherits the environment of the session that just ended, and
+    until 2026-09-25 it called claude-sonnet-5 on whatever route that happened
+    to be: the proxy inside an agent turn, which rejects Claude 5, so every
+    flush of an agent turn failed with exit 1 and no daily log or progress
+    entry was ever written.
     """
-    env = claude_env.proxy_env(os.environ)
+    env = claude_env.fleet_env(os.environ)
     env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_SKIP_WIKI_RECALL"] = "1"
     env["NB_SKIP_FLUSH"] = "1"
@@ -215,7 +216,7 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", "--output-format", "text", "--model", model,
+            ["claude", "-p", "--output-format", "text", "--model", claude_env.route_model(model),
              *claude_env.mcp_args()],
             input=prompt,
             capture_output=True,
