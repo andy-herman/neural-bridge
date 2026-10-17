@@ -3,7 +3,14 @@
 Standard library only, shared by the hooks, compile.py, lint.py and the
 Discord daemon's claude_invoke (the same arrangement as wiki_recall).
 
-Two routes exist on the Mac Mini:
+Three routes exist on the Mac Mini:
+
+- API (the fleet's route since 2026-10-16). The Anthropic API on Andy's own
+  API key, read from a private key file outside the repo (api_key). GitHub
+  began refusing the proxy's Copilot token exchange on 2026-10-16, after
+  which Copilot rejected every Claude 5 request, so the fleet moved here.
+  fleet_env picks this route whenever the key file exists; set
+  NB_MODEL_ROUTE=proxy to go back to the proxy.
 
 - Proxy. Andy's Copilot subscription, reached through NB's model gateway
   (scripts/model_gateway.py, localhost:4142) in front of the local copilot-api
@@ -30,8 +37,9 @@ variables, because each one silently takes precedence:
   desktop app's own URL inside a Claude desktop session.
 - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_TOKEN replace the login
   with a key. ~/.hermes/.env, which the Telegram bridges load since
-  2026-08-16, holds a key with no credit, so a direct call spawned under it
-  failed with "Credit balance is too low".
+  2026-08-16, held a key with no credit until 2026-10-16, so a direct call
+  spawned under it failed with "Credit balance is too low". The API route
+  sets its key itself and never relies on an inherited one.
 
 Until 2026-09-25 flush inherited the proxy URL from the agent turn it ran in
 and called claude-sonnet-5 on it, so every flush of an agent turn failed and
@@ -59,8 +67,24 @@ DEFAULT_GATEWAY_BASE = "http://localhost:4142"
 # placeholder so Claude Code has a key to send.
 PROXY_PLACEHOLDER_KEY = "copilot-proxy"
 
-# The memory pipeline's model on the proxy. copilot-api ids are dotted for 4.x.
-PIPELINE_MODEL = "claude-opus-4.8"
+# The memory pipeline's model. Model ids in this repo are written in the API's
+# dashed form; route_model() converts 4.x ids to copilot-api's dotted form
+# when a call goes to the proxy.
+PIPELINE_MODEL = "claude-opus-4-8"
+
+# The API route's key: NB_ANTHROPIC_API_KEY when set, else the first line of
+# this file (mode 0600, never in the repo). NB_ANTHROPIC_KEY_FILE moves it.
+DEFAULT_API_KEY_FILE = "~/.config/neural-bridge/anthropic-api-key"
+
+ROUTE_API = "api"
+ROUTE_PROXY = "proxy"
+
+# Inherited from a Claude desktop or SDK session (flush runs inside those),
+# CLAUDE_CODE_ENTRYPOINT makes a nested `claude -p` sign in through the host
+# session and ignore ANTHROPIC_API_KEY: verified 2026-10-16 with an invalid
+# key, which a clean environment rejects and the desktop environment did not.
+# The API route drops it so the call bills the key.
+HOST_AUTH_VARS = ("CLAUDE_CODE_ENTRYPOINT",)
 
 # Agent and pipeline calls load no MCP server unless one is passed
 # explicitly (the private grants, see scripts/discord_bot/private_tools.py).
@@ -110,13 +134,85 @@ def proxy_env(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+def _setting(name: str, env: Mapping[str, str] | None) -> str:
+    return ((env or {}).get(name) or os.environ.get(name) or "").strip()
+
+
+def api_key(env: Mapping[str, str] | None = None) -> str | None:
+    """The API route's key, or None when none is configured.
+
+    NB_ANTHROPIC_API_KEY (from `env` or the process environment) wins;
+    otherwise the first non-comment line of the key file. An inherited
+    ANTHROPIC_API_KEY is deliberately ignored: it is whatever the parent
+    process happened to load.
+    """
+    explicit = _setting("NB_ANTHROPIC_API_KEY", env)
+    if explicit:
+        return explicit
+    path = os.path.expanduser(_setting("NB_ANTHROPIC_KEY_FILE", env) or DEFAULT_API_KEY_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    except OSError:
+        pass
+    return None
+
+
+def route(env: Mapping[str, str] | None = None) -> str:
+    """ROUTE_API or ROUTE_PROXY. NB_MODEL_ROUTE picks one explicitly;
+    otherwise the API route whenever a key is configured."""
+    choice = _setting("NB_MODEL_ROUTE", env).lower()
+    if choice in (ROUTE_API, ROUTE_PROXY):
+        return choice
+    return ROUTE_API if api_key(env) else ROUTE_PROXY
+
+
+def api_env(env: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `env` that reaches the Anthropic API on the configured key.
+
+    Raises RuntimeError when no key is configured, rather than letting Claude
+    Code fall back to the Max login."""
+    key = api_key(env)
+    if not key:
+        raise RuntimeError("no Anthropic API key: set NB_ANTHROPIC_API_KEY or create "
+                           f"{DEFAULT_API_KEY_FILE}")
+    out = {k: v for k, v in direct_env(env).items() if k not in HOST_AUTH_VARS}
+    out["ANTHROPIC_API_KEY"] = key
+    return out
+
+
+def fleet_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The environment for a fleet or memory-pipeline `claude -p` call: the API
+    route (api_env) or the proxy route (proxy_env), as route() decides."""
+    return api_env(env) if route(env) == ROUTE_API else proxy_env(env)
+
+
+_DOTTED_4X_RE = re.compile(r"^(claude-(?:opus|sonnet|haiku)-4)\.(\d+)$")
+_DASHED_4X_RE = re.compile(r"^(claude-(?:opus|sonnet|haiku)-4)-(\d+)$")
+
+
+def route_model(model: str, env: Mapping[str, str] | None = None) -> str:
+    """`model` in the id form the chosen route accepts: dashed for the API
+    (claude-opus-4-8), dotted for copilot-api (claude-opus-4.8). Claude 5 ids
+    have no minor version and pass through unchanged."""
+    if route(env) == ROUTE_API:
+        return _DOTTED_4X_RE.sub(r"\1-\2", model)
+    return _DASHED_4X_RE.sub(r"\1.\2", model)
+
+
 _CLAUDE_5_RE = re.compile(r"^claude-(opus|sonnet|haiku)-5\b")
 
 
 def proxy_supports(model: str) -> bool:
-    """True when `model` works even on the fallback path, copilot-api with no
-    gateway in front. Claude 5 ids work only through the gateway, so a default
-    that must keep working while the gateway is down stays on 4.x."""
+    """True when `model` works even when the route degrades. On the API route
+    every model does. On the proxy route Claude 5 ids work only through the
+    gateway (copilot-api alone rejects them), so a default that must keep
+    working while the gateway is down stays on 4.x."""
+    if route() == ROUTE_API:
+        return True
     return not _CLAUDE_5_RE.match(model)
 
 

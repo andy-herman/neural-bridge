@@ -437,6 +437,16 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertNotIn("NB_DISCORD_WEBHOOK", env)
 
+    def test_subprocess_env_takes_the_api_route_when_a_key_is_configured(self):
+        inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+                     "ANTHROPIC_API_KEY": "sk-ant-inherited", "ANTHROPIC_TOKEN": "t",
+                     "NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}
+        with patch.dict(os.environ, inherited, clear=False):
+            env = flush._subprocess_env_for_claude()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertNotIn("ANTHROPIC_TOKEN", env)
+
     def test_subprocess_env_pins_the_proxy_whatever_it_inherits(self):
         # flush inherits the ended session's environment: the proxy inside an
         # agent turn, the desktop app's URL inside a desktop session, a

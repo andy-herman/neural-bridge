@@ -101,9 +101,10 @@ ADVISORS = {
 
 # Loid runs on Opus 4.8 in the council (his charter's declared model; the NB
 # invocation path does not yet read charter model, so we pass it explicitly).
-LOID_MODEL = os.environ.get("COUNCIL_LOID_MODEL", "claude-opus-4.8")  # copilot-api id (dotted)
-# Router is a cheap classification; keep it on Haiku (also served by copilot-api).
-ROUTER_MODEL = os.environ.get("COUNCIL_ROUTER_MODEL", "claude-haiku-4.5")
+# API ids; claude_invoke passes them through claude_env.route_model().
+LOID_MODEL = os.environ.get("COUNCIL_LOID_MODEL", "claude-opus-4-8")
+# Router is a cheap classification; keep it on Haiku.
+ROUTER_MODEL = os.environ.get("COUNCIL_ROUTER_MODEL", "claude-haiku-4-5")
 ROUTER_TIMEOUT = int(os.environ.get("COUNCIL_ROUTER_TIMEOUT", "60"))
 YOR_TIMEOUT = int(os.environ.get("COUNCIL_YOR_TIMEOUT", "240"))
 

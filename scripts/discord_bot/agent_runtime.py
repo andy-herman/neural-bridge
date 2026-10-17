@@ -169,7 +169,8 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         **model_kwargs,
     )
 
-    # Claude 5 answers only through the model gateway. If this agent's Claude 5
+    # On the proxy route Claude 5 answers only through the model gateway (on
+    # the API route proxy_supports() is always true). If this agent's Claude 5
     # turn fails for any reason but a timeout, run it once more on the fleet
     # default: on the same session when there is one (a session resumes across
     # models, verified 2026-09-30), otherwise on a fresh id, since the failed

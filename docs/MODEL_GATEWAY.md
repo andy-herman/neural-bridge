@@ -1,5 +1,7 @@
 # Model gateway
 
+> **Since 2026-10-16 the fleet does not use this gateway by default.** On 2026-10-16 GitHub began refusing the proxy's Copilot token exchange, and Copilot then rejected every Claude 5 request. `hooks/claude_env.fleet_env()` now sends every fleet and memory-pipeline `claude -p` call (agent turns, flush, compile, lint, the council, check-ins) straight to the Anthropic API on Andy's own API key, whenever the key file `~/.config/neural-bridge/anthropic-api-key` exists (mode 0600, never in the repo; `NB_ANTHROPIC_API_KEY` or `NB_ANTHROPIC_KEY_FILE` override it). Model ids are written in the API's dashed form (`claude-opus-4-8`); `claude_env.route_model()` dots 4.x ids for the proxy. Set `NB_MODEL_ROUTE=proxy` to go back to the gateway and copilot-api described below. Moonbase missions still pin this gateway and move separately.
+
 One local relay, owned by this repo, between every `claude -p` the fleet runs and the Copilot proxy. Code: `scripts/model_gateway.py`. Service: `com.andyherman.neural-bridge.model-gateway`, listening on `127.0.0.1:4142`, in front of copilot-api on `:4141`.
 
 ```
@@ -31,7 +33,7 @@ Verified 2026-09-30 through the gateway with Claude Code 2.1.286: `claude-sonnet
 A thread inside the gateway checks the proxy every five minutes, so trouble is found before an agent turn runs into it.
 
 - **Token expiry.** The watchdog reads the Copilot token's expiry from copilot-api's `/token`, and never logs or keeps the token. On 2026-09-30 it read about 24 hours from the proxy's start with no refresh after that, which is almost certainly how the day's outage began. With less than ten minutes left, the watchdog restarts the proxy. While the token is still valid, it first waits for relayed requests to finish, since a restart kills them mid-stream. Once the token has expired, it restarts at once.
-- **Refusals from anything that uses the proxy.** It counts new 403 lines in copilot-api's own log, which also catches Synapse and Gauntlet: they call `:4141` directly, not through the gateway. It confirms with one probe, `max_tokens: 1` on `gpt-4.1`, a Copilot base model with no premium-request cost, before restarting.
+- **Refusals from anything that uses the proxy.** It counts new 403 lines in copilot-api's own log, which also catches Synapse: it calls `:4141` directly, not through the gateway. (Gauntlet calls the Anthropic API directly and never used the proxy.) It confirms with one probe, `max_tokens: 1` on `gpt-4.1`, a Copilot base model with no premium-request cost, before restarting.
 - **The proxy not answering.** launchd restarts it. If it is still down after ten minutes, the watchdog raises a review-queue alert ("Copilot proxy is not answering") and clears it when the proxy answers.
 - **A restart that does not help.** If a probe is still refused after a restart, the watchdog raises the same alert as the relay's 403 path.
 
