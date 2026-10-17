@@ -29,7 +29,7 @@ from pathlib import Path
 
 from scripts.discord_bot.repos import repo_for
 
-from . import notify, pr, queue, verify, worktree
+from . import pr, queue, verify, worktree
 from .config import LoopConfig
 from .executor import fix_after_failure, implement
 from .queue import Issue
@@ -40,6 +40,15 @@ _log = logging.getLogger("nb_loop")
 
 class _Shutdown(Exception):
     """Raised from the signal handler to unwind the loop cleanly."""
+
+
+# Where the loop tells Andy something. Until 2026-10-16 every event and an
+# end-of-run summary went to Discord, hourly, even when nothing had happened.
+# Now the review queue is the only channel: a PR it opens becomes a pr_review
+# card (scripts/review_queue/pr_reviews.py), and an issue it had to stop on
+# becomes an alert card here. Everything else is the log. Not "loop_engineer":
+# that source is the PR sync's, and a sync clears whatever it did not list.
+ALERT_SOURCE = "loop_engineer_escalations"
 
 
 class LoopEngineer:
@@ -56,20 +65,43 @@ class LoopEngineer:
 
     # ---- terminal outcomes ----
 
+    def _alert(self, issue: Issue, state: str, reason: str) -> None:
+        """A card in Andy's review queue for an issue the loop stopped on, or,
+        with state None, clear it (the issue reached review after all). Never
+        raises: the queue being down must not cost the loop its run."""
+        if self.cfg.dry_run:
+            return
+        try:
+            from scripts.review_queue import store as review
+            s = review.Store()
+            key = f"issue:{issue.number}"
+            if state is None:
+                s.clear(source=ALERT_SOURCE, key=key)
+                return
+            s.raise_item(source=ALERT_SOURCE, key=key, kind=review.ALERT,
+                         title=f"Loop engineer {state} #{issue.number}: {issue.title}"[:200],
+                         detail=reason[:200], agent="loop-engineer",
+                         ref=f"https://github.com/{self.gh_slug}/issues/{issue.number}")
+        except Exception as exc:
+            _log.warning("review queue alert for #%s failed: %s", issue.number, exc)
+
     def _to_review(self, issue: Issue) -> None:
         queue.transition(self.gh_slug, issue.number,
                          remove=[self.cfg.running_label], add=[self.cfg.review_label])
+        self._alert(issue, None, "")
 
     def _to_blocked(self, issue: Issue, reason: str, detail: str = "") -> None:
         queue.transition(self.gh_slug, issue.number,
                          remove=[self.cfg.running_label], add=[self.cfg.blocked_label])
-        notify.notify(notify.blocked_msg(issue.number, reason, detail))
+        _log.info("#%s blocked: %s %s", issue.number, reason, detail[:300])
+        self._alert(issue, "blocked", f"Needs your decision: {reason}")
         self.stats["blocked"] += 1
 
     def _to_failed(self, issue: Issue, reason: str, detail: str = "") -> None:
         queue.transition(self.gh_slug, issue.number,
                          remove=[self.cfg.running_label], add=[self.cfg.failed_label])
-        notify.notify(notify.escalated_msg(issue.number, reason, detail))
+        _log.info("#%s escalated: %s %s", issue.number, reason, detail[:300])
+        self._alert(issue, "escalated", f"Stopped: {reason}. The branch and worktree are kept.")
         self.stats["escalated"] += 1
 
     # ---- per-issue pipeline ----
@@ -189,8 +221,6 @@ class LoopEngineer:
             if cfg.dry_run:
                 _log.info("[dry-run] would open PR for #%s (%s files, %s lines)",
                           issue.number, files, lines)
-                notify.notify(f"🔧 **loop** [dry-run] #{issue.number} passed all gates "
-                              f"({files} files, {lines} lines) — PR suppressed")
                 # Leave the label as running in dry-run; do not advance state.
                 return
 
@@ -201,9 +231,9 @@ class LoopEngineer:
                 self._to_failed(issue, "PR creation failed", pr_result.error)
                 return
 
+            # The PR reaches Andy as a review queue card within two minutes
+            # (the bridge syncs eng/* PRs), so there is nothing to post here.
             self._to_review(issue)
-            notify.notify(notify.pr_opened_msg(issue.number, pr_result.pr_url or "(url?)",
-                                               files, lines))
             self.stats["opened"] += 1
             _log.info("#%s -> PR %s", issue.number, pr_result.pr_url)
 
@@ -225,7 +255,6 @@ class LoopEngineer:
                 day_count = load_count(cfg.state_dir)
                 if day_count >= cfg.max_issues_per_day:
                     _log.info("daily cap reached (%s); stopping", day_count)
-                    notify.notify(f"🔧 **loop** daily cap reached ({day_count}); pausing until tomorrow")
                     break
 
                 issues = queue.list_ready(self.gh_slug, cfg.ready_label_filter())
@@ -242,7 +271,7 @@ class LoopEngineer:
 
                 self._current = issue
                 self.stats["considered"] += 1
-                notify.notify(notify.claimed_msg(issue.number, issue.title))
+                _log.info("#%s claimed: %s", issue.number, issue.title)
                 try:
                     self.process_issue(issue)
                 finally:
@@ -252,10 +281,6 @@ class LoopEngineer:
                 bump_count(cfg.state_dir)
         except _Shutdown:
             self._graceful_release()
-        finally:
-            notify.notify(notify.run_summary_msg(
-                self.stats["opened"], self.stats["blocked"],
-                self.stats["escalated"], self.stats["considered"]))
 
         _log.info("run complete: %s", self.stats)
         return 0

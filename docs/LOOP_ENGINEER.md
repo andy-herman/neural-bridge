@@ -122,16 +122,15 @@ discussion's action items flow straight into the queue.
 These are the budget kill-switch Risks.md (R1) calls for — start small, raise
 only after a clean observed cycle.
 
-## Discord
+## Where it tells you things
 
-Posts to a `#engineering-loop` webhook if configured (keychain service
-`neural-bridge-loop-webhook` or env `NB_LOOP_DISCORD_WEBHOOK`), else falls back
-to the main NB webhook. Messages: claimed, PR opened, blocked, escalated, and a
-per-run summary. Set the loop webhook with:
+The review queue, in Luna's Telegram chat, and nowhere else:
 
-```
-security add-generic-password -a "$USER" -s "neural-bridge-loop-webhook" -w "https://discord.com/api/webhooks/<id>/<token>"
-```
+- **A PR it opened** arrives as a pr_review card within two minutes, with Merge once CI passes.
+- **An issue it stopped on** (agent-blocked or agent-failed) arrives as an alert card with the reason and a link to the issue. The card clears itself if a later attempt at that issue opens a PR.
+- **Everything else goes only to the log:** claims, the daily cap, and the end-of-run summary (`~/Library/Logs/neural-bridge/loop-engineer.stderr.log`).
+
+Until 2026-10-16 every event and an hourly run summary also went to Discord, including a "0 opened" summary on every idle hour. The installed plist also sets `NB_NO_DISCORD=1`.
 
 ## Installing the launchd job (only after you trust it)
 
