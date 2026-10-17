@@ -1,6 +1,6 @@
 # Flush prompt v1.0
 
-Used by `hooks/flush.py` to summarize a Claude Code session transcript into a structured daily-log entry per ADR-007. Variables `{agent}`, `{session_id}`, `{hook_event}`, `{transcript}` are substituted by `flush.py` before the prompt is sent to `claude -p`.
+Used by `hooks/flush.py` to summarize a Claude Code session transcript into a structured daily-log entry per ADR-007. Variables `agent`, `session_id`, `hook_event`, `transcript` (in braces where they appear below) are substituted by `flush.py` before the prompt is sent to `claude -p`.
 
 ---
 

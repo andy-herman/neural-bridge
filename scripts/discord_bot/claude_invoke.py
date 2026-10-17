@@ -188,9 +188,22 @@ def call_claude_sync(
     mcp_config: str | None = None,
     telemetry_agent_id: str | None = None,
     *,
+    flush: bool = True,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
     _telemetry_span: agent_telemetry.Invocation | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
+
+    `flush=False` sets NB_SKIP_FLUSH=1, so the session's SessionEnd hook does
+    not spawn a flush. Every stateless job (check-ins, publish prep, Echo,
+    digests) should pass it: their flush lands in daily-logs/_unattributed,
+    which nothing reads, and on the API key it cost more than the job itself
+    (about $99 a month across those callers, 2026-10-17). Agent turns keep
+    the default: their flush feeds the progress log and the review queue.
+
+    `max_turns` (`--max-turns`) and `max_budget_usd` (`--max-budget-usd`) cap
+    an agentic run's tool round trips and its spend.
 
     If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
     enable headless tool use. Default is no tools (text-only generation).
@@ -228,6 +241,10 @@ def call_claude_sync(
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
+    if max_turns:
+        args.extend(["--max-turns", str(int(max_turns))])
+    if max_budget_usd:
+        args.extend(["--max-budget-usd", f"{float(max_budget_usd):.2f}"])
     if session_id:
         if resume:
             args.extend(["--resume", session_id])
@@ -242,7 +259,7 @@ def call_claude_sync(
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
-                env=_subprocess_env(agent_id=agent_id),
+                env={**_subprocess_env(agent_id=agent_id), **({} if flush else {"NB_SKIP_FLUSH": "1"})},
             )
         except subprocess.TimeoutExpired:
             return False, "", "timeout"

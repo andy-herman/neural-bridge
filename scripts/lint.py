@@ -458,8 +458,9 @@ def call_imperative_check(prompt: str, model: str, timeout: int) -> tuple[bool, 
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
-            # The fleet route, never an inherited base URL or API key.
-            env=claude_env.fleet_env(os.environ),
+            # The fleet route, never an inherited base URL or API key. No
+            # flush of the lint call itself: nothing would read it.
+            env={**claude_env.fleet_env(os.environ), "NB_SKIP_FLUSH": "1"},
         )
     except subprocess.TimeoutExpired:
         return False, None, "timeout"
