@@ -257,7 +257,8 @@ def generate(prompt: str) -> tuple[bool, str, str]:
     """Run the check-in on Luna's model, falling back once to the fleet
     default when a Claude 5 call fails (claude_invoke.call_claude_sync_with_fallback)."""
     ok, stdout, err, _model = call_claude_sync_with_fallback(
-        prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT)
+        prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT,
+        flush=False)
     return ok, stdout, err
 
 

@@ -5,7 +5,7 @@ verbatim Discord turns into a "lessons learned" digest. The cron pulls the
 agent's conversation log files from the prior 7 days, concatenates them,
 wraps them in the data-not-instructions tag, and prepends this prompt.
 
-Variables substituted: `{agent_id}`, `{week_iso}` (e.g., `2026-W19`).
+Variables substituted: `agent_id`, `week_iso` (e.g., `2026-W19`).
 
 ---
 
