@@ -18,7 +18,7 @@ The queue inverts that: producers write items, and the bot brings each one to An
 
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
-| capture | compile quarantine, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
+| capture | the nightly compile's staged articles; quarantine files already on main, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
 | alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | yes, since 2026-10-11 | Acknowledge, Snooze 1 day |
 | question | `hooks/flush.py`: each open question a session left, for attributed agents | yes | Answer, Dismiss, Snooze 1 day; or reply to the card |
 | action | the Discord daemon: an agent's `open_pr_with_changes`, after validation | yes | Open the PR (confirms with a second tap), Reject |
@@ -88,6 +88,24 @@ python -m scripts.review_queue backlog close
 ```
 
 `keep` turns a question into a live item routed to an agent, so the answer lands in that agent's progress log. `close` records the triage; the rest stay in `daily-logs/`, unanswered.
+
+**The nightly compile, staged.** Since 2026-10-16 the 03:00 job runs `python -m scripts.review_queue.promotions`, not `compile.py`.
+
+- compile.py runs unchanged, but on a private copy of `knowledge/` at `.trees/compile-staging`.
+- Every article it promotes or quarantines becomes a capture card.
+  - The full text is held in the local database.
+  - A private preview is written to the vault at `Neural Bridge/Wiki staging/<slug>.md`.
+  - The card carries only the slug and the verdict.
+- Nothing is committed or pushed until Andy files it.
+- File it publishes the article to `knowledge/concepts` with a `reviewed:` line. In the same pull request, merged at once after the outbound guard, it also:
+  - archives the version it replaces under `.history/`;
+  - updates the index and the log;
+  - writes any connection whose other concept is already on main.
+- Reject drops the article, and nothing ever reached GitHub.
+- A later run that restages the same slug supersedes the older card.
+- The compile's own Discord summary is off; the cards are the notice.
+
+Before this, the compile wrote into the shared checkout. A promotion sat there uncommitted for two days, blocked auto-reload's next pull, and carried personal details the outbound guard does not look for.
 
 ## The producer contract
 

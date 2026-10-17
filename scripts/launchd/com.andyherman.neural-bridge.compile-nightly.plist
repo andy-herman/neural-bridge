@@ -5,22 +5,21 @@
     <key>Label</key>
     <string>com.andyherman.neural-bridge.compile-nightly</string>
 
-    <!-- Nightly compile pass: reads new daily-logs/<agent>/*.md entries
-         since last_run_at, runs the filing gate per proposed_concept,
-         writes PROMOTE'd articles to knowledge/concepts/, files
-         QUARANTINE'd candidates to knowledge/quarantine/, refreshes
-         knowledge/log.md and knowledge/index.md, writes connection files
-         for shared-source pairs. Per ADR-007.
+    <!-- Nightly compile pass, staged (scripts/review_queue/promotions.py):
+         compile.py runs the filing gate over new daily-logs/<agent>/*.md
+         entries into a private copy of knowledge/ at .trees/compile-staging,
+         and every article it promotes or quarantines becomes a review queue
+         card with a private preview in the vault. Nothing lands in the
+         shared checkout or on GitHub until Andy files it. Per ADR-007.
 
-         Posts a daily run summary to Discord (PROMOTE/QUARANTINE/REJECT
-         counts + run-log link). The flush-Discord flood from spawned
-         claude -p subprocesses is silenced via the NB_NO_DISCORD=1 env
-         in compile.py's _subprocess_env_for_compile_claude() helper. -->
+         No Discord summary (compile runs with no-discord): the cards are the
+         notice. Since 2026-10-16; before that compile.py ran here directly
+         and wrote into the shared checkout. -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
-        <string>/Users/andyherman/Development/neural-bridge/scripts/compile.py</string>
-        <string>--no-dry-run</string>
+        <string>-m</string>
+        <string>scripts.review_queue.promotions</string>
     </array>
 
     <key>WorkingDirectory</key>

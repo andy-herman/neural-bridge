@@ -66,7 +66,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 HOOKS_DIR = REPO_ROOT / "hooks"
 DAILY_LOGS_DIR = REPO_ROOT / "daily-logs"
-KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
+# The nightly run compiles into a private staging copy of knowledge/ and every
+# article it writes becomes a review queue card (scripts/review_queue/
+# promotions.py). Until 2026-10-16 it wrote into the shared checkout: a
+# promotion sat there uncommitted, blocked auto-reload's next pull, and the
+# only thing keeping its text off the public repo was that nothing committed it.
+KNOWLEDGE_DIR = Path(os.environ.get("NB_COMPILE_KNOWLEDGE_DIR") or REPO_ROOT / "knowledge")
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
 HISTORY_DIR = CONCEPTS_DIR / ".history"
 QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
