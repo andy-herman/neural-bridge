@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from . import actions, captures, pr_reviews, publish, questions
+from . import actions, captures, pr_reviews, promotions, publish, questions
 from . import store as st
 
 Applier = Callable[[st.Item], tuple[bool, str]]
@@ -21,7 +21,10 @@ RESOLVES_ON_APPLY = frozenset({st.CAPTURE, st.QUESTION, st.ACTION, st.PR_REVIEW,
 
 def defaults(repo: Path) -> dict[str, Applier]:
     return {
-        st.CAPTURE: lambda item: captures.apply(item, repo=repo),
+        # A capture is either a quarantine file already on main (captures.py)
+        # or an article the nightly compile staged privately (promotions.py).
+        st.CAPTURE: lambda item: (promotions.apply(item, repo=repo) if item.source == promotions.SOURCE
+                                  else captures.apply(item, repo=repo)),
         st.QUESTION: lambda item: questions.apply(item),
         st.ACTION: lambda item: actions.apply(item),
         st.PR_REVIEW: lambda item: pr_reviews.apply(item),

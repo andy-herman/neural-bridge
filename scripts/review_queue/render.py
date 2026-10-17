@@ -197,8 +197,18 @@ def keyboard(item: st.Item) -> list[list[tuple[str, str]]]:
     return []
 
 
+# A staged article (scripts/review_queue/promotions.py) is not on GitHub yet.
+_STAGED_CONFIRM_TEXT = {
+    st.APPROVE: ("File this into the wiki? This publishes it to the public repo through a pull "
+                 "request that merges at once. Read it first in the vault preview."),
+    st.REJECT: "Drop it? Nothing has been published; the article is discarded.",
+}
+
+
 def confirm_text(item: st.Item, verb: str) -> str:
     question = _CONFIRM_TEXT.get((item.kind, verb), f"{verb.capitalize()} this?")
+    if item.kind == st.CAPTURE and item.source == "compile_staged":
+        question = _STAGED_CONFIRM_TEXT.get(verb, question)
     return card_text(item) + "\n\n" + html.escape(question)
 
 
