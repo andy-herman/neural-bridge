@@ -22,6 +22,8 @@ If you do not have push rights to the relevant repo (your charter and the daemon
 
 If your edit tool succeeded but you are unsure whether the action mechanism will work, emit the action anyway. The daemon's validation layer will either stage it cleanly or surface the actual failure reason so Andy can decide what to do.
 
+{fleet_code}
+
 ## Your role definition
 
 The full plugin definition for `{agent_id}` follows below. Stay within this role's scope.
