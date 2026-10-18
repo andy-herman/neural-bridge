@@ -104,10 +104,16 @@ class TestStatelessCallersSkipFlush(unittest.TestCase):
         from datetime import date
         cand = prepare_week.Candidate(file_path=Path("x.mdx"), slug="x", title="X", description="",
                                       pub_date=date(2026, 10, 19), content_type="posts", body="b")
-        with mock.patch.object(prepare_week, "call_claude_sync_with_fallback",
-                               return_value=(True, "post", "", "m")) as call, \
-                mock.patch.object(prepare_week, "build_linkedin_prompt", return_value="p"):
-            prepare_week.generate_linkedin_variant(cand, dry_run=False)
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as corpus:
+            corpus.write("voice")
+            corpus.flush()
+            # CI has no vault, so point the voice corpus at a file that exists.
+            with mock.patch.object(prepare_week, "VOICE_CORPUS", Path(corpus.name)), \
+                    mock.patch.object(prepare_week, "call_claude_sync_with_fallback",
+                                      return_value=(True, "post", "", "m")) as call, \
+                    mock.patch.object(prepare_week, "build_linkedin_prompt", return_value="p"):
+                prepare_week.generate_linkedin_variant(cand, dry_run=False)
         self.assertIs(call.call_args.kwargs["flush"], False)
 
     def test_echo_synthesis(self):
