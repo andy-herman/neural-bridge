@@ -96,6 +96,27 @@ class TestRunAgentTurn(unittest.TestCase):
         self.assertIn("missing", res.setup_error)
         self.assertEqual(self.calls, [])  # claude was never called
 
+    def test_missing_fleet_code_is_setup_error(self):
+        from scripts.fleet_code import FleetCodeError
+        stack, _ = self._patched(call_results=[])
+        with stack, patch.object(agent_runtime, "load_fleet_code",
+                                 side_effect=FleetCodeError("fleet code unreadable")):
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1,
+                                                  message_content="hi")))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_reason, "fleet_code_unavailable")
+        self.assertIn("fleet code", res.setup_error)
+        self.assertEqual(self.calls, [])  # no hard limits, no turn
+
+    def test_fleet_code_is_passed_to_the_prompt_builder(self):
+        from scripts.fleet_code import TITLE
+        stack, _ = self._patched(call_results=[(True, "ok", "")])
+        with stack:
+            _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=1,
+                                            message_content="hi")))
+            kwargs = agent_runtime.build_mention_prompt.call_args.kwargs
+        self.assertTrue(kwargs["fleet_code"].startswith(TITLE))
+
     def test_happy_path_touches_session_and_truncates(self):
         stack, store = self._patched(call_results=[(True, "x" * 200, "")])
         with stack:

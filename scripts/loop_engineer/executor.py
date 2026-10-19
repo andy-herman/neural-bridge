@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.discord_bot.claude_invoke import _subprocess_env, wrap_untrusted
+from scripts.fleet_code import FleetCodeError, load_fleet_code
 
 from .config import LoopConfig
 from .queue import Issue
@@ -53,6 +54,7 @@ def build_prompt(cfg: LoopConfig, issue: Issue) -> str:
         ),
     )
     return template.format(
+        fleet_code=load_fleet_code(),  # raises FleetCodeError; no code, no run
         base_branch=cfg.base_branch,
         number=issue.number,
         title=issue.title,
@@ -139,7 +141,12 @@ def _invoke(
 
 def implement(cfg: LoopConfig, wt: WorktreeHandle, issue: Issue) -> ExecResult:
     """First attempt at an issue, with a single max-turns resume if needed."""
-    prompt = build_prompt(cfg, issue)
+    try:
+        prompt = build_prompt(cfg, issue)
+    except FleetCodeError as exc:
+        # Environment problem, not the issue's: main.py requeues and aborts.
+        return ExecResult(ok=False, session_id=None, summary=str(exc),
+                          error_reason="fleet_code_unavailable", num_turns=0)
     result = _invoke(cfg, wt, prompt, resume_session=None, max_turns=cfg.max_turns)
     if result.error_reason == "max_turns" and result.session_id:
         # Give it one more window on the same session to wrap up.

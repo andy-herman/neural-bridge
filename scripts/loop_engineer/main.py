@@ -130,11 +130,13 @@ class LoopEngineer:
 
             result = implement(cfg, wt, issue)
 
-            if result.error_reason == "claude_cli_not_found":
+            if result.error_reason in ("claude_cli_not_found", "fleet_code_unavailable"):
                 # Config/environment problem, not the issue's fault. Bounce it
                 # back to the queue and abort the whole run upstream.
                 queue.transition(self.gh_slug, issue.number,
                                  remove=[cfg.running_label], add=[cfg.ready_label])
+                if result.error_reason == "fleet_code_unavailable":
+                    raise SystemExit(f"fleet code unavailable, aborting run: {result.summary}")
                 raise SystemExit("claude CLI not found on PATH — aborting run")
 
             # An infra-class invocation failure (timeout, API/auth error, CLI

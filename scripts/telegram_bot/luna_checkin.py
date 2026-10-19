@@ -56,6 +56,7 @@ from scripts.discord_bot.mention import (  # noqa: E402
     model_for,
 )
 from scripts.env_file import load_default_env  # noqa: E402
+from scripts.fleet_code import FleetCodeError, load_fleet_code  # noqa: E402
 
 AGENT_ID = "luna"
 KEYCHAIN_SERVICE = "neural-bridge-telegram-luna"
@@ -183,9 +184,14 @@ def gather_notes() -> str:
 
 
 def build_checkin_prompt(kind: str, context: str, notes: str,
-                         template: str | None = None) -> str:
+                         template: str | None = None,
+                         fleet_code: str | None = None) -> str:
+    """Fill the check-in template. Loads the fleet code when not given;
+    raises FleetCodeError if it is unavailable."""
     tpl = template if template is not None else PROMPT_PATH.read_text(encoding="utf-8")
+    code = fleet_code if fleet_code is not None else load_fleet_code()
     return (tpl
+            .replace("{fleet_code}", code)
             .replace("{kind}", kind)
             .replace("{kind_guidance}", KIND_GUIDANCE.get(kind, ""))
             .replace("{context}", context or "_(nothing gathered)_")
@@ -278,7 +284,13 @@ def main(argv: list[str] | None = None) -> int:
 
     context = gather_context()
     notes = gather_notes()
-    prompt = build_checkin_prompt(args.kind, context, notes)
+    try:
+        prompt = build_checkin_prompt(args.kind, context, notes)
+    except FleetCodeError as exc:
+        print(f"check-in not generated: {exc}", file=sys.stderr)
+        mem.record(mem.WRITE, "luna_checkin", agent_id=AGENT_ID, ok=False,
+                   detail=f"{args.kind}: fleet code unavailable")
+        return 1
 
     ok, stdout, err = generate(prompt)
     if not ok:
