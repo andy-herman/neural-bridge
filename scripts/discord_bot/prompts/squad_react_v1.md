@@ -1,6 +1,6 @@
 # Squad-discuss react prompt v1.0
 
-Used for round 2 and later, where agents react to prior turns instead of opening fresh. Variables `{agent_id}`, `{topic}`, `{framing}`, `{round_n}`, `{prior_turns}`, `{round_prompt}` are substituted.
+Used for round 2 and later, where agents react to prior turns instead of opening fresh. Variables `agent_id`, `topic`, `framing`, `round_n`, `prior_turns`, `round_prompt` (in braces where they appear below) are substituted.
 
 ---
 

@@ -1,6 +1,6 @@
 # Mention prompt v1.0
 
-Used by every Neural Bridge agent when Andy @-mentions it in Discord. Variables `{agent_id}`, `{agent_definition}`, `{channel_kind}`, `{discord_history}`, `{message}` are substituted before the prompt is sent.
+Used by every Neural Bridge agent when Andy @-mentions it in Discord. Variables `agent_id`, `agent_definition`, `channel_kind`, `discord_history`, `message` (in braces where they appear below) are substituted before the prompt is sent.
 
 PR-P-1: read-only conversation. PR-P-2 will add tool access (gh CLI for issue create/comment/label). PR-P-3 will add cross-agent handoff via @-mention propagation.
 

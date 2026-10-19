@@ -112,7 +112,9 @@ def _invoke(
             # proxy: this path uses dashed Anthropic model ids, and an
             # unattended run that opens PRs should not depend on an optional
             # local proxy being up.
-            env=_subprocess_env(route_via_proxy=False),
+            # NB_SKIP_FLUSH: the loop runs on the Max login, but its session's
+            # flush would bill the API key, for a log nothing reads.
+            env={**_subprocess_env(route_via_proxy=False), "NB_SKIP_FLUSH": "1"},
         )
     except sp.TimeoutExpired:
         return ExecResult(False, resume_session, "", "timeout", 0)

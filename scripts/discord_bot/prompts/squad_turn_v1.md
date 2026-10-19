@@ -2,7 +2,7 @@
 
 Used by `/squad-discuss` to have a single specialist agent draft one substantive turn responding to senior-pm's framing.
 
-Variables `{agent_id}`, `{topic}`, `{framing}` are substituted before the prompt is sent.
+Variables `agent_id`, `topic`, `framing` (in braces where they appear below) are substituted before the prompt is sent.
 
 ---
 

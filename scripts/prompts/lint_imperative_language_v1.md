@@ -2,7 +2,7 @@
 
 Used by `scripts/lint.py` for the rear-guard adversarial-language check. The filing gate runs at promotion time; this lint check runs weekly on already-promoted concepts to catch articles that have decayed (or that the gate missed) into containing imperative language directed at future AI agents.
 
-Variables `{slug}`, `{concept_text}` are substituted by `lint.py`.
+Variables `slug`, `concept_text` (in braces where they appear below) are substituted by `lint.py`.
 
 ---
 

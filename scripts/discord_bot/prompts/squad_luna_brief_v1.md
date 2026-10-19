@@ -2,7 +2,7 @@
 
 Used after the squad report is written and any GitHub issues are filed. Luna distills the outcome into a Discord DM to Andy.
 
-Variables `{topic}`, `{report}`, `{vault_path}`, `{issue_lines}`, `{thread_url}` are substituted.
+Variables `topic`, `report`, `vault_path`, `issue_lines`, `thread_url` (in braces where they appear below) are substituted.
 
 ---
 
