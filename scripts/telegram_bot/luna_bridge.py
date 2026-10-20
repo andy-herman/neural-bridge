@@ -67,6 +67,7 @@ from scripts.discord_bot import agent_telemetry, honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
 from scripts.telegram_bot import checkin_log  # noqa: E402
+from scripts.telegram_bot import history_store  # noqa: E402
 from scripts.env_file import load_default_env  # noqa: E402
 from scripts.review_queue import store as review_store  # noqa: E402
 from scripts.review_queue.surface import QueueSurface  # noqa: E402
@@ -143,17 +144,31 @@ def _is_authorized(update: Update) -> bool:
 # `history` arg — recent Telegram turns formatted as discord-style dicts.
 
 _chat_history: dict[int, list[dict]] = {}
+_history_loaded = False
+BRIDGE_NAME = "luna"
+
+
+def _ensure_history() -> None:
+    """Load the history saved before the last restart, once."""
+    global _history_loaded
+    if not _history_loaded:
+        _history_loaded = True
+        for chat, turns in history_store.load(BRIDGE_NAME).items():
+            _chat_history.setdefault(chat, turns)
 
 
 def _push_history(chat_id: int, author: str, content: str) -> None:
     """Append a turn to the in-memory chat history, trimming to budget."""
+    _ensure_history()
     hist = _chat_history.setdefault(chat_id, [])
     hist.append({"author": author, "content": content})
     if len(hist) > HISTORY_MAX_TURNS * 2:
         del hist[: len(hist) - HISTORY_MAX_TURNS * 2]
+    history_store.save(BRIDGE_NAME, _chat_history)
 
 
 def _chat_history_for(chat_id: int) -> list[dict]:
+    _ensure_history()
     return list(_chat_history.get(chat_id, []))
 
 

@@ -110,6 +110,40 @@ def _tokens(meta: dict) -> tuple[dict, dict]:
     return totals, by_model
 
 
+TRANSCRIPTS = Path.home() / ".claude" / "projects"
+_TAIL_BYTES = 512 * 1024
+
+
+def context_tokens(session_id: str, root: Path | None = None) -> int | None:
+    """The context the session's last model call carried, in tokens (input
+    plus cache reads and writes), from its Claude Code transcript; None when
+    the transcript or a usage record cannot be found. Exact, unlike the
+    result's totals, which add up every call of a multi-step turn."""
+    if not session_id or "/" in session_id:
+        return None
+    for path in (root or TRANSCRIPTS).glob(f"*/{session_id}.jsonl"):
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - _TAIL_BYTES))
+                tail = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in reversed(tail.splitlines()):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get("message") if isinstance(rec, dict) else None
+            if rec.get("type") != "assistant" or not isinstance(msg, dict) or msg.get("model") == "<synthetic>":
+                continue
+            u = msg.get("usage") or {}
+            if u:
+                return (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
+                        + int(u.get("cache_creation_input_tokens") or 0))
+    return None
+
+
 def path_for(when: datetime, usage_dir: Path | None = None) -> Path:
     return (usage_dir or USAGE_DIR) / f"claude-{when:%Y-%m}.jsonl"
 

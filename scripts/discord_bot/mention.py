@@ -7,8 +7,10 @@ context, and posts the response.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .claude_invoke import sanitize_untrusted_text
@@ -32,6 +34,8 @@ _logger = logging.getLogger("nb_discord.mention")
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 MENTION_PROMPT_PATH = PROMPTS_DIR / "mention_v1.md"
+# The short form for a resumed session whose fixed context has not changed.
+MENTION_CONTINUE_PROMPT_PATH = PROMPTS_DIR / "mention_continue_v1.md"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = REPO_ROOT / "plugins" / "neural-bridge-core" / "agents"
@@ -673,7 +677,28 @@ def _wiki_recall_block(agent_id: str, message_content: str) -> str:
     return block
 
 
-def build_mention_prompt(
+@dataclass(frozen=True)
+class MentionParts:
+    """A turn's prompt, built two ways.
+
+    `full` is the whole prompt, as every turn sent until 2026-10-20.
+    `continuation` is the short form for a resumed session: only what changes
+    turn to turn (live state, the progress log, wiki matches, recent context,
+    the message). `static_hash` covers everything else (the charter, the
+    template's rules, notes, voice profile, peer card); when it differs from
+    what the session started with, the full prompt goes again.
+
+    Why: a resumed session keeps every earlier prompt, and the full one is
+    about 81,000 characters for Luna, 75,000 of them the same each turn. Her
+    Telegram session grew from 74K to 353K tokens of context between
+    2026-10-12 and 2026-10-20, and a one-line turn cost $2.21.
+    """
+    full: str
+    continuation: str
+    static_hash: str
+
+
+def build_mention_parts(
     template: str,
     *,
     agent_id: str,
@@ -682,7 +707,8 @@ def build_mention_prompt(
     history: list[dict],
     message_content: str,
     conversation_log_path: str = "",
-) -> str:
+    continue_template: str | None = None,
+) -> MentionParts:
     history_block = format_discord_history(history)
     sanitized_message = sanitize_untrusted_text(message_content, "message")
     sanitized_definition = sanitize_untrusted_text(agent_definition, "agent-definition")
@@ -701,41 +727,31 @@ def build_mention_prompt(
         .replace("{message}", sanitized_message)
         .replace("{conversation_log_path}", conversation_log_path)
     )
-    if wiki_block:
-        rendered = wiki_block + rendered
 
     # Echo's voice profile auto-injected for voice-mirroring agents
     # (content, social, luna). Lets them reference Andy's voice without a
     # tool call. Phase 5 of the Echo build.
-    if agent_id in ECHO_VOICE_AGENTS:
-        echo_prefix = _echo_voice_block(agent_id)
-        if echo_prefix:
-            rendered = echo_prefix + rendered
+    echo_prefix = _echo_voice_block(agent_id) if agent_id in ECHO_VOICE_AGENTS else ""
 
     # Every agent: the append-only progress log, the narrative half of the
-    # consolidated note store (docs/MEMORY_CONSOLIDATION.md, Step 1). Prepended
+    # consolidated note store (docs/MEMORY_CONSOLIDATION.md, Step 1). Placed
     # before notes.md so it reads *behind* the notes in the final prompt.
     progress_prefix = _progress_block(agent_id)
-    if progress_prefix:
-        rendered = progress_prefix + rendered
 
     # Luna gets her own working-memory file auto-injected on top of Echo's
     # voice profile. Echo gives her stylistic mirror; her notes give her
     # episodic memory across conversations.
-    if agent_id == "luna":
-        notes_prefix = _luna_notes_block()
-        if notes_prefix:
-            rendered = notes_prefix + rendered
-
-        # Today's calendar and the threads he is waiting on, fetched before the
-        # turn starts. She has the CLIs and the Bash grant to get these herself,
-        # and she repeatedly told him she could not, in sessions where running
-        # the command by hand worked seconds later. Three rounds of charter
-        # wording took that from always to sometimes and stalled. Handing her
-        # the state removes the decision instead of arguing with it: there is
-        # nothing left to be wrong about. Cached ~5 min, fails to "" silently,
-        # and she still runs the CLIs for anything outside this window.
-        rendered = _luna_live_state_block() + rendered
+    #
+    # And today's calendar and the threads he is waiting on, fetched before the
+    # turn starts. She has the CLIs and the Bash grant to get these herself,
+    # and she repeatedly told him she could not, in sessions where running
+    # the command by hand worked seconds later. Three rounds of charter
+    # wording took that from always to sometimes and stalled. Handing her
+    # the state removes the decision instead of arguing with it: there is
+    # nothing left to be wrong about. Cached ~5 min, fails to "" silently,
+    # and she still runs the CLIs for anything outside this window.
+    notes_prefix = _luna_notes_block() if agent_id == "luna" else ""
+    live_state = _luna_live_state_block() if agent_id == "luna" else ""
 
     # The weekly lessons-learned digest used to be prepended here. Retired
     # 2026-08-16 on the evidence, not on taste: over its instrumented lifetime
@@ -747,18 +763,59 @@ def build_mention_prompt(
     # The one real digest that existed was migrated into Luna's notes.md before
     # removal. See docs/MEMORY_CONSOLIDATION.md gate G1.
 
-    # Every agent: prepend the Honcho peer card — LLM-extracted persistent
-    # observations about Andy, shared across all agents in this workspace and
-    # with Yor (the Hermes-side thinking-partner agent). Each agent contributes
-    # observations from its own perspective via directional mode; the peer-card
-    # facts compound. This is the outermost layer, so it reads as the
-    # foundational "who is this person" context before anything more recent.
-    # No-ops if Honcho is unreachable (see honcho_client._enabled / _get_client).
-    honcho_prefix = honcho_client.get_peer_card_context(agent_id)
-    if honcho_prefix:
-        rendered = honcho_prefix + rendered
+    # Every agent: the Honcho peer card, LLM-extracted persistent observations
+    # about Andy, shared across all agents in this workspace and with Yor (the
+    # Hermes-side thinking-partner agent). Each agent contributes observations
+    # from its own perspective via directional mode; the peer-card facts
+    # compound. This is the outermost layer, so it reads as the foundational
+    # "who is this person" context before anything more recent. No-ops if
+    # Honcho is unreachable (see honcho_client._enabled / _get_client).
+    honcho_prefix = honcho_client.get_peer_card_context(agent_id) or ""
 
-    return rendered
+    full = (honcho_prefix + live_state + (notes_prefix or "") + (progress_prefix or "")
+            + (echo_prefix or "") + (wiki_block or "") + rendered)
+
+    static_hash = hashlib.sha256("\x1f".join((
+        template, sanitized_definition, agent_id, channel_kind, conversation_log_path,
+        honcho_prefix, notes_prefix or "", echo_prefix or "",
+    )).encode("utf-8")).hexdigest()[:16]
+
+    frame = continue_template if continue_template is not None else _continue_template()
+    updates = "".join(b for b in (live_state, progress_prefix or "", wiki_block or "") if b).strip()
+    continuation = (
+        frame
+        .replace("{agent_id}", agent_id)
+        .replace("{channel_kind}", channel_kind)
+        .replace("{updates}", updates or "_(nothing new to inject this turn)_")
+        .replace("{discord_history}", history_block)
+        .replace("{message}", sanitized_message)
+    )
+    return MentionParts(full=full, continuation=continuation, static_hash=static_hash)
+
+
+def _continue_template() -> str:
+    try:
+        return MENTION_CONTINUE_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def build_mention_prompt(
+    template: str,
+    *,
+    agent_id: str,
+    agent_definition: str,
+    channel_kind: str,
+    history: list[dict],
+    message_content: str,
+    conversation_log_path: str = "",
+) -> str:
+    """The full prompt (build_mention_parts(...).full)."""
+    return build_mention_parts(
+        template, agent_id=agent_id, agent_definition=agent_definition, channel_kind=channel_kind,
+        history=history, message_content=message_content, conversation_log_path=conversation_log_path,
+        continue_template="",
+    ).full
 
 
 def truncate_response(text: str, *, limit: int = MAX_RESPONSE_CHARS) -> str:

@@ -315,6 +315,66 @@ class TestModelPolicy(unittest.TestCase):
             self.assertRegex(model, r"^claude-(opus|sonnet|haiku)-[0-9]", agent)
 
 
+class TestMentionParts(unittest.TestCase):
+    """The short continuation prompt for resumed sessions (2026-10-20)."""
+
+    def setUp(self):
+        global mention
+        from scripts.discord_bot import mention
+
+    def parts(self, *, notes="N1", message="the venue form is done", history=None, charter="CHARTER"):
+        with patch.object(mention.honcho_client, "get_peer_card_context", return_value="<peer>P</peer>\n"), \
+             patch.object(mention, "_luna_notes_block", return_value=f"<luna-notes>{notes}</luna-notes>\n"), \
+             patch.object(mention, "_luna_live_state_block", return_value="## Andy's current state\nLIVE\n"), \
+             patch.object(mention, "_echo_voice_block", return_value="<voice>V</voice>\n"), \
+             patch.object(mention, "_progress_block", return_value="## Progress\nPROG\n"), \
+             patch.object(mention, "_wiki_recall_block", return_value="## Wiki\nWIKI\n"):
+            return mention.build_mention_parts(
+                mention.MENTION_PROMPT_PATH.read_text(encoding="utf-8"), agent_id="luna",
+                agent_definition=charter, channel_kind="DM",
+                history=history or [{"author": "Luna", "content": "(my scheduled morning check-in) X"}],
+                message_content=message)
+
+    def test_full_prompt_is_what_every_turn_used_to_send(self):
+        p = self.parts()
+        for block in ("<peer>P</peer>", "LIVE", "<luna-notes>N1</luna-notes>", "PROG", "<voice>V</voice>",
+                      "WIKI", "CHARTER", "the venue form is done"):
+            self.assertIn(block, p.full)
+        self.assertLess(p.full.index("<peer>"), p.full.index("LIVE"))
+        self.assertLess(p.full.index("<voice>"), p.full.index("WIKI"))
+
+    def test_continuation_carries_only_what_changes(self):
+        p = self.parts()
+        for block in ("LIVE", "PROG", "WIKI", "the venue form is done", "scheduled morning check-in"):
+            self.assertIn(block, p.continuation)
+        for block in ("CHARTER", "<luna-notes>", "<voice>", "<peer>", "## Tools you have"):
+            self.assertNotIn(block, p.continuation)
+        self.assertLess(len(p.continuation), len(p.full) / 3)
+        self.assertNotIn("{", p.continuation.replace("{}", ""), "every placeholder is filled")
+
+    def test_the_flush_finds_the_message_in_either_prompt(self):
+        # hooks/transcript_delta.py keeps only the <message> under "## Andy's
+        # mention" from an agent turn's prompt; anything else would put the
+        # live state and progress log back into the flush.
+        sys.path.insert(0, str(Path(mention.__file__).resolve().parents[2] / "hooks"))
+        import transcript_delta
+        p = self.parts()
+        for prompt in (p.full, p.continuation):
+            self.assertEqual(transcript_delta._user_text(prompt), "the venue form is done")
+
+    def test_hash_follows_the_fixed_context_only(self):
+        base = self.parts().static_hash
+        self.assertEqual(self.parts(message="something else", history=[]).static_hash, base)
+        self.assertNotEqual(self.parts(notes="N2").static_hash, base, "edited notes go out again")
+        self.assertNotEqual(self.parts(charter="CHARTER v2").static_hash, base)
+
+    def test_build_mention_prompt_is_the_full_form(self):
+        with patch.object(mention, "build_mention_parts",
+                          return_value=mention.MentionParts(full="F", continuation="C", static_hash="h")):
+            self.assertEqual(mention.build_mention_prompt("t", agent_id="a", agent_definition="d",
+                                                          channel_kind="DM", history=[], message_content="m"), "F")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
