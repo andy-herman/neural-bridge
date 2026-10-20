@@ -53,9 +53,11 @@ _CHAINING = re.compile(r"[;&|`\n\r><]|\$\(|\$\{")
 _PY = r"(?:[\w./-]*/)?python3?(?:\.\d+)?"
 
 AGENT_BASH_ALLOWLIST: dict[str, tuple[str, ...]] = {
-    # Her executive-assistant CLIs, read-only by construction. Nothing else.
+    # Her executive-assistant CLIs. Calendar and inbox are read-only by
+    # construction; tasks can only list open cards and move one to Done, on
+    # Andy's word (scripts/luna/tasks.py, "closing a card"). Nothing else.
     "luna": (
-        rf"^{_PY}\s+-m\s+scripts\.luna\.(?:calendar|inbox)(?:\s|$)",
+        rf"^{_PY}\s+-m\s+scripts\.luna\.(?:calendar|inbox|tasks)(?:\s|$)",
     ),
     # The Synapse career database, his core function.
     "loid": (
@@ -76,7 +78,8 @@ AGENT_BASH_ALLOWLIST: dict[str, tuple[str, ...]] = {
 # "python -m scripts.luna.(?:calendar|inbox)", which is not actionable.
 AGENT_BASH_HELP: dict[str, str] = {
     "luna": "python -m scripts.luna.calendar <today|week|next|conflicts>; "
-            "python -m scripts.luna.inbox <unread|search|thread|waiting>",
+            "python -m scripts.luna.inbox <unread|search|thread|waiting>; "
+            "python -m scripts.luna.tasks <open [words]|close <words> [--note ...]>",
     "loid": "synapse-journal <args>",
     "loop-engineer": "python -m unittest ...; pytest ...; "
                      "git status|diff|log|show|rev-parse|branch|ls-files",

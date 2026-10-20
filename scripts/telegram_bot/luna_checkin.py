@@ -49,6 +49,7 @@ from scripts.discord_bot.claude_invoke import (  # noqa: E402
 )
 from scripts.discord_bot.keychain import get_token  # noqa: E402
 from scripts.luna import tasks  # noqa: E402
+from scripts.telegram_bot import checkin_log  # noqa: E402
 from scripts.discord_bot.mention import (  # noqa: E402
     LUNA_NOTES_MAX_CHARS,
     LUNA_NOTES_PATH,
@@ -318,7 +319,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no Telegram token in keychain ({KEYCHAIN_SERVICE})", file=sys.stderr)
         return 2
 
-    sent = sum(1 for cid in chat_ids if send_telegram(cid, message, token))
+    sent = 0
+    for cid in chat_ids:
+        if send_telegram(cid, message, token):
+            sent += 1
+            # So her chat knows what this asked when Andy answers it.
+            checkin_log.record(cid, args.kind, message)
     mem.record(mem.WRITE, "luna_checkin", agent_id=AGENT_ID, ok=sent > 0,
                chars=len(message),
                detail=f"{args.kind}: sent to {sent}/{len(chat_ids)}")
