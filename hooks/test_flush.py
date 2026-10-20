@@ -283,8 +283,15 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
                                self.tmp_path / "no-vault")
         progress_patch.start()
         self.addCleanup(progress_patch.stop)
+        # Each session's flushed offset (hooks/transcript_delta.py), kept out
+        # of the real Application Support folder.
+        offsets_patch = patch("transcript_delta.OFFSETS_DIR", self.tmp_path / "offsets")
+        offsets_patch.start()
+        self.addCleanup(offsets_patch.stop)
         self.transcript = self.tmp_path / "transcript.jsonl"
-        self.transcript.write_text('{"role":"user","content":"hi"}\n', encoding="utf-8")
+        self.transcript.write_text(
+            '{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-10-20T02:10:09Z"}\n',
+            encoding="utf-8")
 
     def tearDown(self):
         flush.DAILY_LOGS_DIR = self._orig_dir
@@ -376,7 +383,8 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
             calls.append((argv, kw))
             return self._mock_claude(valid)()
 
-        self.transcript.write_text("x" * 50_000, encoding="utf-8")
+        self.transcript.write_text(json.dumps({"type": "user", "message": {"content": "x" * 50_000}}) + "\n",
+                                   encoding="utf-8")
         with patch("flush.subprocess.run", side_effect=runner):
             self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-stdin",
                                              "--transcript", str(self.transcript)]), 0)
@@ -410,7 +418,9 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         seen = {}
         valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": ["Q?"],
                             "proposed_concepts": []})
-        self.transcript.write_text(text, encoding="utf-8")
+        self.transcript.write_text("".join(
+            json.dumps({"type": "user", "message": {"role": "user", "content": f"line {i}"}}) + "\n"
+            for i in range(100_000)), encoding="utf-8")
         with patch("flush.subprocess.run", side_effect=self._mock_claude(valid)), \
                 patch.object(flush, "MAX_TRANSCRIPT_CHARS", 10_000), \
                 patch("flush._queue_questions", side_effect=lambda *a, **kw: seen.update(kw) or (0, "queued")):
