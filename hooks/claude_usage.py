@@ -11,7 +11,11 @@ cost when asked for JSON, so each call writes one line here.
     ~/Library/Application Support/neural-bridge/usage/claude-YYYY-MM.jsonl
 
 One line per call: time, job, agent, route, model, outcome, Claude Code's
-cost figure, tokens by kind, turns and duration. Never the prompt or the
+cost figure, tokens by kind, turns and duration. For a resumed session Claude
+Code reports the session's running totals, not the call's (verified
+2026-10-20: a $0.06 second turn reported $0.459, the two turns together), so
+each line keeps those totals under `session_total` and its `cost_usd`,
+`tokens` and `models` are the difference from the session's previous line. Never the prompt or the
 reply. The AI ledger (~/Development/ai-ledger) reads these files for its
 fleet section. Writing never raises: a call that worked must not fail
 because its usage line could not be written.
@@ -28,7 +32,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -148,6 +152,37 @@ def path_for(when: datetime, usage_dir: Path | None = None) -> Path:
     return (usage_dir or USAGE_DIR) / f"claude-{when:%Y-%m}.jsonl"
 
 
+def _previous_total(session_id: str, when: datetime, usage_dir: Path | None) -> dict | None:
+    """The running totals on this session's last line, in this month's or
+    last month's log; None when the log has not seen the session. Lines from
+    before `session_total` existed carried the running totals themselves."""
+    if not session_id:
+        return None
+    last_month = (when.replace(day=1) - timedelta(days=1))
+    for path in (path_for(when, usage_dir), path_for(last_month, usage_dir)):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for raw in reversed(lines):
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("session_id") == session_id:
+                return row.get("session_total") or {
+                    "cost_usd": row.get("cost_usd"), "tokens": row.get("tokens") or {},
+                    "models": row.get("models") or {}}
+    return None
+
+
+def _less(now, before):
+    """now - before, never below zero; None stays None."""
+    if not isinstance(now, (int, float)):
+        return now
+    return max(0, now - (before if isinstance(before, (int, float)) else 0))
+
+
 def record(*, job: str, agent: str | None, route: str, model: str, result: CallResult | None,
            seconds: float, error: str = "", max_budget_usd: float | None = None,
            max_turns: int | None = None, usage_dir: Path | None = None,
@@ -158,6 +193,14 @@ def record(*, job: str, agent: str | None, route: str, model: str, result: CallR
     meta = result.meta if result else {}
     tokens, by_model = _tokens(meta)
     cost = meta.get("total_cost_usd")
+    session_id = str(meta.get("session_id") or "")
+    total = {"cost_usd": round(float(cost), 6) if isinstance(cost, (int, float)) else None,
+             "tokens": dict(tokens), "models": dict(by_model)}
+    previous = _previous_total(session_id, when, usage_dir) if meta else None
+    if previous and isinstance(cost, (int, float)):
+        cost = _less(float(cost), previous.get("cost_usd"))
+        tokens = {k: _less(v, (previous.get("tokens") or {}).get(k)) for k, v in tokens.items()}
+        by_model = {m: round(_less(c, (previous.get("models") or {}).get(m)), 6) for m, c in by_model.items()}
     line = {
         "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "job": job or "other",
@@ -172,9 +215,10 @@ def record(*, job: str, agent: str | None, route: str, model: str, result: CallR
         "models": by_model,
         "turns": int(meta.get("num_turns") or 0),
         "seconds": round(seconds, 1),
-        "session_id": str(meta.get("session_id") or ""),
+        "session_id": session_id,
         "max_budget_usd": max_budget_usd,
         "max_turns": max_turns,
+        "session_total": total if meta else None,
     }
     target = path_for(when, usage_dir)
     try:
