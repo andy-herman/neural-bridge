@@ -283,6 +283,7 @@ async def _route(text: str, history: list[dict]) -> list[str]:
         # this runs on every inbound group message, so it is the hottest path
         # in the bridge.
         effort="low",
+        no_tools=True,
     )
     if not ok:
         log(f"ROUTE llm-failed ({err[:60]}); heuristic fallback")
