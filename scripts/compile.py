@@ -89,6 +89,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))  # for `scripts.*`; appended so it shadows nothing
 import claude_env  # noqa: E402
+import claude_usage  # noqa: E402
 import discord_post  # noqa: E402
 import model_invoke  # noqa: E402
 import schema  # noqa: E402
@@ -435,24 +436,18 @@ def _claude_or_fallback(prompt: str, model: str, timeout: int) -> tuple[bool, st
     is exactly the previous Claude-only behavior. See model_invoke.py.
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model),
+        result = claude_usage.run_logged(
+            ["claude", "-p", prompt, "--output-format", "json", "--model", claude_env.route_model(model),
              *claude_env.NO_TOOLS_ARGS, *claude_env.mcp_args()],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=_subprocess_env_for_compile_claude(),
-        )
+            job="compile", agent="compile", env=_subprocess_env_for_compile_claude(), timeout=timeout)
     except subprocess.TimeoutExpired:
         primary_err = "timeout"
     except FileNotFoundError:
         primary_err = "claude_cli_not_found"
     else:
-        if result.returncode == 0:
-            return True, result.stdout, ""
-        snippet = (result.stderr or "")[:200].replace("\n", " ")
-        primary_err = f"exit_{result.returncode}:{snippet}"
+        if result.ok:
+            return True, result.text, ""
+        primary_err = result.error
 
     # Primary (Claude) is unavailable. Try the configured fallback provider.
     ok, text, fb_err = model_invoke.fallback_text(prompt, timeout)

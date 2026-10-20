@@ -81,7 +81,7 @@ class TestOneShotCallers(unittest.TestCase):
 
     def test_publish_prep(self):
         text = (REPO_ROOT / "scripts/publish/prepare_week.py").read_text(encoding="utf-8")
-        self.assertIn("flush=False, no_tools=True)", text)
+        self.assertRegex(text, r"flush=False, no_tools=True[,)]")
 
     def test_council_router(self):
         text = (REPO_ROOT / "scripts/telegram_bot/council_bridge.py").read_text(encoding="utf-8")

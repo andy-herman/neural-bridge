@@ -173,7 +173,7 @@ def build_prompt(new_messages: str, existing_profile: str) -> str:
 
 def invoke_synthesis(prompt: str) -> tuple[bool, str, str]:
     """Call `claude -p` with the synthesis prompt. Returns (ok, stdout, err)."""
-    return call_claude_sync(prompt, timeout=CLAUDE_TIMEOUT, flush=False, no_tools=True)
+    return call_claude_sync(prompt, timeout=CLAUDE_TIMEOUT, flush=False, no_tools=True, job="echo_synthesis")
 
 
 # ---------- Response parsing + append ----------

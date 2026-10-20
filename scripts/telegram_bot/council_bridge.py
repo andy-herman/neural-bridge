@@ -284,6 +284,7 @@ async def _route(text: str, history: list[dict]) -> list[str]:
         # in the bridge.
         effort="low",
         no_tools=True,
+        job="council_router",
     )
     if not ok:
         log(f"ROUTE llm-failed ({err[:60]}); heuristic fallback")
