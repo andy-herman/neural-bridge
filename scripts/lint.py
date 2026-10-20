@@ -35,6 +35,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "hooks"))
 import claude_env  # noqa: E402  (route policy for the LLM check; see hooks/claude_env.py)
+import claude_usage  # noqa: E402  (one usage line per call; see hooks/claude_usage.py)
 KNOWLEDGE_DIR = REPO_ROOT / "knowledge"
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
 QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
@@ -451,26 +452,21 @@ def check_frontmatter(verbose: bool = False) -> list[Finding]:
 
 def call_imperative_check(prompt: str, model: str, timeout: int) -> tuple[bool, dict | None, str]:
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model),
+        result = claude_usage.run_logged(
+            ["claude", "-p", prompt, "--output-format", "json", "--model", claude_env.route_model(model),
              *claude_env.NO_TOOLS_ARGS, *claude_env.mcp_args()],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            job="lint", agent="lint",
             # The fleet route, never an inherited base URL or API key. No
             # flush of the lint call itself: nothing would read it.
-            env={**claude_env.fleet_env(os.environ), "NB_SKIP_FLUSH": "1"},
-        )
+            env={**claude_env.fleet_env(os.environ), "NB_SKIP_FLUSH": "1"}, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, None, "timeout"
     except FileNotFoundError:
         return False, None, "claude_cli_not_found"
-    if result.returncode != 0:
-        snippet = (result.stderr or "")[:200].replace("\n", " ")
-        return False, None, f"exit_{result.returncode}:{snippet}"
+    if not result.ok:
+        return False, None, result.error
 
-    text = strip_code_fences(result.stdout)
+    text = strip_code_fences(result.text)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:

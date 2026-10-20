@@ -35,6 +35,7 @@ PROMPT_TEMPLATE = HOOKS_DIR / "prompts" / "flush_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
 import claude_env  # noqa: E402
+import claude_usage  # noqa: E402
 import discord_post  # noqa: E402
 import schema  # noqa: E402
 import transcript_delta as delta  # noqa: E402
@@ -208,7 +209,7 @@ def _queue_questions(agent: str, data: dict, session_id: str, *, complete: bool 
         return 0, f"{type(exc).__name__}: {exc}"
 
 
-def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
+def call_claude(prompt: str, model: str, timeout: int, agent: str = "") -> tuple[bool, str, str]:
     """Invoke `claude -p`. Return (ok, stdout, error_reason).
 
     The prompt goes in on stdin. It embeds the whole session transcript, and
@@ -216,31 +217,26 @@ def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
     700 KB ("Argument list too long"): until 2026-10-12 that killed most
     flushes of long or resumed sessions, 943 of 1,323 in August, before they
     logged a thing.
+
+    Each call writes a line to the fleet's usage log (hooks/claude_usage.py).
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "text", "--model", claude_env.route_model(model),
+        result = claude_usage.run_logged(
+            ["claude", "-p", "--output-format", "json", "--model", claude_env.route_model(model),
              *claude_env.NO_TOOLS_ARGS, *claude_env.mcp_args()],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_subprocess_env_for_claude(),
-        )
+            job="flush", agent=agent, env=_subprocess_env_for_claude(), timeout=timeout, input=prompt)
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
     except FileNotFoundError:
         return False, "", "claude_cli_not_found"
     except OSError as exc:
         return False, "", f"spawn_failed:{type(exc).__name__}:{exc.errno}"
-    if result.returncode != 0:
-        # Claude Code prints the API's own error on stdout; stderr carries CLI
-        # warnings, which is all this used to report ("claude.ai connectors
-        # are disabled...") while the real 400 went unseen. Shared with the
-        # daemon: hooks/claude_env.error_snippet.
-        snippet = claude_env.error_snippet(result.stdout, result.stderr)
-        return False, result.stdout, f"exit_{result.returncode}:{snippet}"
-    return True, result.stdout, ""
+    if not result.ok:
+        # The API's own error, a cap, or stderr (claude_usage.run_result).
+        # Until 2026-09-25 only stderr was reported ("claude.ai connectors
+        # are disabled...") while the real 400 went unseen.
+        return False, result.text, result.error
+    return True, result.text, ""
 
 
 def strip_code_fences(text: str) -> str:
@@ -492,7 +488,7 @@ def _run(args: argparse.Namespace) -> int:
     last_raw = ""
     last_err = ""
     for attempt in range(2):
-        ok, stdout, err = call_claude(prompt, args.model, args.timeout)
+        ok, stdout, err = call_claude(prompt, args.model, args.timeout, agent=args.agent)
         if not ok:
             last_err = err or "subprocess_failure"
             last_raw = stdout

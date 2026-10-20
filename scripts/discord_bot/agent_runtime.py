@@ -45,6 +45,13 @@ from .mention import (
 from .private_tools import grant_for, merge_tools
 from .session_store import STORE as SESSION_STORE
 
+# Every agent turn, in the fleet's usage log as "agent_turn", with caps that
+# only stop a runaway. A normal Luna turn cost $0.37 to $2.21 on 2026-10-12..20
+# (the growing resumed session, not the work), and a research turn may make a
+# few dozen tool calls. A capped turn fails once ("error_max_budget_usd" or
+# "error_max_turns") and is not retried.
+TURN_LIMITS = {"job": "agent_turn", "max_turns": 60, "max_budget_usd": 5.0}
+
 
 def _noop(_msg: str) -> None:
     return
@@ -166,6 +173,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         effort=agent_effort,
         agent_id=req.agent_id,
         mcp_config=mcp_config,
+        **TURN_LIMITS,
         **model_kwargs,
     )
 
@@ -193,6 +201,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             effort=agent_effort,
             agent_id=req.agent_id,
             mcp_config=mcp_config,
+            **TURN_LIMITS,
             **model_kwargs,
         )
 
@@ -219,6 +228,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             effort=agent_effort,
             agent_id=req.agent_id,
             mcp_config=mcp_config,
+            **TURN_LIMITS,
             **model_kwargs,
         )
 

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import subprocess as sp
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.discord_bot.claude_invoke import _subprocess_env, wrap_untrusted
+from scripts.discord_bot.claude_invoke import _subprocess_env, claude_usage, wrap_untrusted
 
 from .config import LoopConfig
 from .queue import Issue
@@ -98,6 +99,10 @@ def _invoke(
     if resume_session:
         args.extend(["--resume", resume_session])
 
+    env = {**_subprocess_env(route_via_proxy=False), "NB_SKIP_FLUSH": "1"}
+    usage = {"job": "loop_engineer", "agent": "loop-engineer", "route": claude_usage.route_of(env),
+             "model": cfg.model, "max_turns": max_turns}
+    started = time.monotonic()
     try:
         proc = sp.run(
             args,
@@ -114,14 +119,19 @@ def _invoke(
             # local proxy being up.
             # NB_SKIP_FLUSH: the loop runs on the Max login, but its session's
             # flush would bill the API key, for a log nothing reads.
-            env={**_subprocess_env(route_via_proxy=False), "NB_SKIP_FLUSH": "1"},
+            env=env,
         )
     except sp.TimeoutExpired:
+        claude_usage.record(**usage, result=None, seconds=time.monotonic() - started, error="timeout")
         return ExecResult(False, resume_session, "", "timeout", 0)
     except FileNotFoundError:
         return ExecResult(False, None, "", "claude_cli_not_found", 0)
 
     obj = parse_result_json(proc.stdout)
+    # The loop runs on the Max login, so its line is route "login": usage,
+    # not money billed to the key.
+    claude_usage.record(**usage, result=claude_usage.run_result(proc.returncode, proc.stdout, proc.stderr),
+                        seconds=time.monotonic() - started)
     session_id = obj.get("session_id") if isinstance(obj.get("session_id"), str) else resume_session
     num_turns = obj.get("num_turns") if isinstance(obj.get("num_turns"), int) else 0
     summary = obj.get("result") if isinstance(obj.get("result"), str) else (proc.stdout or "")[:4000]

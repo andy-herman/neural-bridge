@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import agent_telemetry
@@ -27,6 +28,7 @@ _HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 import claude_env  # noqa: E402
+import claude_usage  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-4-8"  # API id; claude_env.route_model() dots it for the proxy route
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
@@ -192,6 +194,7 @@ def call_claude_sync(
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
     no_tools: bool = False,
+    job: str | None = None,
     _telemetry_span: agent_telemetry.Invocation | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
@@ -205,6 +208,10 @@ def call_claude_sync(
 
     `max_turns` (`--max-turns`) and `max_budget_usd` (`--max-budget-usd`) cap
     an agentic run's tool round trips and its spend.
+    `job` names the caller in the fleet's usage log (hooks/claude_usage.py:
+    one line per call with its tokens, cost and route). The call runs with
+    `--output-format json` so Claude Code reports those; the reply text it
+    returns is the same as with `--output-format text`.
     `no_tools=True` passes claude_env.NO_TOOLS_ARGS: no built-in tools and no
     skills, which cuts about 16,000 input tokens of Claude Code scaffolding
     from every call. For one-shot jobs whose prompt holds all their input
@@ -236,7 +243,7 @@ def call_claude_sync(
     file may have been pruned by Claude Code's own cleanup. session_id must
     be a valid UUID; callers should use `session_store.SessionStore.get_or_create`.
     """
-    args = ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model)]
+    args = ["claude", "-p", prompt, "--output-format", "json", "--model", claude_env.route_model(model)]
     if effort in VALID_EFFORTS:
         args.extend(["--effort", effort])
     if no_tools and allowed_tools:
@@ -261,6 +268,12 @@ def call_claude_sync(
         else:
             args.extend(["--session-id", session_id])
     # Attribution is deliberately separate from NB_AGENT_ID and tool policy.
+    env = {**_subprocess_env(agent_id=agent_id), **({} if flush else {"NB_SKIP_FLUSH": "1"})}
+    usage = {"job": job or f"other:{telemetry_agent_id or agent_id or 'unknown'}",
+             "agent": telemetry_agent_id or agent_id, "route": claude_usage.route_of(env),
+             "model": args[args.index("--model") + 1], "max_budget_usd": max_budget_usd,
+             "max_turns": max_turns}
+    started = time.monotonic()
     with _telemetry_span or agent_telemetry.Invocation(telemetry_agent_id or agent_id) as span:
         try:
             result = subprocess.run(
@@ -269,23 +282,25 @@ def call_claude_sync(
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
-                env={**_subprocess_env(agent_id=agent_id), **({} if flush else {"NB_SKIP_FLUSH": "1"})},
+                env=env,
             )
         except subprocess.TimeoutExpired:
+            claude_usage.record(**usage, result=None, seconds=time.monotonic() - started, error="timeout")
             return False, "", "timeout"
         except FileNotFoundError:
             return False, "", "claude_cli_not_found"
-        if result.returncode != 0:
+        parsed = claude_usage.run_result(result.returncode, result.stdout, result.stderr)
+        claude_usage.record(**usage, result=parsed, seconds=time.monotonic() - started)
+        if not parsed.ok:
             if result.returncode < 0:
                 span.outcome = "cancelled"
-            # What the agent posts to Discord as "I hit an error". Until
-            # 2026-09-30 this was stderr[:200], which on the proxy route is
-            # the connectors warning and the first word of whatever mattered.
-            # The API error Claude Code prints on stdout was discarded.
-            snippet = claude_env.error_snippet(result.stdout, result.stderr)
-            return False, result.stdout, f"exit_{result.returncode}:{snippet}"
+            # What the agent posts to Discord as "I hit an error": the API
+            # error, a turn or spend cap, or stderr (claude_usage.run_result).
+            # Until 2026-09-30 it was stderr[:200], which on the proxy route
+            # is the connectors warning and the first word of what mattered.
+            return False, parsed.text, parsed.error
         span.outcome = "succeeded"
-        return True, result.stdout, ""
+        return True, parsed.text, ""
 
 
 def call_claude_sync_with_fallback(
@@ -332,6 +347,9 @@ async def call_claude(
     telemetry_agent_id: str | None = None,
     *,
     no_tools: bool = False,
+    job: str | None = None,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -343,7 +361,8 @@ async def call_claude(
                 prompt, model, timeout, allowed_tools, add_dirs,
                 session_id=session_id, resume=resume, effort=effort,
                 agent_id=agent_id, mcp_config=mcp_config,
-                telemetry_agent_id=telemetry_agent_id, no_tools=no_tools, _telemetry_span=span,
+                telemetry_agent_id=telemetry_agent_id, no_tools=no_tools, job=job,
+                max_turns=max_turns, max_budget_usd=max_budget_usd, _telemetry_span=span,
             ),
         )
     except asyncio.CancelledError:

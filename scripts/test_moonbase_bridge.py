@@ -647,7 +647,7 @@ def test_native_runner_argv_and_telemetry_are_unchanged():
             add_dirs=["/synthetic/project"], session_id=JOB, resume=True,
         ) == (True, "native result", "")
     assert invoke.call_args.args[0] == [
-        "claude", "-p", "native prompt", "--output-format", "text",
+        "claude", "-p", "native prompt", "--output-format", "json",
         "--model", claude_invoke.claude_env.route_model(claude_invoke.DEFAULT_MODEL),
         "--effort", "medium", "--allowedTools", "Read", "--strict-mcp-config", "--mcp-config",
         '{"mcpServers":{}}', "--add-dir", "/synthetic/project", "--resume", JOB,
