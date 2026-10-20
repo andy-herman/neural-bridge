@@ -138,7 +138,9 @@ class TestRuntimeGrant(unittest.TestCase):
             s.enter_context(patch.object(agent_runtime, "call_claude", side_effect=fake_call))
             s.enter_context(patch.object(agent_runtime, "MENTION_PROMPT_PATH", Prompt()))
             s.enter_context(patch.object(agent_runtime, "load_agent_definition", return_value="C"))
-            s.enter_context(patch.object(agent_runtime, "build_mention_prompt", return_value="P"))
+            s.enter_context(patch.object(agent_runtime, "build_mention_parts", return_value=agent_runtime.MentionParts(
+                full="P", continuation="C", static_hash="h")))
+            s.enter_context(patch.object(agent_runtime.claude_usage, "context_tokens", return_value=None))
             s.enter_context(patch.object(agent_runtime, "allowed_tools_for", return_value="Read"))
             s.enter_context(patch.object(agent_runtime, "add_dirs_for", return_value=[]))
             s.enter_context(patch.object(agent_runtime, "timeout_for", return_value=9))

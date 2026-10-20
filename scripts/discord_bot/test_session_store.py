@@ -44,6 +44,15 @@ class TestSessionStoreBasics(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_fixed_context_and_size_survive_a_restart(self):
+        self.store.get_or_create(5, "luna")
+        self.store.touch(5, "luna", static_hash="abc123", context_tokens=64_000)
+        rec = SessionStore(path=self.path).get(5, "luna")
+        self.assertEqual((rec.static_hash, rec.context_tokens), ("abc123", 64_000))
+        # A record written before these fields existed loads with defaults.
+        self.store.touch(5, "luna")
+        self.assertEqual(SessionStore(path=self.path).get(5, "luna").static_hash, "abc123")
+
     def test_get_returns_none_for_unknown(self):
         self.assertIsNone(self.store.get(123, "luna"))
 

@@ -29,3 +29,9 @@ def _no_real_usage_log(monkeypatch, tmp_path):
     import claude_usage
     monkeypatch.setattr(claude_usage, "USAGE_DIR", tmp_path / "nb-usage")
 
+
+@pytest.fixture(autouse=True)
+def _no_real_telegram_history(monkeypatch, tmp_path):
+    from scripts.telegram_bot import history_store
+    monkeypatch.setattr(history_store, "HISTORY_DIR", tmp_path / "nb-telegram-history")
+

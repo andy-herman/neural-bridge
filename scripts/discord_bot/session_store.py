@@ -58,6 +58,12 @@ class SessionRecord:
     created_at: float
     last_used_at: float
     turn_count: int = 0
+    # The fixed context this session was given on its first turn
+    # (mention.MentionParts.static_hash). While it matches, a turn sends only
+    # the short continuation prompt.
+    static_hash: str = ""
+    # The last turn's context size in tokens, read from the transcript.
+    context_tokens: int = 0
 
     def is_expired(self, now: float | None = None) -> bool:
         return (now or time.time()) - self.last_used_at >= SESSION_TTL_SECONDS
@@ -106,6 +112,8 @@ class SessionStore:
                     created_at=float(v["created_at"]),
                     last_used_at=float(v["last_used_at"]),
                     turn_count=int(v.get("turn_count", 0)),
+                    static_hash=str(v.get("static_hash", "")),
+                    context_tokens=int(v.get("context_tokens", 0)),
                 )
             except (KeyError, TypeError, ValueError):
                 _logger.warning("session_store record malformed; skipping: %r", k)
@@ -163,9 +171,11 @@ class SessionStore:
         self._persist()
         return rec, True
 
-    def touch(self, channel_id: int | str, agent_id: str) -> None:
+    def touch(self, channel_id: int | str, agent_id: str, *, static_hash: str | None = None,
+              context_tokens: int | None = None) -> None:
         """Mark the session as used. Caller invokes after a successful claude
-        call so the TTL clock restarts."""
+        call so the TTL clock restarts, with the fixed context the session now
+        holds and its size."""
         self._ensure_loaded()
         key = _key(channel_id, agent_id)
         rec = self._records.get(key)
@@ -173,6 +183,10 @@ class SessionStore:
             return
         rec.last_used_at = time.time()
         rec.turn_count += 1
+        if static_hash is not None:
+            rec.static_hash = static_hash
+        if context_tokens is not None:
+            rec.context_tokens = context_tokens
         self._persist()
 
     def reset(self, channel_id: int | str, agent_id: str) -> SessionRecord:
