@@ -14,8 +14,9 @@ never-overwrite history (existing concepts move to
 concepts/.history/<slug>/<timestamp>.md), knowledge/log.md and
 knowledge/index.md refresh after each live run.
 
-Phase B expansion (this file): connection writer (heuristic: shared
-source session_id between two PROMOTE'd candidates produces a
+Phase B expansion (this file): connection writer (heuristic: two
+PROMOTE'd candidates whose provenance, counting earlier runs, shares at
+least MIN_SHARED_SESSIONS source session_ids produce a
 knowledge/connections/<a>--<b>.md file), per-agent containment via
 --agent flag, --flush flag for manual single-session flush (folded
 from issue #10).
@@ -921,31 +922,88 @@ class Connection:
     shared_sources: list[dict]
 
 
-def find_shared_session_pairs(candidates: list[ConceptCandidate]) -> list[Connection]:
-    """Heuristic: two concepts are connected if they share a source session_id.
+# One shared session only says two concepts came up in the same piece of work.
+# The first live compile promoted seven concepts from a single session and
+# linked all 21 pairs. Coming up together again in a separate session is the
+# evidence a connection needs.
+MIN_SHARED_SESSIONS = 2
 
-    A concept's source list is a list of dicts with `session_id`. If concept A
-    and concept B both list the same session_id in their sources, they emerged
-    from the same work and are likely related.
+
+def recorded_sources(slug: str) -> list[dict]:
+    """Provenance sources from concepts/<slug>.md and its archived versions.
+
+    Re-promotion archives the previous article to .history/ and the new one
+    lists only the current run's sources, so sessions from earlier compile
+    runs survive only in the archive. Reads the `sources:` block that
+    _frontmatter() writes; anything else in the file is ignored.
+    """
+    paths = [CONCEPTS_DIR / f"{slug}.md"]
+    history = HISTORY_DIR / slug
+    if history.is_dir():
+        paths.extend(sorted(history.glob("*.md")))
+    out: list[dict] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            continue
+        end = text.find("\n---", 4)
+        if end == -1:
+            continue
+        in_sources = False
+        for line in text[4:end].splitlines():
+            if line == "sources:":
+                in_sources = True
+            elif not line.startswith(" "):
+                in_sources = False
+            elif in_sources and line.startswith("  - "):
+                out.append({})
+                line = "    " + line[4:]
+            if in_sources and out and line.startswith("    ") and ":" in line:
+                key, _, value = line.strip().partition(":")
+                out[-1][key.strip()] = value.strip()
+    # render_connection needs all three; skip any malformed entry.
+    return [s for s in out if {"agent", "session_id", "source_log"} <= s.keys()]
+
+
+def find_shared_session_pairs(
+    candidates: list[ConceptCandidate],
+    prior_sources: dict[str, list[dict]] | None = None,
+    min_shared: int = MIN_SHARED_SESSIONS,
+) -> list[Connection]:
+    """Link two promoted concepts that came up together in separate sessions.
+
+    A concept's sessions are the session_ids in its candidate sources plus
+    those in `prior_sources[slug]`, its recorded provenance from earlier
+    compile runs (see recorded_sources). A pair is linked only when it shares
+    at least `min_shared` distinct session_ids.
 
     Returns Connection records with slugs alphabetized for stable filenames.
-    Self-pairs and pairs with no shared session are excluded.
     """
+    prior_sources = prior_sources or {}
+
+    def all_sources(c: ConceptCandidate) -> list[dict]:
+        return c.sources + prior_sources.get(c.slug, [])
+
     out: list[Connection] = []
     for i, a in enumerate(candidates):
-        a_sids = {s["session_id"] for s in a.sources if s.get("session_id")}
+        a_sids = {s["session_id"] for s in all_sources(a) if s.get("session_id")}
         if not a_sids:
             continue
         for b in candidates[i + 1:]:
-            b_sids = {s["session_id"] for s in b.sources if s.get("session_id")}
+            b_sids = {s["session_id"] for s in all_sources(b) if s.get("session_id")}
             shared = sorted(a_sids & b_sids)
-            if not shared:
+            if len(shared) < min_shared:
                 continue
             slug_a, slug_b = sorted([a.slug, b.slug])
-            shared_sources = [
-                s for s in a.sources + b.sources
-                if s.get("session_id") in shared
-            ]
+            shared_sources: list[dict] = []
+            seen: set[tuple] = set()
+            for s in all_sources(a) + all_sources(b):
+                key = (s.get("agent"), s.get("session_id"), s.get("source_log"))
+                if s.get("session_id") in shared and key not in seen:
+                    seen.add(key)
+                    shared_sources.append(s)
             out.append(Connection(
                 slug_a=slug_a, slug_b=slug_b,
                 shared_session_ids=shared,
@@ -966,7 +1024,7 @@ def render_connection(conn: Connection) -> str:
     fm = (
         "---\n"
         "type: connection\n"
-        f"discovered_via: shared-session\n"
+        f"discovered_via: recurring-shared-sessions\n"
         f"concepts: [{conn.slug_a}, {conn.slug_b}]\n"
         f"shared_session_ids: {sids_yaml}\n"
         f"created_at: {utc_iso()}\n"
@@ -977,13 +1035,14 @@ def render_connection(conn: Connection) -> str:
     )
     body = (
         f"# [[{conn.slug_a}]] ↔ [[{conn.slug_b}]]\n\n"
-        f"Both concepts emerged from the same source session(s): "
-        f"{', '.join(f'`{s}`' for s in conn.shared_session_ids)}. "
-        f"Shared origin suggests they cover related ideas from the same exploration.\n\n"
+        f"Both concepts came up together in {len(conn.shared_session_ids)} separate "
+        f"source sessions: {', '.join(f'`{s}`' for s in conn.shared_session_ids)}.\n\n"
         f"## Why these are linked\n\n"
-        f"Discovered via the `shared-session` heuristic: a candidate-pair where both "
-        f"concepts cite at least one source session_id in common after the filing "
-        f"gate has independently approved each one.\n\n"
+        f"Each concept passed the filing gate on its own, and the two recur together: "
+        f"their provenance shares at least {MIN_SHARED_SESSIONS} distinct source "
+        f"sessions. A single shared session is not enough, since one piece of work "
+        f"can propose many unrelated concepts. The link records that recurrence, "
+        f"not a checked claim about how the two ideas relate.\n\n"
         f"## Source sessions\n\n"
     )
     body += "\n".join(
@@ -1315,10 +1374,12 @@ def main() -> int:
         write_compile_state(state)
 
     # Phase B expansion: connection writer.
-    # For PROMOTE'd candidates only, find pairs that share a source session_id
-    # and write a connection file at knowledge/connections/<slug-a>--<slug-b>.md.
+    # For PROMOTE'd candidates only, find pairs that recur together across at
+    # least MIN_SHARED_SESSIONS sessions, counting provenance from earlier runs,
+    # and write knowledge/connections/<slug-a>--<slug-b>.md.
     if not args.no_connections and len(promoted_candidates) >= 2:
-        connections = find_shared_session_pairs(promoted_candidates)
+        prior = {c.slug: recorded_sources(c.slug) for c in promoted_candidates}
+        connections = find_shared_session_pairs(promoted_candidates, prior)
         for conn in connections:
             try:
                 target = write_connection(conn, dry_run=args.dry_run)
