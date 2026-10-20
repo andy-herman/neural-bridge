@@ -47,7 +47,7 @@ Each array may be empty. If all four are empty (a trivial session with nothing w
 ## Section semantics
 
 - **decisions**: choices the user explicitly made or agreed to. Quote-worthy commitments. Not "considered but didn't pick." Not the agent's own choices.
-- **findings**: substantive new knowledge surfaced this session — a paper, an incident, a working code pattern, a stat with provenance. One bullet per finding. Cite specifically where possible.
+- **findings**: substantive new knowledge surfaced this session — a paper, an incident, a working code pattern, a stat with provenance. Also any fact the user states about their own work or life that their agents must remember: something finished, submitted or sent; a date, plan or owner that changed. Record those even when the whole exchange is one line, since an agent that forgets them asks again. One bullet per finding. Cite specifically where possible.
 - **open_questions**: genuinely unresolved items the user wants surfaced for next session. Not items the agent forgot to look up. Not rhetorical questions.
 - **proposed_concepts**: candidate concept articles from this session, for downstream promotion to `knowledge/concepts/`. `slug` is kebab-case (lowercase letters, digits, hyphens only). `summary` is one line. Only propose concepts that are reused-across-sessions worthy, not single-session details.
 
