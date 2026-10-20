@@ -46,6 +46,18 @@ class TestAllowedCommands(unittest.TestCase):
 
 
 class TestDeniedCommands(unittest.TestCase):
+    def test_luna_board_commands(self):
+        for cmd in ('python -m scripts.luna.tasks open dentist',
+                    '.venv/bin/python -m scripts.luna.tasks close "book dentist" --note "booked"'):
+            self.assertTrue(guard_bash.decide(cmd, "luna")[0], cmd)
+
+    def test_luna_board_command_cannot_chain(self):
+        self.assertFalse(guard_bash.decide(
+            'python -m scripts.luna.tasks close x; rm -rf ~', "luna")[0])
+
+    def test_luna_cannot_run_other_luna_modules(self):
+        self.assertFalse(guard_bash.decide("python -m scripts.luna.google_auth", "luna")[0])
+
     def test_luna_cannot_run_arbitrary_shell(self):
         ok, why = guard_bash.decide("rm -rf ~/Documents", "luna")
         self.assertFalse(ok)

@@ -28,9 +28,10 @@ is testable and does not drift with the clock.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 BOARD_PATH = Path.home() / "Documents" / "Luna Master" / "Herman Tasks.md"
@@ -240,3 +241,160 @@ def format_for_prompt(tasks: list[Task], today: date, max_per_section: int = 8) 
         lines += [_fmt(t, today) for t in stale[:max_per_section]]
     lines.append(f"\n({len(open_tasks(tasks))} open across the board.)")
     return "\n".join(lines)
+
+
+# ---------- closing a card ----------
+#
+# Why Luna can write here at all: Andy tells her in chat that something is done,
+# and until 2026-10-20 nothing she could do made that stick. Her charter allowed
+# writes to her own notes.md only, while every reader that raises open work (her
+# morning and evening check-ins, the Needs Andy digest, the Gate Registry) reads
+# this board. So three overdue cards he called done on 2026-10-13 lived in her
+# chat memory alone, and the board kept them overdue for a week of check-ins.
+# This is the one board write she gets: move an open card to Done, dated, on
+# Andy's word. It never edits, adds or deletes a card.
+
+DONE_LANE = "Done"
+BACKUP_DIR = Path.home() / "Library" / "Application Support" / "neural-bridge" / "board-backups"
+BACKUPS_KEPT = 30
+
+
+class CloseError(ValueError):
+    """The card could not be closed; the message says why, for Andy."""
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", _LINK_RE.sub(lambda m: m.group(1), text).lower())
+
+
+def _open_cards(text: str) -> list[tuple[int, str, str]]:
+    """(line index, lane, card text) for every open card in an active lane."""
+    out = []
+    lane = ""
+    for i, line in enumerate(text.splitlines()):
+        lane_match = _LANE_RE.match(line)
+        if lane_match:
+            lane = lane_match.group(1).strip()
+            continue
+        card = _CARD_RE.match(line)
+        if card and card.group(1) == " " and lane in ACTIVE_LANES:
+            out.append((i, lane, card.group(2)))
+    return out
+
+
+def matching_open_cards(text: str, query: str) -> list[tuple[int, str, str]]:
+    """The open cards holding every word of `query`, case-insensitive. Words,
+    not substrings: "part 3" must not match "Part 30". A query with no words
+    matches nothing."""
+    wanted = _words(query)
+    if not wanted:
+        return []
+    return [c for c in _open_cards(text) if all(w in set(_words(c[2])) for w in wanted)]
+
+
+def _closure_note(done_on: date, note: str) -> str:
+    detail = f": {note.strip().rstrip('.')}" if note and note.strip() else ""
+    return f"Done {done_on.isoformat()} (Andy confirmed to Luna{detail})."
+
+
+def close_card(text: str, query: str, done_on: date, note: str = "") -> tuple[str, str, str]:
+    """Move the one open card matching `query` to the Done lane.
+
+    Returns (new board text, the card's text, the lane it left). Raises
+    CloseError when no card or more than one card matches, or the board has no
+    Done lane. The closure note goes before the card's links and `@{date}`, the
+    way the cards closed by hand already read.
+    """
+    matches = matching_open_cards(text, query)
+    if not matches:
+        raise CloseError(f"No open card matches {query!r}.")
+    if len(matches) > 1:
+        listed = "\n".join(f"- ({lane}) {card[:160]}" for _, lane, card in matches)
+        raise CloseError(f"{len(matches)} open cards match {query!r}; use more of its words:\n{listed}")
+    index, lane, card = matches[0]
+
+    cut = min((p for p in (card.find("[["), card.find("@{")) if p >= 0), default=len(card))
+    head, tail = card[:cut].rstrip(), card[cut:]
+    closed = f"- [x] {head} {_closure_note(done_on, note)}" + (f" {tail}" if tail else "")
+
+    lines = text.splitlines()
+    del lines[index]
+    done_at = next((i for i, line in enumerate(lines)
+                    if (m := _LANE_RE.match(line)) and m.group(1).strip() == DONE_LANE), None)
+    if done_at is None:
+        raise CloseError(f"The board has no '## {DONE_LANE}' lane.")
+    insert_at = done_at + 1
+    # Skip the blank line and the Kanban plugin's "**Complete**" marker, so the
+    # newest closure sits at the top of the lane's cards.
+    while insert_at < len(lines) and (not lines[insert_at].strip() or lines[insert_at].strip() == "**Complete**"):
+        insert_at += 1
+    lines.insert(insert_at, closed)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), card, lane
+
+
+def _backup(path: Path, text: str) -> Path:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    target = BACKUP_DIR / f"{path.stem}.{stamp}.md"
+    target.write_text(text, encoding="utf-8")
+    for old in sorted(BACKUP_DIR.glob(f"{path.stem}.*.md"))[:-BACKUPS_KEPT]:
+        old.unlink(missing_ok=True)
+    return target
+
+
+def close_on_board(query: str, done_on: date | None = None, note: str = "",
+                   path: Path | None = None) -> str:
+    """Close a card in the real board file. Backs the board up first and
+    writes atomically, so a half-written board never reaches Obsidian."""
+    target = path or BOARD_PATH
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CloseError(f"The board could not be read: {exc}") from exc
+    new_text, card, lane = close_card(text, query, done_on or date.today(), note)
+    _backup(target, text)
+    tmp = target.with_name(f".{target.name}.tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    os.replace(tmp, target)
+    clean = re.sub(r"\s{2,}", " ", _ADDED_RE.sub("", _LINK_RE.sub("", card))).strip(" .,")
+    return f"Closed: {clean} (moved from {lane} to {DONE_LANE})."
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m scripts.luna.tasks",
+                                     description="Andy's commitment board")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_open = sub.add_parser("open", help="list open cards, optionally only those holding these words")
+    p_open.add_argument("words", nargs="*")
+    p_close = sub.add_parser("close", help="move the one open card holding these words to Done")
+    p_close.add_argument("words", nargs="+")
+    p_close.add_argument("--note", default="", help="a few words on the outcome")
+    p_close.add_argument("--on", default="", help="the day it was done (YYYY-MM-DD); default today")
+    args = parser.parse_args(argv)
+
+    if args.cmd == "open":
+        try:
+            text = BOARD_PATH.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"The board could not be read: {exc}")
+            return 1
+        query = " ".join(args.words)
+        cards = matching_open_cards(text, query) if query else _open_cards(text)
+        for _, lane, card in cards:
+            print(f"- ({lane}) {card}")
+        print(f"({len(cards)} open{' matching ' + repr(query) if query else ''}.)")
+        return 0
+
+    try:
+        done_on = date.fromisoformat(args.on) if args.on else None
+        print(close_on_board(" ".join(args.words), done_on, args.note))
+    except ValueError as exc:  # CloseError and a bad --on date
+        print(str(exc))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

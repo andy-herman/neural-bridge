@@ -45,6 +45,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -65,6 +66,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.discord_bot import agent_telemetry, honcho_client
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.discord_bot.keychain import get_token
+from scripts.telegram_bot import checkin_log  # noqa: E402
 from scripts.env_file import load_default_env  # noqa: E402
 from scripts.review_queue import store as review_store  # noqa: E402
 from scripts.review_queue.surface import QueueSurface  # noqa: E402
@@ -155,6 +157,26 @@ def _chat_history_for(chat_id: int) -> list[dict]:
     return list(_chat_history.get(chat_id, []))
 
 
+# The newest check-in already in each chat's history (checkin_log.py).
+_checkins_seen: dict[int, float] = {}
+
+
+def _absorb_checkins(chat_id: int, now: float | None = None) -> int:
+    """Put the scheduled check-ins this chat has not seen into its history, as
+    Luna's own turns, so a reply to one ("that's done") has its context.
+    Returns how many were added."""
+    now = now if now is not None else time.time()
+    after = _checkins_seen.get(chat_id, now - checkin_log.LOOKBACK_SECONDS)
+    entries = checkin_log.since(chat_id, after)
+    for entry in entries:
+        _push_history(chat_id, "Luna", f"(my scheduled {entry.get('kind', '')} check-in) {entry['text']}")
+    if entries:
+        _checkins_seen[chat_id] = entries[-1]["ts"]
+    else:
+        _checkins_seen.setdefault(chat_id, after)
+    return len(entries)
+
+
 # ----------------------------------------------------------------------
 # Telegram handlers
 # ----------------------------------------------------------------------
@@ -188,6 +210,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     except Exception:
         pass
+
+    absorbed = _absorb_checkins(chat_id)
+    if absorbed:
+        log(f"MSG absorbed {absorbed} check-in(s) into history: chat={chat_id}")
 
     # Build the prompt using NB's existing mention pipeline. The history
     # we pass is what Andy has typed + Luna has replied in this Telegram
