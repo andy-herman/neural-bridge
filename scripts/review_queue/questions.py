@@ -126,6 +126,19 @@ def unanswered(agent: str, session_id: str, open_questions: list[str], *,
     return [q for q in open_questions if not any(same_question(q, h) for h in handled)]
 
 
+def still_open(agent: str, session_id: str, *, store: st.Store | None = None) -> list[str]:
+    """The questions this session left open that still sit on a live card. A
+    flush that sees only a session's newest turns (hooks/transcript_delta.py)
+    shows the model these, so it can keep or let go of each, and its answer
+    can then clear the ones settled."""
+    if not agent or agent == UNATTRIBUTED:
+        return []
+    store = store or st.Store()
+    return [str(i.payload.get("question", "")) for i in store.items(kinds=(st.QUESTION,))
+            if i.source == SOURCE and i.agent == agent and i.payload.get("session_id") == session_id
+            and i.state in (st.OPEN, st.SNOOZED) and i.resolved_at is None]
+
+
 def raise_from_flush(agent: str, session_id: str, open_questions: list[str], *,
                      complete: bool = True, store: st.Store | None = None,
                      now: int | None = None) -> list[st.Item]:

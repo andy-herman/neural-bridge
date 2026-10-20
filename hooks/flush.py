@@ -37,14 +37,17 @@ sys.path.insert(0, str(HOOKS_DIR))
 import claude_env  # noqa: E402
 import discord_post  # noqa: E402
 import schema  # noqa: E402
+import transcript_delta as delta  # noqa: E402
 
 DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # fleet route; see hooks/claude_env.py
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
-# Every turn of a resumed conversation flushes the whole session, so a long one
-# would send its entire history each time. Earlier turns were flushed by
-# earlier turns; the tail is what this one adds.
+# A flush sends only what is new since the session's last flush, condensed to
+# conversation (hooks/transcript_delta.py). This caps that new part, for a
+# first flush of a very long session.
 MAX_TRANSCRIPT_CHARS = 400_000
+# The bytes this run claimed, so a crash can hand them back (main()).
+_CLAIM: tuple[str, int, int] | None = None
 
 
 def utc_iso() -> str:
@@ -390,8 +393,8 @@ def _tail(transcript: str, limit: int | None = None) -> tuple[str, bool]:
         return transcript, False
     tail = transcript[-limit:]
     tail = tail[tail.find("\n") + 1:] if "\n" in tail else tail
-    return (f"[The first {len(transcript) - len(tail):,} characters of this session were left out; "
-            f"earlier turns were flushed when they ended.]\n{tail}"), True
+    return (f"[The first {len(transcript) - len(tail):,} characters of this part were left out "
+            f"to fit; the rest follows.]\n{tail}"), True
 
 
 def main() -> int:
@@ -402,6 +405,8 @@ def main() -> int:
     try:
         return _run(args)
     except Exception as exc:
+        if _CLAIM is not None:
+            delta.release(*_CLAIM)
         reason = f"failed:crash_{type(exc).__name__}"
         try:
             write_queue(args.agent, args.session_id, f"{reason}: {exc}"[:200])
@@ -427,7 +432,20 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _earlier_questions(agent: str, session_id: str) -> list[str] | None:
+    """Questions still open on this session's cards, or None when the queue
+    cannot be read (then nothing may be cleared)."""
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        return questions.still_open(agent, session_id)
+    except Exception:
+        return None
+
+
 def _run(args: argparse.Namespace) -> int:
+    global _CLAIM
     transcript_path = Path(args.transcript)
     if not transcript_path.exists():
         write_queue(args.agent, args.session_id, "failed:transcript_missing")
@@ -439,13 +457,29 @@ def _run(args: argparse.Namespace) -> int:
     started_at = utc_iso()
 
     try:
-        transcript_text = transcript_path.read_text(encoding="utf-8")
+        data = transcript_path.read_bytes()
         transcript_hash = transcript_sha256(transcript_path)
     except OSError as exc:
         write_queue(args.agent, args.session_id, f"failed:read_transcript_{type(exc).__name__}")
         return 0
 
-    transcript_text, truncated = _tail(transcript_text)
+    delta.prune()
+    start, end = delta.claim(args.session_id, delta.complete_lines(data))
+    _CLAIM = (args.session_id, start, end)
+    earlier_text, new_text = delta.split(data, start, end)
+    new_turns = delta.condense(new_text)
+    if not new_turns:
+        # Only bookkeeping since the last flush (a resume that said nothing,
+        # a PreCompact right after a SessionEnd). Nothing to summarize.
+        write_queue(args.agent, args.session_id, "skipped:no_new_turns")
+        _telemetry(args.agent, ok=True, chars=0, detail="skipped:no_new_turns")
+        return 0
+    earlier_turns = delta.condense(earlier_text) if start else []
+    earlier_questions = _earlier_questions(args.agent, args.session_id) if start else []
+    new_part, truncated = _tail("\n\n".join(new_turns))
+    transcript_text = delta.render(new_part, earlier_turns, earlier_questions)
+    # Earlier questions may be cleared only when the model saw them all.
+    complete = not truncated and earlier_questions is not None
     template = PROMPT_TEMPLATE.read_text(encoding="utf-8")
     prompt = build_prompt(template, args.agent, args.session_id, args.hook_event, transcript_text)
 
@@ -466,6 +500,8 @@ def _run(args: argparse.Namespace) -> int:
         last_raw = stdout
 
     if parsed is None:
+        delta.release(*_CLAIM)
+        _CLAIM = None
         write_failed(args.agent, args.session_id, last_raw, last_err)
         prefix = last_err.split(":", 1)[0] if last_err else "unknown"
         write_queue(args.agent, args.session_id, f"failed:{prefix}")
@@ -473,6 +509,10 @@ def _run(args: argparse.Namespace) -> int:
         # rather than just the exit code; the full output is in _failed/.
         _telemetry(args.agent, ok=False, detail=f"failed:{last_err[:160]}")
         return 0
+
+    # A summary exists: from here a crash must not hand the bytes back, or
+    # the next flush would record this part a second time.
+    _CLAIM = None
 
     if schema.is_empty_session(parsed):
         write_queue(args.agent, args.session_id, "skipped:empty")
@@ -500,7 +540,7 @@ def _run(args: argparse.Namespace) -> int:
     write_queue(args.agent, args.session_id, "flushed")
     _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
     _progress_append(args.agent, parsed, args.session_id, args.hook_event)
-    queued, why = _queue_questions(args.agent, parsed, args.session_id, complete=not truncated)
+    queued, why = _queue_questions(args.agent, parsed, args.session_id, complete=complete)
     if queued or why not in ("queued", "unattributed"):
         write_queue(args.agent, args.session_id, f"questions:{queued} {why}"[:120])
 
