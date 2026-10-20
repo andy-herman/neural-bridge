@@ -243,6 +243,28 @@ BENIGN_STDERR = (
 
 ERROR_SNIPPET_LIMIT = 300
 
+# A resumed session that cannot continue: Claude Code pruned its file ("No
+# conversation found with session ID", on stderr), or the conversation grew
+# past the context window. Only these are worth a fresh session; any other
+# failure would fail the same way again, at full price.
+SESSION_UNUSABLE = ("no conversation found", "prompt is too long", "exceed context limit",
+                    "exceeds the context window")
+# Failures where the request never reached a model, or the API was briefly
+# unable to serve it. Worth one more try; anything else is not.
+TRANSIENT = ("overloaded", "api error: 500", "api error: 502", "api error: 503", "api error: 504",
+             "api error: 529", "econnreset", "etimedout", "econnrefused", "connection error",
+             "socket hang up", "fetch failed", "network error")
+
+
+def session_unusable(err: str | None) -> bool:
+    low = (err or "").lower()
+    return any(marker in low for marker in SESSION_UNUSABLE)
+
+
+def transient(err: str | None) -> bool:
+    low = (err or "").lower()
+    return any(marker in low for marker in TRANSIENT)
+
 
 def error_snippet(stdout: str | None, stderr: str | None, *, limit: int = ERROR_SNIPPET_LIMIT) -> str:
     """One line naming why a `claude -p` call failed, for logs and Discord.

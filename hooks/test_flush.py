@@ -546,18 +546,48 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertIn("session sess-123", text)
         self.assertIn("- q", text)
 
-    def test_parse_failure_writes_failed_after_retry(self):
-        with patch("flush.subprocess.run", side_effect=self._mock_claude("not json at all")):
+    def test_parse_failure_writes_failed_without_a_second_call(self):
+        runner = self._mock_claude("not json at all")
+        with patch("flush.subprocess.run", side_effect=runner) as run:
             rc = self._run_main([
                 "--agent", "research",
                 "--session-id", "sess-bad",
                 "--transcript", str(self.transcript),
             ])
         self.assertEqual(rc, 0)
+        self.assertEqual(run.call_count, 1, "a reply that is not JSON is not retried at full price")
         failed = flush.DAILY_LOGS_DIR / "research" / "_failed" / "sess-bad.txt"
         self.assertTrue(failed.exists())
         queue = flush.QUEUE_LOG.read_text(encoding="utf-8")
         self.assertIn("research sess-bad failed:json_decode", queue)
+
+    def test_only_a_transient_failure_gets_a_second_call(self):
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [],
+                            "proposed_concepts": []})
+
+        def results(*outcomes):
+            seq = list(outcomes)
+
+            def runner(*args, **kwargs):
+                code, out = seq.pop(0)
+
+                class _R:
+                    returncode, stdout, stderr = code, out, ""
+                return _R()
+            return runner
+
+        cases = {
+            "overloaded, then fine": ([(1, "API Error: 529 Overloaded"), (0, valid)], 2, "flushed"),
+            "a real error": ([(1, "API Error: 400 invalid request")], 1, "failed"),
+        }
+        for name, (outcomes, calls, status) in cases.items():
+            with self.subTest(case=name):
+                sid = f"sess-{name.split(',')[0].replace(' ', '-')}"
+                with patch("flush.subprocess.run", side_effect=results(*outcomes)) as run:
+                    self._run_main(["--agent", "research", "--session-id", sid,
+                                    "--transcript", str(self.transcript), "--no-discord"])
+                self.assertEqual(run.call_count, calls)
+                self.assertIn(f"research {sid} {status}", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
     def test_transcript_missing(self):
         rc = self._run_main([
