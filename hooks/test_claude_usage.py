@@ -103,6 +103,68 @@ class TestRecord(unittest.TestCase):
         self.assertEqual(cu.path_for(self.when, self.dir).name, "claude-2026-10.jsonl")
 
 
+class TestResumedSessions(unittest.TestCase):
+    """Claude Code reports a resumed session's running totals. The numbers are
+    the 2026-10-20 deploy check: turn one wrote 64,440 tokens to the cache
+    ($0.403), turn two read them and wrote 3,726 more ($0.056), and turn two's
+    result said 68,166 written and $0.459."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def result(self, cost, read, write, sid="s-9"):
+        usage = {"claude-opus-5": {"inputTokens": 2, "outputTokens": 17, "cacheReadInputTokens": read,
+                                   "cacheCreationInputTokens": write, "costUSD": cost}}
+        return cu.run_result(0, json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                            "result": "ok", "session_id": sid, "total_cost_usd": cost,
+                                            "num_turns": 1, "modelUsage": usage}), "")
+
+    def write(self, result, minute):
+        cu.record(job="agent_turn", agent="luna", route="api", model="claude-opus-5", result=result,
+                  seconds=3, usage_dir=self.dir, now=datetime(2026, 10, 20, 21, minute, tzinfo=timezone.utc))
+
+    def lines(self):
+        return [json.loads(l) for l in (self.dir / "claude-2026-10.jsonl").read_text().splitlines()]
+
+    def test_each_line_is_its_own_call(self):
+        self.write(self.result(0.403185, 0, 64440), 18)
+        self.write(self.result(0.459053, 64440, 68166), 19)
+        first, second = self.lines()
+        self.assertEqual(first["cost_usd"], 0.403185)
+        self.assertAlmostEqual(second["cost_usd"], 0.055868, places=6)
+        self.assertEqual(second["tokens"]["cache_write"], 3726)
+        self.assertEqual(second["tokens"]["cache_read"], 64440, "this turn's own read, not cumulative")
+        self.assertAlmostEqual(second["models"]["claude-opus-5"], 0.055868, places=6)
+        self.assertEqual(second["session_total"]["cost_usd"], 0.459053)
+        self.assertAlmostEqual(first["cost_usd"] + second["cost_usd"], 0.459053, places=6)
+
+    def test_other_sessions_and_new_sessions_are_left_alone(self):
+        self.write(self.result(0.40, 0, 64440, sid="a"), 18)
+        self.write(self.result(0.09, 0, 13141, sid="b"), 19)
+        self.assertEqual(self.lines()[1]["cost_usd"], 0.09)
+
+    def test_a_line_from_before_the_fix_counts_as_a_running_total(self):
+        old = {"ts": "2026-10-20T21:18:00Z", "session_id": "s-9", "cost_usd": 0.403185,
+               "tokens": {"input": 2, "output": 17, "cache_read": 0, "cache_write": 64440},
+               "models": {"claude-opus-5": 0.403185}}
+        self.dir.mkdir(exist_ok=True)
+        (self.dir / "claude-2026-10.jsonl").write_text(json.dumps(old) + "\n")
+        self.write(self.result(0.459053, 64440, 68166), 19)
+        self.assertAlmostEqual(self.lines()[1]["cost_usd"], 0.055868, places=6)
+
+    def test_the_previous_month_is_searched(self):
+        cu.record(job="agent_turn", agent="luna", route="api", model="m", result=self.result(0.40, 0, 64440),
+                  seconds=1, usage_dir=self.dir, now=datetime(2026, 10, 31, 23, 59, tzinfo=timezone.utc))
+        cu.record(job="agent_turn", agent="luna", route="api", model="m", result=self.result(0.46, 64440, 68166),
+                  seconds=1, usage_dir=self.dir, now=datetime(2026, 11, 1, 0, 5, tzinfo=timezone.utc))
+        nov = [json.loads(l) for l in (self.dir / "claude-2026-11.jsonl").read_text().splitlines()]
+        self.assertAlmostEqual(nov[0]["cost_usd"], 0.06, places=6)
+
+
 class TestRoute(unittest.TestCase):
     def test_routes(self):
         self.assertEqual(cu.route_of({"ANTHROPIC_API_KEY": "sk-ant-x"}), "api")
