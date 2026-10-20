@@ -255,3 +255,20 @@ class TestApiRoute(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}):
             self.assertTrue(claude_env.proxy_supports("claude-opus-5"))
         self.assertFalse(claude_env.proxy_supports("claude-opus-5"))
+
+
+class TestFailureKinds(unittest.TestCase):
+    def test_session_unusable(self):
+        for err in ("exit_1:No conversation found with session ID: 1234",
+                    "exit_1:API Error: 400 prompt is too long: 1052113 tokens > 1000000 maximum"):
+            self.assertTrue(claude_env.session_unusable(err), err)
+        for err in ("timeout", "exit_1:API Error: 500", "exit_1:error_max_budget_usd", "", None):
+            self.assertFalse(claude_env.session_unusable(err), err)
+
+    def test_transient(self):
+        for err in ("exit_1:API Error: 529 Overloaded", "exit_1:API Error: 503 unavailable",
+                    "exit_1:Connection error.", "exit_1:fetch failed"):
+            self.assertTrue(claude_env.transient(err), err)
+        for err in ("timeout", "exit_1:API Error: 400 bad", "json_decode: x", "", None):
+            self.assertFalse(claude_env.transient(err), err)
+

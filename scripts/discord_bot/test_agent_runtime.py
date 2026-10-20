@@ -106,9 +106,11 @@ class TestRunAgentTurn(unittest.TestCase):
         self.assertEqual(len(res.raw_stdout), 200)   # raw preserved for action parsing
         store.touch.assert_called_once()
 
+    MISSING = "exit_1:No conversation found with session ID: 6b0b5c1e"
+
     def test_resume_failure_retries_exactly_once(self):
-        # Existing session fails, retry with a fresh id succeeds.
-        stack, store = self._patched(call_results=[(False, "", "exit_1:boom"), (True, "recovered", "")],
+        # Claude Code pruned the session file; a fresh id succeeds.
+        stack, store = self._patched(call_results=[(False, "", self.MISSING), (True, "recovered", "")],
                                      is_new=False)
         with stack:
             res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=7,
@@ -133,13 +135,39 @@ class TestRunAgentTurn(unittest.TestCase):
         store.touch.assert_not_called()
 
     def test_second_failure_gives_up(self):
-        stack, _ = self._patched(call_results=[(False, "", "e1"), (False, "", "e2")], is_new=False)
+        stack, _ = self._patched(call_results=[(False, "", self.MISSING), (False, "", "e2")], is_new=False)
         with stack:
             res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=7,
                                                   message_content="hi")))
         self.assertFalse(res.ok)
         self.assertEqual(res.error_reason, "e2")
         self.assertEqual(len(self.calls), 2)  # never a third
+
+    def test_a_session_too_long_also_starts_fresh(self):
+        stack, store = self._patched(
+            call_results=[(False, "", "exit_1:API Error: 400 prompt is too long: 1052113 tokens > 1000000"),
+                          (True, "ok", "")], is_new=False)
+        with stack:
+            res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=7,
+                                                  message_content="hi")))
+        self.assertTrue(res.ok)
+        store.reset.assert_called_once()
+
+    def test_other_failures_of_a_resumed_turn_do_not_bill_twice(self):
+        # A timeout, an API error or a spend cap would fail the same way on a
+        # fresh session, after re-running the whole tool loop. Until
+        # 2026-10-20 each of them did, and lost the session as well.
+        for err in ("timeout", "exit_1:API Error: 500 internal", "exit_1:error_max_budget_usd"):
+            with self.subTest(err=err):
+                self.calls = []
+                stack, store = self._patched(call_results=[(False, "", err)], is_new=False)
+                with stack:
+                    res = _run(run_agent_turn(TurnRequest(agent_id="luna", conversation_key=7,
+                                                          message_content="hi")))
+                self.assertFalse(res.ok)
+                self.assertFalse(res.resume_retried)
+                self.assertEqual(len(self.calls), 1)
+                store.reset.assert_not_called()
 
     def test_stateless_skips_session_store_and_retry(self):
         # The council room rebuilds context from the shared transcript, so there

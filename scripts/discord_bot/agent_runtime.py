@@ -196,11 +196,15 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             **model_kwargs,
         )
 
-    # A failure under --resume usually means Claude Code pruned the session
-    # file. Retry ONCE with a fresh id; a second failure is a real problem the
-    # user should hear about rather than something to keep retrying.
+    # Retry ONCE with a fresh id, and only when the session itself is the
+    # problem: Claude Code pruned its file, or it outgrew the context window
+    # (claude_env.session_unusable). Until 2026-10-20 any failure retried
+    # fresh, a 10-minute timeout included: that re-ran the whole tool loop at
+    # full price and threw the session away. A second failure is a real
+    # problem the user should hear about rather than something to keep
+    # retrying.
     retried = False
-    if not ok and not is_new_session:
+    if not ok and not is_new_session and claude_env.session_unusable(err):
         log(f"TURN resume failed, retrying fresh: err={err[:80]}")
         retried = True
         session_rec = SESSION_STORE.reset(req.conversation_key, req.agent_id)

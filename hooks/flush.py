@@ -483,21 +483,29 @@ def _run(args: argparse.Namespace) -> int:
     template = PROMPT_TEMPLATE.read_text(encoding="utf-8")
     prompt = build_prompt(template, args.agent, args.session_id, args.hook_event, transcript_text)
 
+    # A second call only when the first never reached a model or the API was
+    # briefly down (claude_env.transient). Until 2026-10-20 any failure,
+    # a reply that was not valid JSON included, bought a second full-price
+    # call. A failed flush hands its part back (transcript_delta.release), so
+    # the session's next flush covers it anyway.
     parsed: dict | None = None
     last_raw = ""
     last_err = ""
-    for _ in range(2):
+    for attempt in range(2):
         ok, stdout, err = call_claude(prompt, args.model, args.timeout)
         if not ok:
             last_err = err or "subprocess_failure"
             last_raw = stdout
-            continue
+            if attempt == 0 and claude_env.transient(last_err):
+                continue
+            break
         parse_ok, data, parse_err = parse_response(stdout)
         if parse_ok:
             parsed = data
-            break
-        last_err = parse_err
-        last_raw = stdout
+        else:
+            last_err = parse_err
+            last_raw = stdout
+        break
 
     if parsed is None:
         delta.release(*_CLAIM)
