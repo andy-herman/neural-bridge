@@ -191,6 +191,7 @@ def call_claude_sync(
     flush: bool = True,
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
+    no_tools: bool = False,
     _telemetry_span: agent_telemetry.Invocation | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
@@ -204,6 +205,11 @@ def call_claude_sync(
 
     `max_turns` (`--max-turns`) and `max_budget_usd` (`--max-budget-usd`) cap
     an agentic run's tool round trips and its spend.
+    `no_tools=True` passes claude_env.NO_TOOLS_ARGS: no built-in tools and no
+    skills, which cuts about 16,000 input tokens of Claude Code scaffolding
+    from every call. For one-shot jobs whose prompt holds all their input
+    (check-ins, Echo synthesis, publish prep, the council router). Without it
+    a call with no `allowed_tools` can still use the read-only tools.
 
     If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
     enable headless tool use. Default is no tools (text-only generation).
@@ -233,8 +239,12 @@ def call_claude_sync(
     args = ["claude", "-p", prompt, "--output-format", "text", "--model", claude_env.route_model(model)]
     if effort in VALID_EFFORTS:
         args.extend(["--effort", effort])
+    if no_tools and allowed_tools:
+        raise ValueError("no_tools=True contradicts allowed_tools")
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
+    if no_tools:
+        args.extend(claude_env.NO_TOOLS_ARGS)
     # Exactly the MCP servers this turn was granted (see private_tools.py),
     # and otherwise none: never Andy's user-wide servers. See claude_env.
     args.extend(claude_env.mcp_args(mcp_config))
@@ -320,6 +330,8 @@ async def call_claude(
     agent_id: str | None = None,
     mcp_config: str | None = None,
     telemetry_agent_id: str | None = None,
+    *,
+    no_tools: bool = False,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -331,7 +343,7 @@ async def call_claude(
                 prompt, model, timeout, allowed_tools, add_dirs,
                 session_id=session_id, resume=resume, effort=effort,
                 agent_id=agent_id, mcp_config=mcp_config,
-                telemetry_agent_id=telemetry_agent_id, _telemetry_span=span,
+                telemetry_agent_id=telemetry_agent_id, no_tools=no_tools, _telemetry_span=span,
             ),
         )
     except asyncio.CancelledError:

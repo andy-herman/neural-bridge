@@ -266,7 +266,7 @@ def generate_linkedin_variant(candidate: Candidate, *, dry_run: bool) -> tuple[b
     # the fleet default if that fails: a Sunday prep that writes nothing is
     # the failure this has to avoid.
     ok, stdout, err, model = call_claude_sync_with_fallback(
-        prompt, model_for("content") or DEFAULT_MODEL, timeout=CLAUDE_TIMEOUT, flush=False)
+        prompt, model_for("content") or DEFAULT_MODEL, timeout=CLAUDE_TIMEOUT, flush=False, no_tools=True)
     if not ok:
         return False, f"claude call failed on {model}: {err}"
     return True, stdout.strip()

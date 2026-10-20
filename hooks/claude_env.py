@@ -216,6 +216,15 @@ def proxy_supports(model: str) -> bool:
     return not _CLAUDE_5_RE.match(model)
 
 
+# For a one-shot `claude -p` whose prompt carries everything it needs: no
+# built-in tools, no skills or slash commands. Without these, every call loads
+# Claude Code's tool definitions and skill listing whether it uses them or not:
+# a one-line probe on 2026-10-20 (Claude Code 2.1.304, Haiku 4.5) took 25,096
+# input tokens as the fleet called it and 8,777 with these, the same answer.
+# Never on an agent turn, or on a call whose prompt asks it to read files.
+NO_TOOLS_ARGS = ("--tools", "", "--disable-slash-commands")
+
+
 def mcp_args(mcp_config: str | None = None) -> list[str]:
     """`claude -p` arguments that load exactly `mcp_config` (a path or JSON),
     or no MCP server at all."""

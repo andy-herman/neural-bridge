@@ -259,7 +259,7 @@ def generate(prompt: str) -> tuple[bool, str, str]:
     default when a Claude 5 call fails (claude_invoke.call_claude_sync_with_fallback)."""
     ok, stdout, err, _model = call_claude_sync_with_fallback(
         prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT,
-        flush=False)
+        flush=False, no_tools=True)
     return ok, stdout, err
 
 
