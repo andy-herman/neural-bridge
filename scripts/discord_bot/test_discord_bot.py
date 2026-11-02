@@ -287,6 +287,17 @@ class TestCallClaude(unittest.TestCase):
             env = claude_invoke._subprocess_env()
         self.assertIn("ANTHROPIC_BASE_URL", env)
 
+    def test_subprocess_env_takes_the_api_route_when_a_key_is_configured(self):
+        # Since 2026-10-16 the fleet runs on the Anthropic API whenever a key
+        # is configured: the key is set, and no base URL survives to move it.
+        import os as _os
+        with patch.dict(_os.environ, {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env",
+                                      "ANTHROPIC_BASE_URL": "http://localhost:4141"}, clear=False):
+            _os.environ.pop("NB_CLAUDE_DIRECT", None)
+            env = claude_invoke._subprocess_env()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
     def test_subprocess_env_can_opt_out_of_proxy(self):
         # The loop engineer opts out: it uses dashed Anthropic model ids, and an
         # unattended run that opens PRs must not depend on a local proxy being
@@ -367,6 +378,26 @@ class TestCallClaude(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(err.startswith("exit_1"))
 
+    def test_nonzero_exit_names_the_real_cause_not_the_connectors_warning(self):
+        # 2026-09-30: Luna posted "exit_1:⚠ claude.ai connectors are disabled ...
+        # ⚠ Claude Op" to Discord. Both stderr lines are printed on every
+        # proxy-route call; the cause was the 403 on stdout, which the old
+        # stderr[:200] report discarded. Output replayed with Claude Code 2.1.207.
+        stderr = ("⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth "
+                  "source is set and takes precedence over your claude.ai login · Unset it to load "
+                  "your organization's connectors\n"
+                  "⚠ Claude Opus 4 was retired on June 15, 2026. Consider switching to a newer model.\n")
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run",
+                   return_value=_FakeResult(1, "Failed to authenticate. API Error: 403 forbidden\n", stderr)):
+            ok, _, err = claude_invoke.call_claude_sync("prompt", "model", 30)
+        self.assertFalse(ok)
+        self.assertEqual(err, "exit_1:Failed to authenticate. API Error: 403 forbidden")
+        # And an API error on stdout beats both warnings.
+        with patch("scripts.discord_bot.claude_invoke.subprocess.run",
+                   return_value=_FakeResult(1, 'API Error: 404 {"error":{"message":"model not found"}}', stderr)):
+            ok, _, err = claude_invoke.call_claude_sync("prompt", "model", 30)
+        self.assertTrue(err.startswith("exit_1:API Error: 404"), err)
+
     def test_timeout(self):
         import subprocess as _sp
         with patch("scripts.discord_bot.claude_invoke.subprocess.run",
@@ -380,6 +411,43 @@ class TestCallClaude(unittest.TestCase):
             ok, stdout, err = claude_invoke.call_claude_sync("prompt", "model", 30)
         self.assertFalse(ok)
         self.assertEqual(err, "claude_cli_not_found")
+
+
+class TestCallWithFallback(unittest.TestCase):
+    """Scheduled jobs (Luna's check-ins, the Sunday publish prep) run on a
+    Claude 5 model through the model gateway and must not come back empty
+    when that fails."""
+
+    def _run(self, results, model="claude-sonnet-5"):
+        calls, logged = [], []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        with patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+            out = claude_invoke.call_claude_sync_with_fallback("p", model, timeout=30, log=logged.append)
+        return out, calls, logged
+
+    def test_success_needs_no_fallback(self):
+        out, calls, logged = self._run([(True, "draft", "")])
+        self.assertEqual(out, (True, "draft", "", "claude-sonnet-5"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["timeout"], 30)
+
+    def test_claude_5_failure_retries_once_on_the_default(self):
+        out, calls, logged = self._run([(False, "", "exit_1:API Error: 400 prefill"), (True, "draft", "")])
+        self.assertEqual(out, (True, "draft", "", claude_invoke.DEFAULT_MODEL))
+        self.assertEqual([c["model"] for c in calls], ["claude-sonnet-5", claude_invoke.DEFAULT_MODEL])
+        self.assertIn("retrying on", logged[0])
+
+    def test_timeout_is_not_retried(self):
+        out, calls, _ = self._run([(False, "", "timeout")])
+        self.assertEqual((out[0], len(calls)), (False, 1))
+
+    def test_a_4x_failure_is_not_retried(self):
+        out, calls, _ = self._run([(False, "", "exit_1:boom")], model="claude-opus-4.8")
+        self.assertEqual((out[0], len(calls)), (False, 1))
 
 
 if __name__ == "__main__":

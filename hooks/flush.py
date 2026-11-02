@@ -35,12 +35,20 @@ PROMPT_TEMPLATE = HOOKS_DIR / "prompts" / "flush_v1.md"
 
 sys.path.insert(0, str(HOOKS_DIR))
 import claude_env  # noqa: E402
+import claude_usage  # noqa: E402
 import discord_post  # noqa: E402
 import schema  # noqa: E402
+import transcript_delta as delta  # noqa: E402
 
-DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # Copilot proxy; see hooks/claude_env.py
+DEFAULT_MODEL = claude_env.PIPELINE_MODEL  # fleet route; see hooks/claude_env.py
 FLUSH_VERSION = "1.0"
 DEFAULT_TIMEOUT = 300
+# A flush sends only what is new since the session's last flush, condensed to
+# conversation (hooks/transcript_delta.py). This caps that new part, for a
+# first flush of a very long session.
+MAX_TRANSCRIPT_CHARS = 400_000
+# The bytes this run claimed, so a crash can hand them back (main()).
+_CLAIM: tuple[str, int, int] | None = None
 
 
 def utc_iso() -> str:
@@ -101,14 +109,15 @@ def _subprocess_env_for_claude() -> dict[str, str]:
     argv limit and crashing a flush. Verified 2026-09-23 that hooks do fire
     for nested `claude -p` calls and that their transcripts exist.
 
-    Always routes through the copilot-api proxy on a model it serves (see
-    claude_env). This hook inherits the environment of the session that just
-    ended, and until 2026-09-25 it called claude-sonnet-5 on whatever route
-    that happened to be: the proxy inside an agent turn, which rejects Claude
-    5, so every flush of an agent turn failed with exit 1 and no daily log or
-    progress entry was ever written.
+    Always takes the fleet route (claude_env.fleet_env: the Anthropic API when
+    a key is configured, else the copilot-api proxy), whatever it inherited.
+    This hook inherits the environment of the session that just ended, and
+    until 2026-09-25 it called claude-sonnet-5 on whatever route that happened
+    to be: the proxy inside an agent turn, which rejects Claude 5, so every
+    flush of an agent turn failed with exit 1 and no daily log or progress
+    entry was ever written.
     """
-    env = claude_env.proxy_env(os.environ)
+    env = claude_env.fleet_env(os.environ)
     env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_SKIP_WIKI_RECALL"] = "1"
     env["NB_SKIP_FLUSH"] = "1"
@@ -148,7 +157,7 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
             session_id=session_id,
             decisions=data.get("decisions", []),
             findings=data.get("findings", []),
-            open_questions=data.get("open_questions", []),
+            open_questions=_still_open(agent, session_id, data.get("open_questions", [])),
             source=hook_event,
         )
         if not entry:
@@ -168,29 +177,66 @@ def _progress_append(agent: str, data: dict, session_id: str, hook_event: str) -
         return False, f"{type(exc).__name__}: {exc}"
 
 
-def call_claude(prompt: str, model: str, timeout: int) -> tuple[bool, str, str]:
-    """Invoke `claude -p`. Return (ok, stdout, error_reason)."""
+def _still_open(agent: str, session_id: str, open_questions: list[str]) -> list[str]:
+    """The session's open questions minus those Andy already answered or
+    dismissed on a review queue card. An answer given there lands in the
+    progress log but never in the transcript, so flush keeps listing the
+    question as open. If the queue cannot be read, nothing is dropped."""
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text", "--model", model],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=_subprocess_env_for_claude(),
-        )
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        return questions.unanswered(agent, session_id, open_questions)
+    except Exception:
+        return list(open_questions)
+
+
+def _queue_questions(agent: str, data: dict, session_id: str, *, complete: bool = True) -> tuple[int, str]:
+    """Put this session's open questions in the review queue, where Andy can
+    answer them from Telegram (scripts/review_queue/questions.py). Never
+    raises: a queue that is unavailable must not cost the flush. Returns
+    (items created, reason)."""
+    if agent == schema.UNATTRIBUTED:
+        return 0, "unattributed"
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        created = questions.raise_from_flush(agent, session_id, data.get("open_questions", []),
+                                             complete=complete)
+        return len(created), "queued"
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+
+
+def call_claude(prompt: str, model: str, timeout: int, agent: str = "") -> tuple[bool, str, str]:
+    """Invoke `claude -p`. Return (ok, stdout, error_reason).
+
+    The prompt goes in on stdin. It embeds the whole session transcript, and
+    as an argument it failed to start at all once a session grew past about
+    700 KB ("Argument list too long"): until 2026-10-12 that killed most
+    flushes of long or resumed sessions, 943 of 1,323 in August, before they
+    logged a thing.
+
+    Each call writes a line to the fleet's usage log (hooks/claude_usage.py).
+    """
+    try:
+        result = claude_usage.run_logged(
+            ["claude", "-p", "--output-format", "json", "--model", claude_env.route_model(model),
+             *claude_env.NO_TOOLS_ARGS, *claude_env.mcp_args()],
+            job="flush", agent=agent, env=_subprocess_env_for_claude(), timeout=timeout, input=prompt)
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
     except FileNotFoundError:
         return False, "", "claude_cli_not_found"
-    if result.returncode != 0:
-        # Claude Code prints the API's own error on stdout; stderr carries CLI
-        # warnings, which is all this used to report ("claude.ai connectors
+    except OSError as exc:
+        return False, "", f"spawn_failed:{type(exc).__name__}:{exc.errno}"
+    if not result.ok:
+        # The API's own error, a cap, or stderr (claude_usage.run_result).
+        # Until 2026-09-25 only stderr was reported ("claude.ai connectors
         # are disabled...") while the real 400 went unseen.
-        api_error = next((l for l in (result.stdout or "").splitlines() if l.startswith("API Error")), "")
-        snippet = (api_error or result.stderr or "")[:200].replace("\n", " ")
-        return False, result.stdout, f"exit_{result.returncode}:{snippet}"
-    return True, result.stdout, ""
+        return False, result.text, result.error
+    return True, result.text, ""
 
 
 def strip_code_fences(text: str) -> str:
@@ -335,7 +381,38 @@ def write_failed(agent: str, session_id: str, raw_output: str, reason: str) -> N
     )
 
 
+def _tail(transcript: str, limit: int | None = None) -> tuple[str, bool]:
+    """(the transcript, or its last `limit` characters from a line start, and
+    whether it was cut)."""
+    limit = limit or MAX_TRANSCRIPT_CHARS
+    if len(transcript) <= limit:
+        return transcript, False
+    tail = transcript[-limit:]
+    tail = tail[tail.find("\n") + 1:] if "\n" in tail else tail
+    return (f"[The first {len(transcript) - len(tail):,} characters of this part were left out "
+            f"to fit; the rest follows.]\n{tail}"), True
+
+
 def main() -> int:
+    """Never let an unexpected error vanish. session_end.py runs this detached
+    with output discarded, so an exception used to leave no trace at all: no
+    queue line, no telemetry, and a canary that kept reading "ok"."""
+    args = _parse_args()
+    try:
+        return _run(args)
+    except Exception as exc:
+        if _CLAIM is not None:
+            delta.release(*_CLAIM)
+        reason = f"failed:crash_{type(exc).__name__}"
+        try:
+            write_queue(args.agent, args.session_id, f"{reason}: {exc}"[:200])
+        except Exception:
+            pass
+        _telemetry(args.agent, ok=False, detail=f"{reason}: {exc}"[:200])
+        return 0
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flush a session transcript to a daily log")
     parser.add_argument("--agent", required=True)
     parser.add_argument("--session-id", required=True)
@@ -348,8 +425,23 @@ def main() -> int:
         action="store_true",
         help="Skip the Discord outbound push (per-invocation override of the keychain webhook).",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def _earlier_questions(agent: str, session_id: str) -> list[str] | None:
+    """Questions still open on this session's cards, or None when the queue
+    cannot be read (then nothing may be cleared)."""
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.review_queue import questions
+        return questions.still_open(agent, session_id)
+    except Exception:
+        return None
+
+
+def _run(args: argparse.Namespace) -> int:
+    global _CLAIM
     transcript_path = Path(args.transcript)
     if not transcript_path.exists():
         write_queue(args.agent, args.session_id, "failed:transcript_missing")
@@ -361,32 +453,59 @@ def main() -> int:
     started_at = utc_iso()
 
     try:
-        transcript_text = transcript_path.read_text(encoding="utf-8")
+        data = transcript_path.read_bytes()
         transcript_hash = transcript_sha256(transcript_path)
     except OSError as exc:
         write_queue(args.agent, args.session_id, f"failed:read_transcript_{type(exc).__name__}")
         return 0
 
+    delta.prune()
+    start, end = delta.claim(args.session_id, delta.complete_lines(data))
+    _CLAIM = (args.session_id, start, end)
+    earlier_text, new_text = delta.split(data, start, end)
+    new_turns = delta.condense(new_text)
+    if not new_turns:
+        # Only bookkeeping since the last flush (a resume that said nothing,
+        # a PreCompact right after a SessionEnd). Nothing to summarize.
+        write_queue(args.agent, args.session_id, "skipped:no_new_turns")
+        _telemetry(args.agent, ok=True, chars=0, detail="skipped:no_new_turns")
+        return 0
+    earlier_turns = delta.condense(earlier_text) if start else []
+    earlier_questions = _earlier_questions(args.agent, args.session_id) if start else []
+    new_part, truncated = _tail("\n\n".join(new_turns))
+    transcript_text = delta.render(new_part, earlier_turns, earlier_questions)
+    # Earlier questions may be cleared only when the model saw them all.
+    complete = not truncated and earlier_questions is not None
     template = PROMPT_TEMPLATE.read_text(encoding="utf-8")
     prompt = build_prompt(template, args.agent, args.session_id, args.hook_event, transcript_text)
 
+    # A second call only when the first never reached a model or the API was
+    # briefly down (claude_env.transient). Until 2026-10-20 any failure,
+    # a reply that was not valid JSON included, bought a second full-price
+    # call. A failed flush hands its part back (transcript_delta.release), so
+    # the session's next flush covers it anyway.
     parsed: dict | None = None
     last_raw = ""
     last_err = ""
-    for _ in range(2):
-        ok, stdout, err = call_claude(prompt, args.model, args.timeout)
+    for attempt in range(2):
+        ok, stdout, err = call_claude(prompt, args.model, args.timeout, agent=args.agent)
         if not ok:
             last_err = err or "subprocess_failure"
             last_raw = stdout
-            continue
+            if attempt == 0 and claude_env.transient(last_err):
+                continue
+            break
         parse_ok, data, parse_err = parse_response(stdout)
         if parse_ok:
             parsed = data
-            break
-        last_err = parse_err
-        last_raw = stdout
+        else:
+            last_err = parse_err
+            last_raw = stdout
+        break
 
     if parsed is None:
+        delta.release(*_CLAIM)
+        _CLAIM = None
         write_failed(args.agent, args.session_id, last_raw, last_err)
         prefix = last_err.split(":", 1)[0] if last_err else "unknown"
         write_queue(args.agent, args.session_id, f"failed:{prefix}")
@@ -394,6 +513,10 @@ def main() -> int:
         # rather than just the exit code; the full output is in _failed/.
         _telemetry(args.agent, ok=False, detail=f"failed:{last_err[:160]}")
         return 0
+
+    # A summary exists: from here a crash must not hand the bytes back, or
+    # the next flush would record this part a second time.
+    _CLAIM = None
 
     if schema.is_empty_session(parsed):
         write_queue(args.agent, args.session_id, "skipped:empty")
@@ -421,6 +544,9 @@ def main() -> int:
     write_queue(args.agent, args.session_id, "flushed")
     _telemetry(args.agent, ok=True, chars=len(block), detail=f"session_n={session_n}")
     _progress_append(args.agent, parsed, args.session_id, args.hook_event)
+    queued, why = _queue_questions(args.agent, parsed, args.session_id, complete=complete)
+    if queued or why not in ("queued", "unattributed"):
+        write_queue(args.agent, args.session_id, f"questions:{queued} {why}"[:120])
 
     if not args.no_discord:
         header = f"**Flush** | agent: `{args.agent}` | {ended_at}"

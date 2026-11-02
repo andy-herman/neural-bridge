@@ -1,6 +1,6 @@
 # Filing gate prompt v1.0
 
-Used by `scripts/compile.py` to decide whether a proposed concept candidate should be PROMOTED to `knowledge/concepts/`, QUARANTINED to `knowledge/quarantine/`, or REJECTED entirely. Variables `{slug}`, `{summary}`, `{agent}`, `{session_excerpt}` are substituted by `compile.py` before the prompt is sent.
+Used by `scripts/compile.py` to decide whether a proposed concept candidate should be PROMOTED to `knowledge/concepts/`, QUARANTINED to `knowledge/quarantine/`, or REJECTED entirely. Variables `slug`, `summary`, `agent`, `session_excerpt` (in braces where they appear below) are substituted by `compile.py` before the prompt is sent.
 
 This is the heavy filing gate from the memory-poisoning paper — the rear-guard check before content lands in shared memory.
 

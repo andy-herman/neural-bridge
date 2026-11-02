@@ -572,5 +572,68 @@ class TestState(unittest.TestCase):
             self.assertEqual(state.load_count(sd), 0)
 
 
+
+# ---------- where the loop tells Andy things (2026-10-16) ----------
+
+class TestNotices(unittest.TestCase):
+    """Blocked and escalated issues become review queue alerts; nothing goes
+    to Discord, and an idle run says nothing at all."""
+
+    def setUp(self):
+        from scripts.loop_engineer import main as loop_main
+        from scripts.review_queue import store as review
+        self.loop_main, self.review = loop_main, review
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, {review.DB_ENV: str(Path(self._tmp.name) / "q.db")})
+        self._env.start()
+        self._transition = mock.patch.object(loop_main.queue, "transition")
+        self._transition.start()
+        self.engine = loop_main.LoopEngineer(LoopConfig())
+        self.issue = _issue(number=41, title="fix: retry the flush on a locked queue")
+
+    def tearDown(self):
+        self._transition.stop()
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def alerts(self):
+        return [i for i in self.review.Store().items(states=(self.review.OPEN,))
+                if i.source == self.loop_main.ALERT_SOURCE]
+
+    def test_blocked_and_escalated_issues_become_alert_cards(self):
+        self.engine._to_blocked(self.issue, "diff too large", "812 lines")
+        [card] = self.alerts()
+        self.assertEqual(card.kind, self.review.ALERT)
+        self.assertIn("blocked #41", card.title)
+        self.assertIn("diff too large", card.detail)
+        self.assertTrue(card.ref.endswith("/issues/41"))
+        self.engine._to_failed(self.issue, "tests still failing", "trace")
+        [card] = self.alerts()
+        self.assertIn("escalated #41", card.title, "the same issue keeps one card, refreshed")
+
+    def test_a_pr_for_the_issue_clears_its_card(self):
+        self.engine._to_failed(self.issue, "tests still failing")
+        self.engine._to_review(self.issue)
+        self.assertEqual(self.alerts(), [])
+
+    def test_a_dry_run_raises_nothing(self):
+        self.engine.cfg.dry_run = True
+        self.engine._to_blocked(self.issue, "diff too large")
+        self.assertEqual(self.alerts(), [])
+
+    def test_an_idle_run_posts_nothing_to_discord(self):
+        self.engine.cfg.once = True
+        with mock.patch.object(self.loop_main.queue, "recover_stuck", return_value=[]), \
+                mock.patch.object(self.loop_main.queue, "list_ready", return_value=[]), \
+                mock.patch("scripts.loop_engineer.notify.notify") as posted, \
+                mock.patch.object(self.loop_main, "load_count", return_value=0):
+            self.assertEqual(self.engine.run(), 0)
+        posted.assert_not_called()
+
+    def test_the_alert_source_is_not_the_pr_syncs(self):
+        from scripts.review_queue import pr_reviews
+        self.assertNotEqual(self.loop_main.ALERT_SOURCE, pr_reviews.SOURCE,
+                            "the PR sync clears every live item of its own source")
+
 if __name__ == "__main__":
     unittest.main()

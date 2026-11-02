@@ -42,7 +42,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from hooks import discord_post  # noqa: E402
-from scripts.discord_bot.claude_invoke import call_claude_sync  # noqa: E402
+from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude_sync_with_fallback  # noqa: E402
+from scripts.discord_bot.mention import model_for  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BLOG_REPO = Path.home() / "Development" / "neural-bridge-blog"
@@ -260,9 +261,14 @@ def generate_linkedin_variant(candidate: Candidate, *, dry_run: bool) -> tuple[b
     prompt = build_linkedin_prompt(candidate)
     if dry_run:
         return True, f"<dry-run: would call claude with prompt of {len(prompt)} chars>"
-    ok, stdout, err = call_claude_sync(prompt, timeout=CLAUDE_TIMEOUT)
+    # The LinkedIn variant is the content agent's work, so it runs on the
+    # content agent's model (Sonnet 5 since 2026-09-30), falling back once to
+    # the fleet default if that fails: a Sunday prep that writes nothing is
+    # the failure this has to avoid.
+    ok, stdout, err, model = call_claude_sync_with_fallback(
+        prompt, model_for("content") or DEFAULT_MODEL, timeout=CLAUDE_TIMEOUT, flush=False, no_tools=True, job="publish_prep")
     if not ok:
-        return False, f"claude call failed: {err}"
+        return False, f"claude call failed on {model}: {err}"
     return True, stdout.strip()
 
 
@@ -453,7 +459,22 @@ def main(argv: list[str] | None = None) -> int:
     posted = post_discord(brief, dry_run=args.dry_run)
     if not posted and not args.dry_run:
         print("WARN: discord post returned False (webhook missing or HTTP error)", file=sys.stderr)
+    if not args.dry_run:
+        queue_publish_item(candidate, target_monday)
     return 0
+
+
+def queue_publish_item(candidate: Candidate, target_monday: date) -> None:
+    """A card in Andy's review queue: Ready, or Hold a week. Never fails the
+    prep: the Discord brief and the vault drafts are already out."""
+    try:
+        from scripts.review_queue import publish
+        item, created = publish.raise_for_week(
+            path=str(candidate.file_path.relative_to(BLOG_REPO)), slug=candidate.slug,
+            title=candidate.title, pub_date=candidate.pub_date, monday=target_monday)
+        print(f"review queue: {item.id} {'queued' if created else 'already queued'}", file=sys.stderr)
+    except Exception as exc:
+        print(f"WARN: could not queue the publish card: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

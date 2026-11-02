@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import agent_telemetry
@@ -27,8 +28,9 @@ _HOOKS_DIR = str(Path(__file__).resolve().parent.parent.parent / "hooks")
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 import claude_env  # noqa: E402
+import claude_usage  # noqa: E402
 
-DEFAULT_MODEL = "claude-opus-4.8"  # copilot-api id (dotted); fleet runs Opus 4.8 via Copilot
+DEFAULT_MODEL = "claude-opus-4-8"  # API id; claude_env.route_model() dots it for the proxy route
 DEFAULT_TIMEOUT = 480  # raised from 300 — content-adjacent tasks (drafts, summaries, briefs) routinely run 4-7 min
 
 
@@ -50,8 +52,8 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     """
     # Start from a copy with every Anthropic routing variable removed, so the
     # route below is the only one in play. Anything inherited (the desktop
-    # app's base URL, ~/.hermes/.env's credit-less API key) would otherwise
-    # win silently. See hooks/claude_env.py.
+    # app's base URL, an API key ~/.hermes/.env happened to load) would
+    # otherwise win silently. See hooks/claude_env.py.
     env = claude_env.direct_env(os.environ)
     env.pop("NB_DISCORD_WEBHOOK", None)
     env["NB_NO_DISCORD"] = "1"
@@ -66,25 +68,20 @@ def _subprocess_env(route_via_proxy: bool = True, agent_id: str | None = None) -
     # agent the whole shell, so it must not be settable per call site.
     if agent_id:
         env["NB_AGENT_ID"] = agent_id
-    # Route `claude -p` through the local copilot-api proxy so the fleet runs on
-    # Opus 4.8 from Andy's GitHub Copilot subscription (flat cost) instead of
-    # spending Claude Max weekly limits. copilot-api exposes the Anthropic
-    # /v1/messages endpoint; the key is a placeholder (the proxy authenticates
-    # with its own cached GitHub token). To revert to the Max login, set
-    # NB_CLAUDE_DIRECT=1 (and use a dashed model id like claude-opus-4-8, since
-    # the dotted DEFAULT_MODEL above is the copilot-api form).
+    # Route `claude -p` on the fleet route (claude_env.fleet_env) so the fleet
+    # never spends Claude Max weekly limits. Since 2026-10-16 that is the
+    # Anthropic API on Andy's own key whenever the key file exists; before,
+    # it was the model gateway and the copilot-api proxy behind it, still
+    # reachable with NB_MODEL_ROUTE=proxy. To use the Max login instead, set
+    # NB_CLAUDE_DIRECT=1.
     #
     # `route_via_proxy=False` opts a caller out entirely: the loop engineer uses
-    # it because its model ids are the dashed Anthropic form (claude-sonnet-5),
-    # not the dotted copilot-api form, and because an unattended coding run
-    # should not silently fail when the proxy is down. Everything conversational
-    # keeps the default.
+    # it so an unattended coding run stays on the Max login. Everything
+    # conversational keeps the default.
     if route_via_proxy and not os.environ.get("NB_CLAUDE_DIRECT"):
-        # Force the base URL so an ambient ANTHROPIC_BASE_URL (e.g. a shell that
-        # points at api.anthropic.com) can't silently bypass the proxy, and
-        # force the placeholder key: a real key from ~/.hermes/.env used to win
-        # over it via setdefault and was sent to the proxy on every turn.
-        env = claude_env.proxy_env(env)
+        # fleet_env forces the route: an ambient ANTHROPIC_BASE_URL or API key
+        # (e.g. one ~/.hermes/.env loaded) can't silently move the call.
+        env = claude_env.fleet_env(env)
     # Otherwise direct: env already carries no routing variables, so the call
     # reaches Anthropic on the Claude Code login.
     return env
@@ -124,6 +121,61 @@ def wrap_untrusted(text: str, tag: str, framing: str | None = None) -> str:
 
 VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
+# This separate caller never enters Invocation or the conversational retry path.
+PUBLIC_RESEARCH_FLAGS = (
+    "--bare", "--safe-mode", "--restricted", "--tools", "--allowedTools",
+    "--disable-slash-commands", "--no-session-persistence", "--no-chrome",
+    "--setting-sources", "--strict-mcp-config", "--mcp-config",
+    "--system-prompt", "--session-id", "--effort", "--max-turns",
+    "--output-format", "--model",
+)
+
+
+def start_public_research(
+    *,
+    executable: str,
+    cwd: Path,
+    system_prompt: str,
+    model: str,
+    effort: str,
+    session_id: str,
+) -> subprocess.Popen:
+    """Start a restricted, stateless child of the finite bridge's supervisor.
+
+    The caller verifies offline CLI capabilities before reaching here and owns
+    the process group, stdin, timeout, cancellation and reaping. No prompt is
+    placed on argv, and no model input is sent until that supervisor is ready.
+    """
+    if os.environ.get("NB_CLAUDE_DIRECT") or effort not in VALID_EFFORTS:
+        raise ValueError("public_research_policy_unavailable")
+    routed = _subprocess_env(agent_id="research")
+    env = {
+        "PATH": os.defpath,
+        "HOME": str(cwd),
+        "TMPDIR": str(cwd),
+        "CLAUDE_CONFIG_DIR": str(cwd),
+        "LANG": "C.UTF-8",
+        "NB_AGENT_ID": "research",
+        "NB_NO_DISCORD": "1",
+        "NB_SKIP_WIKI_RECALL": "1",
+    }
+    # Only the route's own variables cross over: the key on the API route, the
+    # base URL and placeholder key on the proxy route.
+    env.update({k: routed[k] for k in claude_env.ROUTING_VARS if k in routed})
+    args = [
+        executable, "-p", "--output-format", "json", "--model", claude_env.route_model(model),
+        "--effort", effort, "--bare", "--safe-mode", "--restricted",
+        "--tools", "WebSearch,WebFetch", "--allowedTools", "WebSearch,WebFetch",
+        "--disable-slash-commands", "--no-session-persistence", "--no-chrome",
+        "--setting-sources", "", "--max-turns", "6",
+        "--system-prompt", system_prompt, "--session-id", session_id,
+        *claude_env.mcp_args(),
+    ]
+    return subprocess.Popen(
+        args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, cwd=cwd, env=env,
+    )
+
 
 def call_claude_sync(
     prompt: str,
@@ -138,9 +190,33 @@ def call_claude_sync(
     mcp_config: str | None = None,
     telemetry_agent_id: str | None = None,
     *,
+    flush: bool = True,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
+    no_tools: bool = False,
+    job: str | None = None,
     _telemetry_span: agent_telemetry.Invocation | None = None,
 ) -> tuple[bool, str, str]:
     """Synchronous claude -p invocation. Returns (ok, stdout, error_reason).
+
+    `flush=False` sets NB_SKIP_FLUSH=1, so the session's SessionEnd hook does
+    not spawn a flush. Every stateless job (check-ins, publish prep, Echo,
+    digests) should pass it: their flush lands in daily-logs/_unattributed,
+    which nothing reads, and on the API key it cost more than the job itself
+    (about $99 a month across those callers, 2026-10-17). Agent turns keep
+    the default: their flush feeds the progress log and the review queue.
+
+    `max_turns` (`--max-turns`) and `max_budget_usd` (`--max-budget-usd`) cap
+    an agentic run's tool round trips and its spend.
+    `job` names the caller in the fleet's usage log (hooks/claude_usage.py:
+    one line per call with its tokens, cost and route). The call runs with
+    `--output-format json` so Claude Code reports those; the reply text it
+    returns is the same as with `--output-format text`.
+    `no_tools=True` passes claude_env.NO_TOOLS_ARGS: no built-in tools and no
+    skills, which cuts about 16,000 input tokens of Claude Code scaffolding
+    from every call. For one-shot jobs whose prompt holds all their input
+    (check-ins, Echo synthesis, publish prep, the council router). Without it
+    a call with no `allowed_tools` can still use the read-only tools.
 
     If `allowed_tools` is set, passes `--allowedTools <comma-list>` to
     enable headless tool use. Default is no tools (text-only generation).
@@ -167,24 +243,37 @@ def call_claude_sync(
     file may have been pruned by Claude Code's own cleanup. session_id must
     be a valid UUID; callers should use `session_store.SessionStore.get_or_create`.
     """
-    args = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+    args = ["claude", "-p", prompt, "--output-format", "json", "--model", claude_env.route_model(model)]
     if effort in VALID_EFFORTS:
         args.extend(["--effort", effort])
+    if no_tools and allowed_tools:
+        raise ValueError("no_tools=True contradicts allowed_tools")
     if allowed_tools:
         args.extend(["--allowedTools", allowed_tools])
-    if mcp_config:
-        # Private MCP servers are loaded per call, only for turns that were
-        # granted them (see private_tools.py), never from user-wide config.
-        args.extend(["--mcp-config", mcp_config])
+    if no_tools:
+        args.extend(claude_env.NO_TOOLS_ARGS)
+    # Exactly the MCP servers this turn was granted (see private_tools.py),
+    # and otherwise none: never Andy's user-wide servers. See claude_env.
+    args.extend(claude_env.mcp_args(mcp_config))
     if add_dirs:
         for d in add_dirs:
             args.extend(["--add-dir", d])
+    if max_turns:
+        args.extend(["--max-turns", str(int(max_turns))])
+    if max_budget_usd:
+        args.extend(["--max-budget-usd", f"{float(max_budget_usd):.2f}"])
     if session_id:
         if resume:
             args.extend(["--resume", session_id])
         else:
             args.extend(["--session-id", session_id])
     # Attribution is deliberately separate from NB_AGENT_ID and tool policy.
+    env = {**_subprocess_env(agent_id=agent_id), **({} if flush else {"NB_SKIP_FLUSH": "1"})}
+    usage = {"job": job or f"other:{telemetry_agent_id or agent_id or 'unknown'}",
+             "agent": telemetry_agent_id or agent_id, "route": claude_usage.route_of(env),
+             "model": args[args.index("--model") + 1], "max_budget_usd": max_budget_usd,
+             "max_turns": max_turns}
+    started = time.monotonic()
     with _telemetry_span or agent_telemetry.Invocation(telemetry_agent_id or agent_id) as span:
         try:
             result = subprocess.run(
@@ -193,19 +282,55 @@ def call_claude_sync(
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
-                env=_subprocess_env(agent_id=agent_id),
+                env=env,
             )
         except subprocess.TimeoutExpired:
+            claude_usage.record(**usage, result=None, seconds=time.monotonic() - started, error="timeout")
             return False, "", "timeout"
         except FileNotFoundError:
             return False, "", "claude_cli_not_found"
-        if result.returncode != 0:
+        parsed = claude_usage.run_result(result.returncode, result.stdout, result.stderr)
+        claude_usage.record(**usage, result=parsed, seconds=time.monotonic() - started)
+        if not parsed.ok:
             if result.returncode < 0:
                 span.outcome = "cancelled"
-            snippet = (result.stderr or "")[:200].replace("\n", " ")
-            return False, result.stdout, f"exit_{result.returncode}:{snippet}"
+            # What the agent posts to Discord as "I hit an error": the API
+            # error, a turn or spend cap, or stderr (claude_usage.run_result).
+            # Until 2026-09-30 it was stderr[:200], which on the proxy route
+            # is the connectors warning and the first word of what mattered.
+            return False, parsed.text, parsed.error
         span.outcome = "succeeded"
-        return True, result.stdout, ""
+        return True, parsed.text, ""
+
+
+def call_claude_sync_with_fallback(
+    prompt: str,
+    model: str,
+    *,
+    log=None,
+    **kwargs,
+) -> tuple[bool, str, str, str]:
+    """call_claude_sync on `model`, retried once on DEFAULT_MODEL when a
+    Claude 5 call fails for any reason but a timeout. Returns (ok, stdout,
+    error_reason, model_used).
+
+    On the proxy route Claude 5 answers only through the model gateway
+    (scripts/model_gateway.py), so this keeps a gateway outage from costing a
+    scheduled job its output. On the API route proxy_supports() is always
+    true and there is no retry.
+    For stateless calls only: agent turns carry a session, and their fallback
+    (agent_runtime) has to decide what happens to it.
+    """
+    ok, stdout, err = call_claude_sync(prompt, model=model, **kwargs)
+    if ok or claude_env.proxy_supports(model) or err == "timeout":
+        return ok, stdout, err, model
+    message = f"claude call on {model} failed ({err[:120]}); retrying on {DEFAULT_MODEL}"
+    if log is not None:
+        log(message)
+    else:
+        print(message, file=sys.stderr)
+    ok, stdout, err = call_claude_sync(prompt, model=DEFAULT_MODEL, **kwargs)
+    return ok, stdout, err, DEFAULT_MODEL
 
 
 async def call_claude(
@@ -220,6 +345,11 @@ async def call_claude(
     agent_id: str | None = None,
     mcp_config: str | None = None,
     telemetry_agent_id: str | None = None,
+    *,
+    no_tools: bool = False,
+    job: str | None = None,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
 ) -> tuple[bool, str, str]:
     """Async wrapper for use inside discord.py event loop."""
     loop = asyncio.get_running_loop()
@@ -231,7 +361,8 @@ async def call_claude(
                 prompt, model, timeout, allowed_tools, add_dirs,
                 session_id=session_id, resume=resume, effort=effort,
                 agent_id=agent_id, mcp_config=mcp_config,
-                telemetry_agent_id=telemetry_agent_id, _telemetry_span=span,
+                telemetry_agent_id=telemetry_agent_id, no_tools=no_tools, job=job,
+                max_turns=max_turns, max_budget_usd=max_budget_usd, _telemetry_span=span,
             ),
         )
     except asyncio.CancelledError:

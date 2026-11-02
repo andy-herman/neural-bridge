@@ -249,5 +249,73 @@ class TestGenerateKoreanTranslation(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestLinkedInModel(unittest.TestCase):
+    """The LinkedIn variant runs on the content agent's model (Sonnet 5),
+    falling back once to the fleet default."""
+
+    def _generate(self, results):
+        from unittest.mock import patch
+        import tempfile
+        from scripts.publish import prepare_week as pw
+        calls = []
+        seq = list(results)
+
+        def fake(prompt, **kwargs):
+            calls.append(kwargs)
+            return seq.pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "voice.md"
+            corpus.write_text("voice")
+            with patch.object(pw, "VOICE_CORPUS", corpus), \
+                    patch.object(pw, "LINKEDIN_PROMPT_TEMPLATE", corpus), \
+                    patch.object(pw, "build_linkedin_prompt", return_value="PROMPT"), \
+                    patch("scripts.discord_bot.claude_invoke.call_claude_sync", side_effect=fake):
+                result = pw.generate_linkedin_variant(object(), dry_run=False)
+        return result, calls
+
+    def test_runs_on_the_content_agents_model(self):
+        from scripts.discord_bot.mention import model_for
+        result, calls = self._generate([(True, " post ", "")])
+        self.assertEqual(result, (True, "post"))
+        self.assertEqual(calls[0]["model"], model_for("content"))
+        self.assertEqual(calls[0]["model"], "claude-sonnet-5")
+
+    def test_a_failed_claude_5_call_falls_back_and_still_produces_a_post(self):
+        from scripts.discord_bot.claude_invoke import DEFAULT_MODEL
+        result, calls = self._generate([(False, "", "exit_1:API Error: 400 prefill"), (True, "post", "")])
+        self.assertEqual(result, (True, "post"))
+        self.assertEqual([c["model"] for c in calls], ["claude-sonnet-5", DEFAULT_MODEL])
+
+    def test_a_double_failure_names_the_model_it_ended_on(self):
+        from scripts.discord_bot.claude_invoke import DEFAULT_MODEL
+        result, _ = self._generate([(False, "", "exit_1:a"), (False, "", "exit_1:b")])
+        self.assertEqual(result, (False, f"claude call failed on {DEFAULT_MODEL}: exit_1:b"))
+
+
+
+class TestQueuePublishItem(unittest.TestCase):
+    def candidate(self):
+        from datetime import date
+        return prepare_week.Candidate(
+            file_path=prepare_week.BLOG_REPO / "src" / "content" / "posts" / "the-queue.mdx",
+            slug="the-queue", title="The queue", description="", pub_date=date(2026, 10, 19),
+            content_type="posts", body="")
+
+    def test_sunday_prep_raises_one_publish_card(self):
+        from datetime import date
+        from scripts.review_queue import store as st
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {st.DB_ENV: str(Path(tmp) / "q.db")}):
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+            items = st.Store().items()
+        self.assertEqual([(i.kind, i.payload["path"]) for i in items],
+                         [(st.PUBLISH, "src/content/posts/the-queue.mdx")])
+
+    def test_a_broken_queue_never_fails_the_prep(self):
+        from datetime import date
+        with mock.patch("scripts.review_queue.publish.raise_for_week", side_effect=RuntimeError("locked")):
+            prepare_week.queue_publish_item(self.candidate(), date(2026, 10, 19))
+
 if __name__ == "__main__":
     unittest.main()

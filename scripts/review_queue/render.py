@@ -6,8 +6,10 @@ content itself (a capture's article, an agent's question) stays in the repo or
 the vault.
 
 Buttons carry callback data "q:<id>:<action>", well under Telegram's 64 bytes.
-Anything that publishes or deletes (filing or rejecting a capture) asks for a
-second tap, because a stray thumb on a phone should not merge a pull request.
+Anything that publishes or deletes (filing or rejecting a capture, opening an
+agent's pull request) asks for a second tap, because a stray thumb on a phone
+should not merge or push anything. Dismissing a question or dropping an
+action changes nothing outside the queue, so it takes one.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import html
 import re
 import time
 
+from . import pr_reviews
 from . import store as st
 
 CALLBACK_RE = re.compile(r"^q:([0-9a-f]{6}):([a-z]+!?)$")
@@ -23,9 +26,9 @@ CALLBACK_RE = re.compile(r"^q:([0-9a-f]{6}):([a-z]+!?)$")
 # action -> (verb it records, needs a confirming second tap)
 APPROVE, APPROVE_CONFIRMED = "approve", "approve!"
 REJECT, REJECT_CONFIRMED = "reject", "reject!"
-ACK, SNOOZE, RETRY, SHOW, OPEN = "ack", "snooze", "retry", "show", "open"
+ACK, SNOOZE, RETRY, SHOW, OPEN, ANSWER = "ack", "snooze", "retry", "show", "open", "answer"
 ACTIONS = frozenset({APPROVE, APPROVE_CONFIRMED, REJECT, REJECT_CONFIRMED,
-                     ACK, SNOOZE, RETRY, SHOW, OPEN})
+                     ACK, SNOOZE, RETRY, SHOW, OPEN, ANSWER})
 
 SNOOZE_SECONDS = 24 * 3600
 
@@ -40,13 +43,40 @@ _KIND_LABEL = {
 }
 
 # What approve/reject are called on each kind's buttons.
-_APPROVE_LABEL = {st.CAPTURE: "File it"}
+_APPROVE_LABEL = {st.CAPTURE: "File it", st.ACTION: "Open the PR", st.PR_REVIEW: "Merge",
+                  st.PUBLISH: "Ready"}
+_REJECT_LABEL = {st.QUESTION: "Dismiss", st.PR_REVIEW: "Close", st.PUBLISH: "Hold a week"}
 _CONFIRM_TEXT = {
     (st.CAPTURE, st.APPROVE): ("File this into the wiki? This opens a pull request that "
                                "moves it from quarantine into knowledge/concepts and merges it."),
     (st.CAPTURE, st.REJECT): ("Reject it? This opens a pull request that deletes it from "
                               "quarantine and merges it. Git history keeps the text."),
+    (st.ACTION, st.APPROVE): ("Push this branch and open the pull request? Nothing merges: "
+                              "the PR waits for your review on GitHub."),
+    (st.PR_REVIEW, st.APPROVE): ("Merge it into main at the head shown above? Merging deploys the "
+                                 "fleet within about two minutes."),
+    (st.PR_REVIEW, st.REJECT): ("Close the pull request? The branch is kept, and the issue goes to "
+                                "agent-blocked so the loop does not retry it on its own."),
 }
+_CONFIRM_LABEL = {(st.CAPTURE, st.APPROVE): "Yes, file it", (st.ACTION, st.APPROVE): "Yes, open it",
+                  (st.PR_REVIEW, st.APPROVE): "Yes, merge", (st.PR_REVIEW, st.REJECT): "Yes, close it"}
+
+_HEAD_RE = re.compile(r"\bhead ([0-9a-f]{7})\b")
+
+
+def shown_head(text: str | None) -> str | None:
+    """The short commit a PR card or confirm screen displayed."""
+    m = _HEAD_RE.search(text or "")
+    return m.group(1) if m else None
+
+
+def pr_mergeable(item: st.Item) -> bool:
+    return pr_reviews.mergeable_now(item.payload)
+
+
+def needs_confirm(kind: str, verb: str) -> bool:
+    """Only what publishes or deletes takes a second tap."""
+    return (kind, verb) in _CONFIRM_TEXT
 
 
 def callback(item_id: str, action: str) -> str:
@@ -72,20 +102,56 @@ def _status_line(item: st.Item) -> str:
     if item.state == st.SNOOZED:
         return f"Snoozed until {_when(item.snooze_until)}."
     if item.state in (st.DECIDED, st.APPLYING):
-        return {st.APPROVE: "Filing it now…", st.REJECT: "Rejecting it now…"}.get(
-            verb, "Recorded, applying now…")
+        if item.kind == st.PUBLISH:
+            return "Noted…" if verb == st.APPROVE else "Moving it a week…"
+        if item.kind == st.PR_REVIEW:
+            return "Merging…" if verb == st.APPROVE else "Closing the PR…"
+        if item.kind == st.ACTION:
+            return "Opening the PR…" if verb == st.APPROVE else "Dropping it…"
+        return {st.APPROVE: "Filing it now…", st.REJECT: "Rejecting it now…",
+                st.ANSWER: "Saving your answer…"}.get(verb, "Recorded, applying now…")
+    if item.state == st.APPLIED and item.kind == st.PUBLISH:
+        if verb == st.APPROVE:
+            return f"Ready {_when(item.decided_at)}: the Monday run publishes it."
+        return f"Held {_when(item.decided_at)}: {item.result}."
+    if item.state == st.APPLIED and item.kind == st.PR_REVIEW:
+        if verb == st.APPROVE:
+            return f"Merged {_when(item.decided_at)}. It deploys within about two minutes."
+        return f"Closed {_when(item.decided_at)}. {item.result}."
     if item.state == st.APPLIED:
-        done = {st.APPROVE: "Filed", st.REJECT: "Rejected",
-                st.ACKNOWLEDGE: "Acknowledged"}.get(verb, verb.capitalize() or "Done")
+        if item.kind == st.ACTION:
+            done = {st.APPROVE: "PR opened", st.REJECT: "Dropped; nothing was pushed"}.get(verb, "Done")
+        elif item.kind == st.QUESTION:
+            done = {st.ANSWER: "Answered", st.REJECT: "Dismissed"}.get(verb, "Done")
+        else:
+            done = {st.APPROVE: "Filed", st.REJECT: "Rejected",
+                    st.ACKNOWLEDGE: "Acknowledged"}.get(verb, verb.capitalize() or "Done")
         extra = f": {item.result}" if item.result and item.result.startswith("http") else ""
         tail = " It has since cleared." if item.kind == st.ALERT and item.resolved_at else ""
+        if item.kind == st.QUESTION and verb == st.ANSWER and item.agent:
+            tail = f" {item.agent} reads it at the start of its next session."
         return f"{done} {_when(item.decided_at)}{extra}.{tail}"
     if item.state == st.APPLY_FAILED:
         return f"That did not go through: {item.result or 'no detail'}"
     if item.state == st.SUPERSEDED:
         if item.kind == st.ALERT:
             return f"Cleared on its own {_when(item.resolved_at)}. Nothing to do."
+        if item.kind == st.ACTION:
+            return f"Expired undecided {_when(item.resolved_at)}. Nothing was pushed."
+        if item.kind == st.PR_REVIEW:
+            return f"Merged or closed on GitHub ({_when(item.resolved_at)}). Nothing to do."
+        if item.kind == st.PUBLISH:
+            return f"The Monday publish run has passed ({_when(item.resolved_at)}). Nothing to do."
         return f"No longer waiting ({_when(item.resolved_at)}). Nothing to do."
+    if item.state == st.OPEN and item.kind == st.QUESTION:
+        return "Reply to this card to answer."
+    if item.state == st.OPEN and item.kind == st.PR_REVIEW and not pr_mergeable(item):
+        checks = item.payload.get("checks")
+        if checks == pr_reviews.FAILING:
+            return "Checks are failing, so there is no Merge button. Close it, or let the loop fix it."
+        if checks == pr_reviews.GREEN:
+            return "Checks passed, but GitHub cannot merge it as is (a conflict with main?)."
+        return "Merge appears here once the checks pass."
     return ""
 
 
@@ -113,23 +179,49 @@ def keyboard(item: st.Item) -> list[list[tuple[str, str]]]:
         if item.kind == st.ALERT or item.kind == st.PROBE:
             return [[("Acknowledge", callback(item.id, ACK)),
                      ("Snooze 1 day", callback(item.id, SNOOZE))]]
-        return [[(_APPROVE_LABEL.get(item.kind, "Approve"), callback(item.id, APPROVE)),
-                 ("Reject", callback(item.id, REJECT))],
-                [("Snooze 1 day", callback(item.id, SNOOZE))]]
+        if item.kind == st.QUESTION:
+            return [[("Answer", callback(item.id, ANSWER)),
+                     (_REJECT_LABEL[st.QUESTION], callback(item.id, REJECT))],
+                    [("Snooze 1 day", callback(item.id, SNOOZE))]]
+        first = [(_APPROVE_LABEL.get(item.kind, "Approve"), callback(item.id, APPROVE)),
+                 (_REJECT_LABEL.get(item.kind, "Reject"), callback(item.id, REJECT))]
+        if item.kind == st.PR_REVIEW and not pr_mergeable(item):
+            first = first[1:]
+        if item.kind in (st.ACTION, st.PUBLISH):
+            # No snooze: an action expires after a day (actions.py), and a
+            # publish item once the Monday run has gone (publish.py).
+            return [first]
+        return [first, [("Snooze 1 day", callback(item.id, SNOOZE))]]
     if item.state == st.APPLY_FAILED:
         return [[("Retry", callback(item.id, RETRY))]]
     return []
 
 
+# A staged article (scripts/review_queue/promotions.py) is not on GitHub yet.
+_STAGED_CONFIRM_TEXT = {
+    st.APPROVE: ("File this into the wiki? This publishes it to the public repo through a pull "
+                 "request that merges at once. Read it first in the vault preview."),
+    st.REJECT: "Drop it? Nothing has been published; the article is discarded.",
+}
+
+
 def confirm_text(item: st.Item, verb: str) -> str:
     question = _CONFIRM_TEXT.get((item.kind, verb), f"{verb.capitalize()} this?")
+    if item.kind == st.CAPTURE and item.source == "compile_staged":
+        question = _STAGED_CONFIRM_TEXT.get(verb, question)
     return card_text(item) + "\n\n" + html.escape(question)
 
 
 def confirm_keyboard(item: st.Item, verb: str) -> list[list[tuple[str, str]]]:
     confirmed = APPROVE_CONFIRMED if verb == st.APPROVE else REJECT_CONFIRMED
-    label = "Yes, file it" if (item.kind, verb) == (st.CAPTURE, st.APPROVE) else f"Yes, {verb}"
+    label = _CONFIRM_LABEL.get((item.kind, verb), f"Yes, {verb}")
     return [[(label, callback(item.id, confirmed)), ("Cancel", callback(item.id, SHOW))]]
+
+
+def answer_prompt_text(item: st.Item) -> str:
+    """The ForceReply prompt the Answer button sends."""
+    return (f"Your answer to <code>{item.id}</code>, for {html.escape(item.agent or 'the agent')}:\n"
+            f"<b>{html.escape(item.title)}</b>")
 
 
 def is_closed(item: st.Item) -> bool:

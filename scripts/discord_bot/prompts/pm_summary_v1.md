@@ -2,7 +2,7 @@
 
 Used by `scripts/discord_bot/handlers.handle_pm_summary` to produce an executive board summary. Output is markdown text suitable for a Discord ephemeral reply (under 1900 chars to leave room for framing).
 
-Variables `{repo}`, `{open_count}`, `{issue_list}` are substituted before the prompt is sent.
+Variables `repo`, `open_count`, `issue_list` (in braces where they appear below) are substituted before the prompt is sent.
 
 ---
 

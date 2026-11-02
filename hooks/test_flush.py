@@ -283,8 +283,15 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
                                self.tmp_path / "no-vault")
         progress_patch.start()
         self.addCleanup(progress_patch.stop)
+        # Each session's flushed offset (hooks/transcript_delta.py), kept out
+        # of the real Application Support folder.
+        offsets_patch = patch("transcript_delta.OFFSETS_DIR", self.tmp_path / "offsets")
+        offsets_patch.start()
+        self.addCleanup(offsets_patch.stop)
         self.transcript = self.tmp_path / "transcript.jsonl"
-        self.transcript.write_text('{"role":"user","content":"hi"}\n', encoding="utf-8")
+        self.transcript.write_text(
+            '{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-10-20T02:10:09Z"}\n',
+            encoding="utf-8")
 
     def tearDown(self):
         flush.DAILY_LOGS_DIR = self._orig_dir
@@ -324,6 +331,102 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertIn("Chose X", log_file.read_text(encoding="utf-8"))
         self.assertIn("research sess-happy flushed", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
+    def _flush_with_questions(self, agent: str, questions: list[str], session: str = "sess-q") -> int:
+        data = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": questions,
+                           "proposed_concepts": []})
+        with patch("flush.subprocess.run", side_effect=self._mock_claude(data)):
+            return self._run_main(["--agent", agent, "--session-id", session,
+                                   "--transcript", str(self.transcript)])
+
+    def test_open_questions_reach_the_review_queue_for_attributed_agents_only(self):
+        from scripts.review_queue import store as st
+        db = self.tmp_path / "queue.db"
+        with patch.dict(os.environ, {st.DB_ENV: str(db)}):
+            self.assertEqual(self._flush_with_questions("research", ["Is the CTP draft final?", "(none)"]), 0)
+            self.assertEqual(self._flush_with_questions(flush.schema.UNATTRIBUTED, ["Anything?"], "s2"), 0)
+            items = st.Store(db).items()
+        self.assertEqual([(i.kind, i.agent, i.payload["question"]) for i in items],
+                         [(st.QUESTION, "research", "Is the CTP draft final?")])
+
+    def test_progress_open_list_skips_questions_answered_on_a_card(self):
+        # 2026-10-12: Andy answered Luna's question on its card; the next flush
+        # still wrote it under "Open" in her progress log, right below the answer.
+        from scripts.review_queue import questions, store as st
+        db = self.tmp_path / "queue.db"
+        agents = self.tmp_path / "Agents"
+        agents.mkdir()
+        with patch.dict(os.environ, {st.DB_ENV: str(db)}), \
+                patch("scripts.discord_bot.progress_log.AGENTS_BASE", agents):
+            [item] = questions.raise_from_flush("research", "sess-q", ["Is the CTP draft final yet?"])
+            st.Store(db).decide(item.id, st.ANSWER, actor="t", data={"answer": "Yes."})
+            self._flush_with_questions("research", ["Is the CTP draft final yet, or still in review?",
+                                                    "Who owns the CAF summary?"])
+        text = (agents / "research" / "progress.md").read_text(encoding="utf-8")
+        self.assertIn("Who owns the CAF summary?", text)
+        self.assertNotIn("still in review", text)
+
+    def test_a_broken_queue_never_costs_the_flush(self):
+        with patch("scripts.review_queue.questions.raise_from_flush", side_effect=RuntimeError("db locked")):
+            self.assertEqual(self._flush_with_questions("research", ["Is it final?"]), 0)
+        log_file = flush.DAILY_LOGS_DIR / "research" / f"{flush.utc_today()}.md"
+        self.assertTrue(log_file.exists(), "the daily log is still written")
+        self.assertIn("questions:0 RuntimeError: db locked", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+
+    def test_the_prompt_goes_in_on_stdin_not_as_an_argument(self):
+        # 2026-10-12: a 755 KB transcript as an argv entry failed with E2BIG
+        # before claude started, and the flush died without a trace.
+        calls = []
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [],
+                            "proposed_concepts": []})
+
+        def runner(argv, **kw):
+            calls.append((argv, kw))
+            return self._mock_claude(valid)()
+
+        self.transcript.write_text(json.dumps({"type": "user", "message": {"content": "x" * 50_000}}) + "\n",
+                                   encoding="utf-8")
+        with patch("flush.subprocess.run", side_effect=runner):
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-stdin",
+                                             "--transcript", str(self.transcript)]), 0)
+        argv, kw = calls[0]
+        self.assertIn("x" * 50_000, kw["input"])
+        self.assertTrue(all(len(a) < 1000 for a in argv), "no argument carries the transcript")
+
+    def test_a_process_that_cannot_start_is_logged_as_failed(self):
+        with patch("flush.subprocess.run", side_effect=OSError(7, "Argument list too long")):
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-e2big",
+                                             "--transcript", str(self.transcript)]), 0)
+        self.assertIn("research s-e2big failed", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+
+    def test_any_crash_is_recorded_not_lost(self):
+        with patch("flush.build_prompt", side_effect=KeyError("boom")), \
+                patch("flush._telemetry") as telemetry:
+            self.assertEqual(self._run_main(["--agent", "research", "--session-id", "s-crash",
+                                             "--transcript", str(self.transcript)]), 0)
+        self.assertIn("research s-crash failed:crash_KeyError", flush.QUEUE_LOG.read_text(encoding="utf-8"))
+        self.assertFalse(telemetry.call_args.kwargs["ok"])
+
+    def test_long_transcripts_keep_their_tail_and_skip_clearing(self):
+        text = "".join(f"line {i}\n" for i in range(100_000))
+        tail, cut = flush._tail(text, limit=10_000)
+        self.assertTrue(cut)
+        self.assertLess(len(tail), 10_200)
+        self.assertIn("line 99999", tail)
+        self.assertNotIn("line 0\n", tail)
+        self.assertEqual(flush._tail("short", limit=10_000), ("short", False))
+
+        seen = {}
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": ["Q?"],
+                            "proposed_concepts": []})
+        self.transcript.write_text("".join(
+            json.dumps({"type": "user", "message": {"role": "user", "content": f"line {i}"}}) + "\n"
+            for i in range(100_000)), encoding="utf-8")
+        with patch("flush.subprocess.run", side_effect=self._mock_claude(valid)), \
+                patch.object(flush, "MAX_TRANSCRIPT_CHARS", 10_000), \
+                patch("flush._queue_questions", side_effect=lambda *a, **kw: seen.update(kw) or (0, "queued")):
+            self._run_main(["--agent", "research", "--session-id", "s-long", "--transcript", str(self.transcript)])
+        self.assertEqual(seen, {"complete": False}, "a cut transcript must not clear earlier questions")
+
     def test_empty_session_skipped(self):
         empty_json = json.dumps({
             "decisions": [], "findings": [], "open_questions": [], "proposed_concepts": []
@@ -344,6 +447,16 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertEqual(env.get("NB_SKIP_WIKI_RECALL"), "1")
         self.assertNotIn("NB_DISCORD_WEBHOOK", env)
 
+    def test_subprocess_env_takes_the_api_route_when_a_key_is_configured(self):
+        inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
+                     "ANTHROPIC_API_KEY": "sk-ant-inherited", "ANTHROPIC_TOKEN": "t",
+                     "NB_ANTHROPIC_API_KEY": "sk-ant-test-env"}
+        with patch.dict(os.environ, inherited, clear=False):
+            env = flush._subprocess_env_for_claude()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertNotIn("ANTHROPIC_TOKEN", env)
+
     def test_subprocess_env_pins_the_proxy_whatever_it_inherits(self):
         # flush inherits the ended session's environment: the proxy inside an
         # agent turn, the desktop app's URL inside a desktop session, a
@@ -351,7 +464,10 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         inherited = {"ANTHROPIC_BASE_URL": "https://desktop.invalid",
                      "ANTHROPIC_API_KEY": "sk-ant-no-credit", "ANTHROPIC_TOKEN": "t",
                      "ANTHROPIC_AUTH_TOKEN": "t", "NB_AGENT_ID": "research"}
-        with patch.dict(os.environ, inherited, clear=False):
+        import claude_env
+        # Hermetic: the real model gateway may be running on this machine.
+        with patch.dict(os.environ, inherited, clear=False), \
+                patch.object(claude_env, "gateway_up", return_value=False):
             os.environ.pop("NB_COPILOT_API_BASE", None)
             env = flush._subprocess_env_for_claude()
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:4141")
@@ -430,18 +546,48 @@ class TestMainWithMockedSubprocess(unittest.TestCase):
         self.assertIn("session sess-123", text)
         self.assertIn("- q", text)
 
-    def test_parse_failure_writes_failed_after_retry(self):
-        with patch("flush.subprocess.run", side_effect=self._mock_claude("not json at all")):
+    def test_parse_failure_writes_failed_without_a_second_call(self):
+        runner = self._mock_claude("not json at all")
+        with patch("flush.subprocess.run", side_effect=runner) as run:
             rc = self._run_main([
                 "--agent", "research",
                 "--session-id", "sess-bad",
                 "--transcript", str(self.transcript),
             ])
         self.assertEqual(rc, 0)
+        self.assertEqual(run.call_count, 1, "a reply that is not JSON is not retried at full price")
         failed = flush.DAILY_LOGS_DIR / "research" / "_failed" / "sess-bad.txt"
         self.assertTrue(failed.exists())
         queue = flush.QUEUE_LOG.read_text(encoding="utf-8")
         self.assertIn("research sess-bad failed:json_decode", queue)
+
+    def test_only_a_transient_failure_gets_a_second_call(self):
+        valid = json.dumps({"decisions": ["Chose X"], "findings": [], "open_questions": [],
+                            "proposed_concepts": []})
+
+        def results(*outcomes):
+            seq = list(outcomes)
+
+            def runner(*args, **kwargs):
+                code, out = seq.pop(0)
+
+                class _R:
+                    returncode, stdout, stderr = code, out, ""
+                return _R()
+            return runner
+
+        cases = {
+            "overloaded, then fine": ([(1, "API Error: 529 Overloaded"), (0, valid)], 2, "flushed"),
+            "a real error": ([(1, "API Error: 400 invalid request")], 1, "failed"),
+        }
+        for name, (outcomes, calls, status) in cases.items():
+            with self.subTest(case=name):
+                sid = f"sess-{name.split(',')[0].replace(' ', '-')}"
+                with patch("flush.subprocess.run", side_effect=results(*outcomes)) as run:
+                    self._run_main(["--agent", "research", "--session-id", sid,
+                                    "--transcript", str(self.transcript), "--no-discord"])
+                self.assertEqual(run.call_count, calls)
+                self.assertIn(f"research {sid} {status}", flush.QUEUE_LOG.read_text(encoding="utf-8"))
 
     def test_transcript_missing(self):
         rc = self._run_main([

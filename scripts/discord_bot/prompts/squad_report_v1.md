@@ -2,7 +2,7 @@
 
 Used after the final round closes. Senior-pm writes a structured markdown report capturing decisions, action items, and open questions.
 
-Variables `{topic}`, `{framing}`, `{round_count}`, `{full_discussion}`, `{thread_url}`, `{date}` are substituted.
+Variables `topic`, `framing`, `round_count`, `full_discussion`, `thread_url`, `date` (in braces where they appear below) are substituted.
 
 ---
 

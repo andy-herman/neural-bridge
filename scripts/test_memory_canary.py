@@ -7,6 +7,7 @@ fleet that must NOT be mistaken for either.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from scripts.memory_canary import (  # noqa: E402
     HEALTHY,
     IDLE,
     SILENT,
+    agent_turns,
     degraded,
     evaluate,
     format_report,
@@ -193,6 +195,48 @@ class TestCanaryClassification(unittest.TestCase):
         self.assertIn("honcho_capture", text)
 
 
+class TestModelGatewayCheck(unittest.TestCase):
+    def _health(self, payload):
+        import io
+        from scripts import memory_canary as mc
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with patch("urllib.request.urlopen", return_value=Resp(json.dumps(payload).encode())):
+            return mc.model_gateway_check()
+
+    HEALTHY = {"upstream_up": True, "alert_open": False, "alerts": [], "requests": 5, "folded": 1,
+               "retried": 0, "restarts": 0,
+               "watchdog": {"last_check_age": 60, "last_result": "ok", "token_expires_in": 80000}}
+
+    def test_healthy(self):
+        self.assertTrue(self._health(self.HEALTHY)["ok"])
+
+    def test_open_alert_and_stalled_watchdog_are_problems(self):
+        bad = {**self.HEALTHY, "alert_open": True, "alerts": ["upstream_down"],
+               "watchdog": {"last_check_age": 3600, "last_result": "ok"}}
+        result = self._health(bad)
+        self.assertFalse(result["ok"])
+        text = " ".join(result["problems"])
+        self.assertIn("upstream_down", text)
+        self.assertIn("watchdog last checked 60 min ago", text)
+
+    def test_missing_watchdog_is_a_problem(self):
+        result = self._health({k: v for k, v in self.HEALTHY.items() if k != "watchdog"})
+        self.assertIn("watchdog is not running", " ".join(result["problems"]))
+
+    def test_unreachable_gateway_is_a_problem(self):
+        from scripts import memory_canary as mc
+        with patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            result = mc.model_gateway_check()
+        self.assertFalse(result["ok"])
+        self.assertIn("unreachable", result["problems"][0])
+
+
 class TestReviewQueueCheck(unittest.TestCase):
     """The canary queues each degraded layer as an alert and read-back checks
     the review queue itself, so a queue that stopped delivering fails the
@@ -233,7 +277,8 @@ class TestReviewQueueCheck(unittest.TestCase):
         healthy = {"total": 5, "ok": 5, "failed": 0}
         summary = {store: healthy for store in mc.WATCHED}
         with patch.object(mem, "read_events", return_value=[]), \
-                patch.object(mem, "summarize", return_value=summary):
+                patch.object(mem, "summarize", return_value=summary), \
+                patch.object(mc, "model_gateway_check", return_value={"ok": True, "facts": {}, "problems": []}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = mc.main(["--no-notify"])
@@ -251,7 +296,8 @@ class TestReviewQueueCheck(unittest.TestCase):
         healthy = {"total": 5, "ok": 5, "failed": 0}
         summary = {store: healthy for store in mc.WATCHED}
         with patch.object(mem, "read_events", return_value=[]), \
-                patch.object(mem, "summarize", return_value=summary):
+                patch.object(mem, "summarize", return_value=summary), \
+                patch.object(mc, "model_gateway_check", return_value={"ok": True, "facts": {}, "problems": []}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = mc.main(["--no-notify"])
@@ -262,6 +308,58 @@ class TestReviewQueueCheck(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestReaderGating(unittest.TestCase):
+    """A store read by a few agents is judged on their turns, not the fleet's."""
+
+    def _sub(self, *stores):
+        from scripts.memory_canary import WATCHED
+        return {k: WATCHED[k] for k in stores}
+
+    def test_luna_stores_are_idle_when_only_other_agents_ran(self):
+        # 2026-10-08: one Loid turn plus Luna's Telegram check-ins made the
+        # fleet look busy, and Luna's untouched stores were alerted as SILENT.
+        watched = self._sub("luna_notes", "luna_live_state", "echo_voice")
+        res = evaluate({}, had_traffic=True, turns={"loid": 1, "security-reviewer": 1}, watched=watched)
+        self.assertEqual({r["status"] for r in res.values()}, {IDLE})
+        self.assertIn("luna", res["luna_notes"]["reason"])
+        self.assertEqual(degraded(res), [])
+
+    def test_silence_after_a_reader_turn_is_still_caught(self):
+        watched = self._sub("luna_notes", "echo_voice")
+        res = evaluate({}, had_traffic=True, turns={"luna": 2}, watched=watched)
+        self.assertEqual(res["luna_notes"]["status"], SILENT)
+        self.assertEqual(res["echo_voice"]["status"], SILENT)
+        res = evaluate({}, had_traffic=True, turns={"content": 1}, watched=watched)
+        self.assertEqual(res["luna_notes"]["status"], IDLE)
+        self.assertEqual(res["echo_voice"]["status"], SILENT)
+
+    def test_without_turns_the_fleet_wide_rule_applies(self):
+        watched = self._sub("luna_notes")
+        self.assertEqual(evaluate({}, had_traffic=True, watched=watched)["luna_notes"]["status"], SILENT)
+        self.assertEqual(evaluate({}, had_traffic=False, watched=watched)["luna_notes"]["status"], IDLE)
+
+    def test_stores_without_readers_keep_the_fleet_wide_rule(self):
+        watched = self._sub("honcho_capture", "wiki_recall")
+        res = evaluate({}, had_traffic=True, turns={}, watched=watched)
+        self.assertEqual({r["status"] for r in res.values()}, {SILENT})
+
+    def test_agent_turns_skips_claude_code_sessions(self):
+        events = [
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "luna", "detail": ""},
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "luna", "detail": "missing"},
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "research",
+             "detail": "session_start: injected"},
+            {"stage": mem.RETRIEVE, "store": "luna_briefing", "agent_id": "luna"},
+            {"stage": mem.WRITE, "store": "progress_log", "agent_id": "loid"},
+        ]
+        self.assertEqual(agent_turns(events), {"luna": 2})
+
+    def test_echo_readers_match_the_injection(self):
+        from scripts.discord_bot import mention
+        from scripts.memory_canary import WATCHED
+        self.assertEqual(set(WATCHED["echo_voice"]["readers"]), set(mention.ECHO_VOICE_AGENTS))
 
 
 class TestLayerFourStores(unittest.TestCase):

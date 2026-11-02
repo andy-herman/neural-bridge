@@ -14,16 +14,21 @@ The fleet went dormant because every path waited for Andy to start a conversatio
 
 The queue inverts that: producers write items, and the bot brings each one to Andy with the decision attached.
 
-## What is live (slice A)
+## What is live (slices A to D)
 
 | Kind | Producer | Pushed | Buttons |
 |---|---|---|---|
-| capture | compile quarantine, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
-| alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | not yet, see shadow week | Acknowledge, Snooze 1 day |
+| capture | the nightly compile's staged articles; quarantine files already on main, synced every 10 minutes by the bridge | yes | File it, Reject (both confirm with a second tap), Snooze 1 day |
+| alert | output watchdog, failure watcher (vault scripts), memory canary, auto-reload | yes, since 2026-10-11 | Acknowledge, Snooze 1 day |
+| question | `hooks/flush.py`: each open question a session left, for attributed agents | yes | Answer, Dismiss, Snooze 1 day; or reply to the card |
+| action | the Discord daemon: an agent's `open_pr_with_changes`, after validation | yes | Open the PR (confirms with a second tap), Reject |
+| pr_review | the loop engineer's open PRs (`eng/<issue>` branches), synced every 2 minutes by the bridge | yes | Merge (only while checks pass; confirms with a second tap), Close (confirms), Snooze 1 day |
+| publish | Sunday prep: the post the Monday run will publish | yes | Ready, Hold a week |
 
 In Telegram:
 
 - `/queue` lists everything waiting, with a button that opens each item's card.
+- Luna's morning check-in ends with "Review queue: N waiting, oldest X days" when anything waits. It adds the line only to a message she was sending anyway, so a quiet day stays quiet.
 - A card is redrawn when its item changes: decided, applied, failed (with a Retry button) or cleared.
 
 **Filing a capture.** The applier moves the quarantine file to `knowledge/concepts/` with `verdict: PROMOTE` and a `reviewed:` line, adds the concept to `knowledge/index.md`, and logs it in `knowledge/log.md`. Rejecting deletes the quarantine file; git history keeps the text. Either way:
@@ -32,6 +37,75 @@ In Telegram:
 - the PR title carries `review queue <id>`;
 - the work happens in the private worktree `.trees/review-queue`, never in the shared checkout;
 - the diff must stay inside `knowledge/` and pass the outbound guard before anything is pushed.
+
+**Answering a question.** Reply to the card, or tap Answer and reply to the prompt it sends. The reply is taken before Luna's chat handler sees it, so it never becomes a conversation turn. The applier appends a dated entry to the agent's `Agents/<id>/progress.md` with the question and the answer, so the agent's next session opens with both. Dismiss records that Andy saw it.
+
+- The card shows a one-line summary of the question. Email addresses, links, and phone and account numbers are removed, and the full text stays in the local database. Questions from Loid and Echo, whose material is private, show no text at all. Read and answer those at the desk with `show` and `answer`.
+- Unattributed sessions (generic Claude Code) raise no questions. Nothing would read the answer: flush writes them no progress log, and session_start injects none.
+- **Conversations are not duplicated.** Every turn of a Discord or Telegram conversation flushes the same session, so a question the agent has just asked in the chat counts as open as soon as the turn ends.
+  - A new question is held for 30 minutes and pushed only if the conversation stays quiet that long.
+  - Each later flush of the session replaces its undecided questions. One it no longer lists was answered in the chat, and is cleared.
+  - A reworded question counts as the same question.
+  - One Andy already answered or dismissed on a card is not raised again, and flush leaves it out of the "Open" list in the agent's progress log, where the answer already sits.
+- If the record of a reply's prompt was lost (Telegram delivered the prompt, but the send timed out), the item id shown in the bot's message still finds the question. Only the bot's own messages count.
+
+**Approving an action.** The proposal is validated and screened by the outbound guard when it is staged, and screened again before the push.
+
+- Open the PR pushes the branch and opens the pull request. Nothing merges.
+- `approve <id>` and `cancel <id>` in the Discord channel still work and decide the same item, so whichever lands second is told it was already handled.
+- An action expires after 24 hours, because its files were written against main as it stood then. Until 2026-10 these proposals lived in memory for 15 minutes and died with any daemon restart.
+
+**Merging a loop-engineer PR.** Approving a PR means merging it once its checks pass.
+
+- The card shows the PR's head commit and the state of its checks. Each sync refreshes them, and the card is redrawn when they change.
+- Merge appears only while every check has passed and GitHub calls the PR mergeable. The confirm screen names the commit and says that merging deploys the fleet within about two minutes.
+- The second tap is refused if the head changed after the confirm screen was drawn.
+- The applier merges exactly the confirmed commit:
+  - it re-reads the PR, and refuses if the head moved or the checks are no longer green;
+  - it marks the draft ready;
+  - it squash-merges with `--match-head-commit`, using its own subject and body, so no tool trailer reaches main;
+  - it moves the issue to `agent-done`, and the PR's "Closes #n" closes it.
+- Close closes the PR with a comment, keeps the branch, and moves the issue to `agent-blocked`, so the loop does not retry it on its own.
+- A PR merged or closed on GitHub clears its card.
+- From the desk, `decide ID approve` records the head that `show` displays.
+
+**This week's post.** The blog publishes by date: its scheduled-publish workflow runs at Tuesday 01:00 UTC (Monday evening Pacific) and publishes the oldest post with `draft: true` and a `pubDate` on or before that day. Sunday prep picks the same post and raises a publish card.
+
+- Ready records that Andy has seen it; the workflow publishes as planned.
+- Hold a week moves the post's `pubDate` seven days past this Monday through a pull request on the blog, merged at once.
+  - The post stays a draft, so nothing becomes visible.
+  - The work happens in a throwaway worktree at origin/main, never in the blog's own checkout, and the push passes the outbound guard first.
+- An undecided card expires once the workflow has run.
+
+**Labels.** One vocabulary for the whole fleet: `scripts/discord_bot/state_machine.py` lists the loop engineer's `agent-blocked` and `agent-failed` beside the six PM-workflow states. The queue is where "waiting on Andy" is decided, and GitHub labels follow the decision.
+
+**The question backlog.** Before the queue existed, flush had written 339 open questions into `daily-logs/`, May to October 2026, all from unattributed sessions. Most are stale. Triage them once, at the desk:
+
+```bash
+python -m scripts.review_queue backlog --month 2026-08
+python -m scripts.review_queue backlog keep ID --agent AGENT
+python -m scripts.review_queue backlog close
+```
+
+`keep` turns a question into a live item routed to an agent, so the answer lands in that agent's progress log. `close` records the triage; the rest stay in `daily-logs/`, unanswered.
+
+**The nightly compile, staged.** Since 2026-10-16 the 03:00 job runs `python -m scripts.review_queue.promotions`, not `compile.py`.
+
+- compile.py runs unchanged, but on a private copy of `knowledge/` at `.trees/compile-staging`.
+- Every article it promotes or quarantines becomes a capture card.
+  - The full text is held in the local database.
+  - A private preview is written to the vault at `Neural Bridge/Wiki staging/<slug>.md`.
+  - The card carries only the slug and the verdict.
+- Nothing is committed or pushed until Andy files it.
+- File it publishes the article to `knowledge/concepts` with a `reviewed:` line. In the same pull request, merged at once after the outbound guard, it also:
+  - archives the version it replaces under `.history/`;
+  - updates the index and the log;
+  - writes any connection whose other concept is already on main.
+- Reject drops the article, and nothing ever reached GitHub.
+- A later run that restages the same slug supersedes the older card.
+- The compile's own Discord summary is off; the cards are the notice.
+
+Before this, the compile wrote into the shared checkout. A promotion sat there uncommitted for two days, blocked auto-reload's next pull, and carried personal details the outbound guard does not look for.
 
 ## The producer contract
 
@@ -62,12 +136,14 @@ The pusher also writes `review-queue-status.json` beside the database. The failu
 
 ## Shadow week, then alerts go through the queue
 
-Alerts are queued from day one, but the bot pushes only the kinds in `health.DEFAULT_PUSH_KINDS` (captures), overridable with `NB_QUEUE_PUSH_KINDS`. For the first week the producers' existing Telegram messages remain the push, so nothing arrives twice, and `/queue` already lists the alerts.
+Alerts were queued from day one, but for the first week the bot pushed only captures and the producers' existing Telegram messages remained the push, so nothing arrived twice. The bot pushes the kinds in `health.DEFAULT_PUSH_KINDS`, overridable with `NB_QUEUE_PUSH_KINDS`.
 
-**Cutover** happens after a clean week, meaning:
+**Cutover** happened on 2026-10-11, after a clean week, meaning:
 
 - `health` passed every day;
-- every direct alert has a matching item (`python -m scripts.review_queue list --all --kind alert`).
+- every direct alert had a matching item (`python -m scripts.review_queue list --all --kind alert`).
+
+The week turned up one false alarm: the memory canary called Luna's and Echo's stores SILENT because other agents had run, though none of their readers had. Stores now name their readers (`readers` in `scripts/memory_canary.py`) and stay idle until one of them takes a turn.
 
 The steps:
 

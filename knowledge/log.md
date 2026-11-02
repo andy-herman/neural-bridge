@@ -92,3 +92,9 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
 - review queue: promoted `idor-still-a01-in-2025` from quarantine after human review (item b13d83)
 - review queue: promoted `lockout-vs-credential-stuffing` from quarantine after human review (item 74d6cc)
 - review queue: promoted `vdp-vs-bug-bounty-distinction` from quarantine after human review (item ef3a32)
+
+## 2026-10-14
+
+- compile complete: PROMOTE=1 QUARANTINE=0 REJECT=0 errors=0 skipped=0
+  - PROMOTE-rich fresh-session-stale-state-restatement -> knowledge/concepts/fresh-session-stale-state-restatement.md
+  - edited before publishing (2026-10-16): personal and work specifics generalized, unverified related-concept links removed

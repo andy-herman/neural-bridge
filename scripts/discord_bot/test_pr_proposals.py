@@ -11,7 +11,6 @@ Run: `python3 scripts/discord_bot/test_pr_proposals.py`
 from __future__ import annotations
 
 import sys
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,7 +22,6 @@ from scripts.discord_bot import pr_proposals as pp  # noqa: E402
 from scripts.discord_bot import repos as repos_mod  # noqa: E402
 from scripts.discord_bot.pr_proposals import (  # noqa: E402
     PRProposal,
-    ProposalStore,
     format_preview,
     is_approval_text,
     is_cancel_text,
@@ -252,70 +250,6 @@ class TestValidate(unittest.TestCase):
         self.assertFalse(v.ok)
 
 
-# ---------- ProposalStore ----------
-
-class TestStore(unittest.TestCase):
-    def setUp(self):
-        self.store = ProposalStore()
-
-    def _mk(self, *, channel_id=1, agent_id="luna", created_at=None):
-        repo = repos_mod.REPOS["neural-bridge-blog"]
-        return PRProposal(
-            proposal_id=pp._new_id(),
-            agent_id=agent_id,
-            channel_id=channel_id,
-            repo=repo,
-            branch="luna/x",
-            files=[("a.txt", "x")],
-            commit_message="m",
-            pr_title="t",
-            pr_body="b",
-            created_at=created_at if created_at is not None else time.time(),
-        )
-
-    def test_stage_and_get(self):
-        p = self._mk()
-        pid = self.store.stage(p)
-        self.assertEqual(self.store.get(pid).proposal_id, pid)
-
-    def test_peek_returns_most_recent(self):
-        p1 = self._mk(created_at=time.time() - 100)
-        p2 = self._mk(created_at=time.time() - 50)
-        self.store.stage(p1)
-        self.store.stage(p2)
-        peeked = self.store.peek_for_channel_agent(1, "luna")
-        self.assertEqual(peeked.proposal_id, p2.proposal_id)
-
-    def test_pop_removes(self):
-        p = self._mk()
-        pid = self.store.stage(p)
-        popped = self.store.pop(pid)
-        self.assertEqual(popped.proposal_id, pid)
-        self.assertIsNone(self.store.get(pid))
-
-    def test_expired_proposals_pruned_on_access(self):
-        p = self._mk(created_at=time.time() - pp.TTL_SECONDS - 1)
-        pid = self.store.stage(p)
-        # First access prunes — expired proposal disappears.
-        self.assertIsNone(self.store.get(pid))
-
-    def test_channel_isolation(self):
-        p1 = self._mk(channel_id=1)
-        p2 = self._mk(channel_id=2)
-        self.store.stage(p1)
-        self.store.stage(p2)
-        self.assertEqual(self.store.peek_for_channel_agent(1, "luna").channel_id, 1)
-        self.assertEqual(self.store.peek_for_channel_agent(2, "luna").channel_id, 2)
-
-    def test_agent_isolation(self):
-        p1 = self._mk(agent_id="luna")
-        p2 = self._mk(agent_id="content")
-        self.store.stage(p1)
-        self.store.stage(p2)
-        self.assertEqual(self.store.peek_for_channel_agent(1, "luna").agent_id, "luna")
-        self.assertEqual(self.store.peek_for_channel_agent(1, "content").agent_id, "content")
-
-
 # ---------- format_preview ----------
 
 class TestFormatPreview(unittest.TestCase):
@@ -332,14 +266,16 @@ class TestFormatPreview(unittest.TestCase):
             pr_title="fix: typo",
             pr_body="b",
         )
-        out = format_preview(p)
+        out = format_preview(p, "c0ffee")
         self.assertIn("luna", out)
         self.assertIn("luna/fix-typo", out)
         self.assertIn("fix: typo", out)
         self.assertIn("src/about.mdx", out)
-        self.assertIn("abc12345", out)
-        self.assertIn("approve abc12345", out)
-        self.assertIn("cancel abc12345", out)
+        # Andy approves by the review queue item's id, here or on Telegram.
+        self.assertIn("approve c0ffee", out)
+        self.assertIn("cancel c0ffee", out)
+        self.assertIn("Telegram", out)
+        self.assertIn("24 hours", out)
 
 
 # ---------- porcelain parsing + working-tree collision check ----------
