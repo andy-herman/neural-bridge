@@ -2,7 +2,7 @@
 
 Used after each round of squad turns. Senior-pm reads the turns and decides whether another round will materially improve the outcome, or whether the squad has converged enough to close.
 
-Variables `{topic}`, `{framing}`, `{round_n}`, `{turns}`, `{max_rounds}` are substituted before the prompt is sent.
+Variables `topic`, `framing`, `round_n`, `turns`, `max_rounds` (in braces where they appear below) are substituted before the prompt is sent.
 
 ---
 

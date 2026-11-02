@@ -3,18 +3,20 @@
 One loader for every surface that builds an agent prompt, so all of them carry
 the same text:
 
-- the mention path (discord_bot.mention.build_mention_prompt), which serves
-  every Discord turn and the Luna, Loid and council Telegram bridges;
+- the mention path (discord_bot.mention.build_mention_parts), which serves
+  Discord mentions and the Luna, Loid and council Telegram bridges;
 - Luna's proactive check-ins (telegram_bot.luna_checkin);
 - the loop engineer (loop_engineer.executor).
 
 The text goes into prompts as trusted instructions. The charter, by contrast,
-passes through sanitize_untrusted_text in build_mention_prompt.
+passes through sanitize_untrusted_text in build_mention_parts.
 
 Missing or malformed raises FleetCodeError instead of returning an empty
 string. An agent that silently loses its hard limits is worse than one that
 fails to answer. Read on every call, so an edit takes effect on the next turn
-without a restart.
+without a restart: it is part of the mention path's static_hash, so a resumed
+session that would otherwise get only the short continuation prompt gets the
+full prompt again.
 """
 from __future__ import annotations
 

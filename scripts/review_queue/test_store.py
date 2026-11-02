@@ -195,6 +195,38 @@ class TestRenders(StoreCase):
         self.assertEqual([i.id for i in self.store.needing_render((st.CAPTURE,))], [cap.id])
 
 
+class TestSliceB(StoreCase):
+    def _question(self):
+        item, _ = self.store.raise_item(source="flush", key="k", kind=st.QUESTION, title="Which?",
+                                        payload={"question": "Which calendar?"}, unique=True, now=T0)
+        return item
+
+    def test_a_decision_can_carry_data_for_the_applier(self):
+        item = self._question()
+        self.assertTrue(self.store.decide(item.id, st.ANSWER, actor="t", data={"answer": "Family"}))
+        self.assertEqual(self.store.get(item.id).payload, {"question": "Which calendar?", "answer": "Family"})
+        self.assertFalse(self.store.decide(item.id, st.ANSWER, actor="t", data={"answer": "Other"}))
+        self.assertEqual(self.store.get(item.id).payload["answer"], "Family",
+                         "a refused second decision must not overwrite the first one's data")
+
+    def test_expire_supersedes_only_undecided_items(self):
+        item = self._question()
+        self.assertTrue(self.store.expire(item.id, actor="queue", reason="stale", now=T0 + 10))
+        after = self.store.get(item.id)
+        self.assertEqual((after.state, after.resolved_at), (st.SUPERSEDED, T0 + 10))
+        self.assertEqual(self.store.events(item.id)[-1]["detail"], "stale")
+        self.assertFalse(self.store.expire(item.id, actor="queue"))
+
+    def test_a_reply_finds_its_item_by_prompt_or_by_card(self):
+        item = self._question()
+        self.store.add_prompt(item.id, chat_id=1, message_id=50)
+        self.store.add_render(item, chat_id=1, message_id=40)
+        self.assertEqual(self.store.prompt_item(1, 50), item.id)
+        self.assertEqual(self.store.prompt_item(1, 40), item.id)
+        self.assertIsNone(self.store.prompt_item(1, 41))
+        self.assertIsNone(self.store.prompt_item(2, 50), "a message id is only unique within its chat")
+
+
 class TestStats(StoreCase):
     def test_decisions_time_to_decision_and_producer_volume(self):
         a, _ = self.alert(key="a", now=T0)

@@ -55,8 +55,8 @@ Rules backed by code are stronger than rules in prose. This table shows which ar
 | Confidential material stays home | Outbound guard (`scripts/outbound_guard.py`, `scripts/githooks/pre-push`) screens marked vault text on the wiki and GitHub routes | Web searches and other third-party calls are not screened |
 | Secrets stay secret | Nothing found | Prose only |
 | Stay inside your scope | `hooks/guard_concepts.py` (no writes under `knowledge/` except `knowledge/agents/`); per-agent tool grants in `mention.py`; `hooks/guard_bash.py` allowlists; `private_tools.py` (owner-started turns only); `repos.py` push allowlist | No per-role isolation inside `knowledge/agents/`. Vault write scopes are prose only. `guard_bash.py` allows all commands when `NB_AGENT_ID` is unset, by design for interactive sessions; the daemon always sets it |
-| Stop means stop | `cancel` and 15-minute expiry on PR proposals (`pr_proposals.py`); `cancel` on intake threads; the handoff budget (`handoff_budget.py`); loop engineer caps and requeue on SIGTERM | No stop-report pattern anywhere |
-| Approval before acting outward | PR proposals approvable only by Andy (`handlers.py`); Luna's CLIs have no write commands | "Never post" (social) and "confirm before Synapse writes" (Loid) are prose only |
+| Stop means stop | `cancel` on PR proposals, which the review queue holds for a day (`pr_proposals.py`, `actions.ACTION_TTL_SECONDS`); `cancel` on intake threads; the handoff budget (`handoff_budget.py`); loop engineer caps and requeue on SIGTERM | No stop-report pattern anywhere |
+| Approval before acting outward | PR proposals wait for Andy's approval on Telegram or in the channel (`handlers.py`); Luna's CLIs have no write commands | "Never post" (social) and "confirm before Synapse writes" (Loid) are prose only |
 | Report what actually happened | Nothing found | Prose only |
 | Honest about being an AI | Nothing found | Prose only |
 | No em dashes | `scripts/strip-em-dashes-charters.py`, run by hand | Prose only at runtime |
@@ -85,18 +85,22 @@ Andy decided these on 2026-10-06:
 
 ## Wiring
 
-`scripts/fleet_code.py` loads the text below the first `---` line of `FLEET_CODE.md` on every call, so an edit takes effect on the next turn. The text is trusted and goes in unsanitized, ahead of the charter.
+`scripts/fleet_code.py` loads the text below the first `---` line of `FLEET_CODE.md` on every call. The text is trusted and goes in unsanitized, ahead of the charter.
+
+Resumed sessions get a short continuation prompt (`mention_continue_v1.md`) instead of the full one, and it names the fleet code as still in force. The code is part of `static_hash`, so editing it sends the full prompt again on the next turn, including to running sessions.
 
 | Surface | Where | If the code is missing |
 |---|---|---|
-| Every Discord turn, and the Luna, Loid and council Telegram bridges (all call `run_agent_turn`) | `{fleet_code}` in `scripts/discord_bot/prompts/mention_v1.md`, before "Your role definition"; filled by `build_mention_prompt` | `run_agent_turn` returns a setup error (`fleet_code_unavailable`); Claude is not called |
+| Discord mentions, and the Luna, Loid and council Telegram bridges (all call `run_agent_turn`) | `{fleet_code}` in `scripts/discord_bot/prompts/mention_v1.md`, before "Your role definition"; filled by `build_mention_parts` | `run_agent_turn` returns a setup error (`fleet_code_unavailable`); Claude is not called |
 | Luna's check-ins | `{fleet_code}` at the top of `scripts/telegram_bot/prompts/luna_checkin_v1.md` | The check-in is not generated; the run exits 1 and records the failure |
 | Loop engineer | `{fleet_code}` in `scripts/loop_engineer/prompts/implement_issue_v1.md`, before the issue | The issue goes back to the queue and the run aborts, as for a missing `claude` CLI |
 
 Each surface has a test that its assembled prompt contains the code, and one for the missing-file path.
 
 Not covered:
+- **Squad discussions.** `squad_turn_v1.md` and the other squad templates are sent from `handlers.py` as one-shot text calls with no session or tools, and they do not carry the code.
+- **One-shot pipeline jobs** (flush, compile, lint, triage, summaries, publish prep). They have their own prompts and are not agent turns.
 - **Yor** runs on the Hermes runtime and loads her own SOUL, so this code does not reach her unless Hermes includes it.
 - **Charter cleanup** is still to do. Charter rules that now duplicate the code should be removed, so each rule has one source.
 
-Cost: the agent-facing section is about 1,080 words, roughly 1,500 tokens on every turn.
+Cost: the agent-facing section is about 1,080 words, roughly 1,500 tokens. Since sessions resume with the continuation prompt, a conversation pays that when the full prompt is sent (its first turn, after a session rotates, or after the fixed context changes) and then as context on later turns. Stateless turns, Luna's check-ins and each loop engineer issue pay it every time. The fleet bills the Anthropic API, so this is real money, though small next to the charter and notes in the same prompt.

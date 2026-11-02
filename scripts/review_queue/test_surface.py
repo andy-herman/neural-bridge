@@ -85,7 +85,7 @@ class SurfaceCase(unittest.IsolatedAsyncioTestCase):
             store=self.store, repo=tmp, chat_ids=lambda: {ANDY}, log=self.logs.append,
             push_kinds=(st.CAPTURE,),
             appliers={st.CAPTURE: apply_capture, st.ALERT: lambda item: (True, "")},
-            capture_sync=lambda: ([], []))
+            capture_sync=lambda: ([], []), pr_sync=lambda: ([], []))
         self.context = SimpleNamespace(bot=self.bot)
         self._status_env = health.STATUS_ENV
         import os
@@ -346,18 +346,270 @@ class TestHealth(unittest.TestCase):
         self.assertIn(f"{other.id} (gh exploded)", text)
         self.assertFalse(result["ok"])
 
-    def test_push_kinds_default_to_captures_until_the_shadow_week_ends(self):
+    def test_push_kinds_default_to_every_live_kind(self):
         import os
         saved = os.environ.pop(health.PUSH_KINDS_ENV, None)
         try:
+            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT, st.QUESTION, st.ACTION, st.PR_REVIEW,
+                                                   st.PUBLISH))
+            os.environ[health.PUSH_KINDS_ENV] = "capture, bogus"
             self.assertEqual(health.push_kinds(), (st.CAPTURE,))
-            os.environ[health.PUSH_KINDS_ENV] = "capture, alert, bogus"
-            self.assertEqual(health.push_kinds(), (st.CAPTURE, st.ALERT))
         finally:
             os.environ.pop(health.PUSH_KINDS_ENV, None)
             if saved is not None:
                 os.environ[health.PUSH_KINDS_ENV] = saved
 
+
+
+# ---------- slice B: questions and actions ----------
+
+class FakeReply:
+    """An inbound text message that replies to `reply_to` (a message id)."""
+
+    def __init__(self, text: str, reply_to: int | None, chat_id: int = ANDY,
+                 reply_to_text: str = "", reply_to_bot: bool = True, reply_to_sender: int = 5000):
+        self.text = text
+        self.chat = SimpleNamespace(id=chat_id)
+        self.reply_to_message = SimpleNamespace(
+            message_id=reply_to, text=reply_to_text,
+            from_user=SimpleNamespace(id=reply_to_sender, is_bot=reply_to_bot)) if reply_to is not None else None
+        self.replies: list[str] = []
+
+    async def reply_text(self, text, **kw):
+        self.replies.append(text)
+
+
+class SliceBCase(SurfaceCase):
+    def setUp(self):
+        super().setUp()
+        self.applied_items: list[tuple[str, str, dict]] = []
+
+        def record(item):
+            self.applied_items.append((item.id, item.verb, dict(item.payload)))
+            return True, "https://github.com/example/blog/pull/9" if item.kind == st.ACTION else "ok"
+
+        self.surface = QueueSurface(
+            store=self.store, repo=Path(self._tmp.name), chat_ids=lambda: {ANDY}, log=self.logs.append,
+            push_kinds=(st.QUESTION, st.ACTION),
+            appliers={st.QUESTION: record, st.ACTION: record}, capture_sync=lambda: ([], []), pr_sync=lambda: ([], []))
+
+    def question(self, agent="luna"):
+        item, _ = self.store.raise_item(source="flush", key=f"q-{agent}", kind=st.QUESTION,
+                                        title="Which calendar gets the school dates?", agent=agent,
+                                        payload={"question": "Which calendar gets the school dates?"},
+                                        unique=True)
+        return item
+
+    def action(self, created_at=None):
+        item, _ = self.store.raise_item(source="discord", key="p1", kind=st.ACTION,
+                                        title="content wants to open a PR on neural-bridge-blog",
+                                        detail="Publish x · 1 file on branch content/x", agent="content",
+                                        payload={"channel_id": 42}, unique=True, now=created_at)
+        return item
+
+    async def reply(self, text: str, reply_to: int | None, user: int = ANDY, **replied):
+        from telegram.ext import ApplicationHandlerStop
+        msg = FakeReply(text, reply_to, **replied)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=user))
+        stopped = False
+        try:
+            await self.surface.on_reply(update, self.context)
+        except ApplicationHandlerStop:
+            stopped = True
+        await self.surface.apply_pending()
+        return msg, stopped
+
+
+class TestQuestions(SliceBCase):
+    async def test_a_question_card_offers_answer_dismiss_and_snooze(self):
+        item = self.question()
+        await self.surface.tick(self.bot, now=T0)
+        card = self.bot.sent[0]
+        self.assertEqual(FakeBot.buttons(card["reply_markup"]),
+                         [render.callback(item.id, "answer"), render.callback(item.id, "reject"),
+                          render.callback(item.id, "snooze")])
+        self.assertIn("Reply to this card to answer", card["text"])
+
+    async def test_answer_button_then_reply_writes_the_answer(self):
+        item = self.question()
+        query = await self.press(render.callback(item.id, "answer"))
+        self.assertEqual(query.answers, ["Reply with your answer."])
+        prompt = self.bot.sent[-1]
+        from telegram import ForceReply
+        self.assertIsInstance(prompt["reply_markup"], ForceReply)
+        prompt_id = self.bot._next_id
+
+        msg, stopped = await self.reply("The family calendar.", prompt_id)
+        self.assertTrue(stopped, "Luna's chat handler must not also take the answer")
+        self.assertEqual(msg.replies, ["Saved for luna."])
+        self.assertEqual(self.applied_items, [(item.id, st.ANSWER,
+                                               {"question": "Which calendar gets the school dates?",
+                                                "answer": "The family calendar."})])
+        self.assertEqual(self.store.get(item.id).state, st.APPLIED)
+
+    async def test_replying_to_the_card_itself_is_an_answer_too(self):
+        item = self.question()
+        await self.surface.tick(self.bot, now=T0)
+        card_id = self.bot._next_id
+        msg, stopped = await self.reply("Separate calendar.", card_id)
+        self.assertTrue(stopped)
+        self.assertEqual(self.store.get(item.id).verb, st.ANSWER)
+
+    async def test_other_replies_and_strangers_fall_through_to_luna(self):
+        item = self.question()
+        await self.surface.tick(self.bot, now=T0)
+        card_id = self.bot._next_id
+        for text, reply_to, user in (("just chatting", 7777, ANDY), ("hi", None, ANDY),
+                                     ("take over", card_id, STRANGER)):
+            msg, stopped = await self.reply(text, reply_to, user=user)
+            self.assertFalse(stopped, text)
+            self.assertEqual(msg.replies, [])
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_a_second_answer_is_told_it_was_handled(self):
+        item = self.question()
+        await self.surface.tick(self.bot, now=T0)
+        card_id = self.bot._next_id
+        await self.reply("first", card_id)
+        msg, stopped = await self.reply("second", card_id)
+        self.assertTrue(stopped)
+        self.assertEqual(msg.replies, ["That question was already handled."])
+
+    async def test_a_reply_to_a_prompt_whose_send_timed_out_still_answers(self):
+        # 2026-10-12: Telegram delivered the prompt, the send call timed out,
+        # and the prompt's message id was never recorded.
+        item = self.question()
+        self.bot.id = 5000
+        prompt = render.answer_prompt_text(item)
+        msg, stopped = await self.reply("The family one.", 9999, reply_to_text=prompt)
+        self.assertTrue(stopped)
+        self.assertEqual(self.store.get(item.id).payload["answer"], "The family one.")
+
+    async def test_an_id_in_someone_elses_message_answers_nothing(self):
+        item = self.question()
+        self.bot.id = 5000
+        for replied in ({"reply_to_bot": False, "reply_to_sender": ANDY},
+                        {"reply_to_bot": True, "reply_to_sender": 6000}):
+            msg, stopped = await self.reply("hijack", 9999, reply_to_text=f"see {item.id}", **replied)
+            self.assertFalse(stopped, replied)
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_dismiss_is_one_tap(self):
+        item = self.question()
+        await self.press(render.callback(item.id, "reject"))
+        self.assertEqual(self.store.get(item.id).verb, st.REJECT)
+        self.assertEqual(self.bot.edits[-1]["reply_markup"], None)
+
+
+class TestActions(SliceBCase):
+    async def test_open_the_pr_takes_two_taps_and_reject_one(self):
+        item = self.action(created_at=T0)
+        await self.surface.tick(self.bot, now=T0)
+        self.assertEqual(FakeBot.buttons(self.bot.sent[0]["reply_markup"]),
+                         [render.callback(item.id, "approve"), render.callback(item.id, "reject")])
+        await self.press(render.callback(item.id, "approve"))
+        self.assertEqual(self.store.get(item.id).state, st.OPEN, "the first tap only asks")
+        self.assertIn("Nothing merges", self.bot.edits[-1]["text"])
+        await self.press(render.callback(item.id, "approve!"))
+        self.assertEqual(self.store.get(item.id).state, st.APPLIED)
+        self.assertEqual(self.applied_items[0][1], st.APPROVE)
+        self.assertIn("PR opened", render.card_text(self.store.get(item.id)))
+
+        other, _ = self.store.raise_item(source="discord", key="p2", kind=st.ACTION, title="t",
+                                         agent="content", unique=True)
+        await self.press(render.callback(other.id, "reject"))
+        self.assertEqual(self.store.get(other.id).verb, st.REJECT)
+
+    async def test_the_pusher_expires_a_day_old_action(self):
+        item = self.action(created_at=T0)
+        await self.surface.tick(self.bot, now=T0 + 25 * 3600)
+        self.assertEqual(self.store.get(item.id).state, st.SUPERSEDED)
+        self.assertIn("Expired undecided", render.card_text(self.store.get(item.id)))
+
+
+
+# ---------- slice C: loop-engineer PR reviews ----------
+
+class TestPrReviews(SurfaceCase):
+    SHA = "a1b2c3d" + "0" * 33
+
+    def setUp(self):
+        super().setUp()
+        self.merged: list[tuple[str, dict]] = []
+        self.synced = 0
+
+        def record(item):
+            self.merged.append((item.verb, dict(item.payload)))
+            return True, "https://github.com/andy-herman/neural-bridge/pull/212"
+
+        def pr_sync():
+            self.synced += 1
+            return [], []
+
+        self.surface = QueueSurface(
+            store=self.store, repo=Path(self._tmp.name), chat_ids=lambda: {ANDY}, log=self.logs.append,
+            push_kinds=(st.PR_REVIEW,), appliers={st.PR_REVIEW: record},
+            capture_sync=lambda: ([], []), pr_sync=pr_sync)
+
+    def pr_item(self, checks="green", sha=None):
+        sha = sha or self.SHA
+        item, _ = self.store.raise_item(
+            source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW,
+            title="PR #212: fix: retry the flush (#88)", detail=f"Issue #88 · checks · head {sha[:7]}",
+            ref="https://github.com/andy-herman/neural-bridge/pull/212",
+            payload={"repo": "neural-bridge", "number": 212, "issue": 88, "head_sha": sha,
+                     "checks": checks, "mergeable": "MERGEABLE", "draft": True})
+        return item
+
+    async def confirm(self, item, shown_text):
+        query = FakeQuery(ANDY, render.callback(item.id, "approve!"))
+        query.message.text = shown_text
+        await self.surface.on_callback(SimpleNamespace(callback_query=query), self.context)
+        await self.surface.apply_pending()
+        return query
+
+    async def test_merge_is_hidden_until_the_checks_pass(self):
+        item = self.pr_item(checks="pending")
+        await self.surface.tick(self.bot, now=T0)
+        self.assertEqual(self.synced, 1, "the tick syncs the loop's PRs")
+        self.assertEqual(FakeBot.buttons(self.bot.sent[0]["reply_markup"]),
+                         [render.callback(item.id, "reject"), render.callback(item.id, "snooze")])
+        self.assertIn("once the checks pass", self.bot.sent[0]["text"])
+        query = await self.press(render.callback(item.id, "approve"))
+        self.assertEqual(query.answers, ["Merge appears once the checks pass."])
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_two_taps_merge_exactly_the_commit_on_the_confirm_screen(self):
+        item = self.pr_item()
+        self.assertIn(render.callback(item.id, "approve"), [d for row in render.keyboard(item) for _, d in row])
+        await self.press(render.callback(item.id, "approve"))
+        screen = self.bot.edits[-1]["text"]
+        self.assertIn("deploys the fleet", screen)
+        self.assertIn("head a1b2c3d", screen)
+        await self.confirm(item, shown_text="... head a1b2c3d ...")
+        self.assertEqual(self.merged, [(st.APPROVE, {**item.payload, "approved_sha": self.SHA})])
+        self.assertEqual(self.store.get(item.id).state, st.APPLIED)
+        self.assertIn("Merged", render.card_text(self.store.get(item.id)))
+
+    async def test_a_push_between_the_two_taps_is_not_merged(self):
+        item = self.pr_item()
+        await self.press(render.callback(item.id, "approve"))
+        new = "f9e8d7c" + "1" * 33
+        self.store.raise_item(source="loop_engineer", key="neural-bridge#212", kind=st.PR_REVIEW,
+                              title=item.title, detail=f"Issue #88 · head {new[:7]}", ref=item.ref,
+                              payload={**item.payload, "head_sha": new})
+        query = await self.confirm(item, shown_text="... head a1b2c3d ...")
+        self.assertEqual(query.answers, ["The PR changed since that screen. Look again."])
+        self.assertEqual(self.merged, [])
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+
+    async def test_close_takes_two_taps(self):
+        item = self.pr_item(checks="failing")
+        await self.press(render.callback(item.id, "reject"))
+        self.assertEqual(self.store.get(item.id).state, st.OPEN)
+        self.assertIn("agent-blocked", self.bot.edits[-1]["text"])
+        await self.press(render.callback(item.id, "reject!"))
+        self.assertEqual(self.merged[0][0], st.REJECT)
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,16 +25,18 @@ send", which is the part that was identical.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .claude_invoke import DEFAULT_MODEL, call_claude, claude_env
+from .claude_invoke import DEFAULT_MODEL, call_claude, claude_env, claude_usage
 from .mention import (
     MENTION_PROMPT_PATH,
     add_dirs_for,
     allowed_tools_for,
-    build_mention_prompt,
+    MentionParts,
+    build_mention_parts,
     effort_for,
     load_agent_definition,
     max_response_chars_for,
@@ -45,6 +47,21 @@ from .mention import (
 from .private_tools import grant_for, merge_tools
 from scripts.fleet_code import FleetCodeError, load_fleet_code
 from .session_store import STORE as SESSION_STORE
+
+# Every agent turn, in the fleet's usage log as "agent_turn", with caps that
+# only stop a runaway. A normal Luna turn cost $0.37 to $2.21 on 2026-10-12..20
+# (the growing resumed session, not the work), and a research turn may make a
+# few dozen tool calls. A capped turn fails once ("error_max_budget_usd" or
+# "error_max_turns") and is not retried.
+TURN_LIMITS = {"job": "agent_turn", "max_turns": 60, "max_budget_usd": 5.0}
+
+# A resumed session keeps everything it was ever sent, and a turn days after
+# the last one pays to write all of it to the prompt cache again. A session
+# with this many tokens of context is not resumed: the turn starts a fresh one
+# with the full prompt, and the progress log, notes and recent history carry
+# the conversation over. Report step 11 (2026-10-20): Luna's
+# Telegram session had reached 353K tokens, $2.21 for a one-line turn.
+ROTATE_AT_TOKENS = int(os.environ.get("NB_SESSION_ROTATE_TOKENS") or 100_000)
 
 
 def _noop(_msg: str) -> None:
@@ -72,6 +89,12 @@ class TurnResult:
     model_fallback: bool = False
     # Set when the turn failed before claude was ever called (missing template).
     setup_error: str = ""
+    # True when a resumed turn sent only the short continuation prompt.
+    continued: bool = False
+    # The session's context after the turn, in tokens, when it could be read;
+    # and the size of the session this turn rotated away from, if it did.
+    context_tokens: int | None = None
+    rotated_from: int | None = None
 
     @property
     def empty(self) -> bool:
@@ -125,7 +148,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         return TurnResult(ok=False, setup_error=str(exc), error_reason="fleet_code_unavailable")
 
     agent_definition = load_agent_definition(req.agent_id)
-    prompt = build_mention_prompt(
+    parts = build_mention_parts(
         template,
         agent_id=req.agent_id,
         agent_definition=agent_definition,
@@ -135,8 +158,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         message_content=req.message_content,
         conversation_log_path=req.conversation_log_path,
     )
-    if req.prompt_prefix:
-        prompt = req.prompt_prefix + prompt
+    full_prompt = (req.prompt_prefix or "") + parts.full
 
     tools = allowed_tools_for(req.agent_id)
     grant = grant_for(req.agent_id, req.owner_invoked)
@@ -158,11 +180,31 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         session_rec, is_new_session = SESSION_STORE.get_or_create(req.conversation_key, req.agent_id)
         session_id = session_rec.session_id
 
+    # Rotate a session that has grown too large before using it: its size from
+    # the last turn, or from its transcript when the record predates that.
+    rotated_from = None
+    if not req.stateless and not is_new_session:
+        size = getattr(session_rec, "context_tokens", 0) or claude_usage.context_tokens(session_id) or 0
+        if size >= ROTATE_AT_TOKENS:
+            rotated_from = size
+            log(f"TURN session rotated at {size:,} tokens of context: agent={req.agent_id} "
+                f"session={session_id[:8]}...")
+            session_rec = SESSION_STORE.reset(req.conversation_key, req.agent_id)
+            session_id, is_new_session = session_rec.session_id, True
+
+    # A resumed session that already holds this exact fixed context gets only
+    # what changed; anything else (a new session, an edited notes.md or
+    # charter, a session from before 2026-10-20) gets the full prompt.
+    continued = (not req.stateless and not is_new_session and bool(parts.continuation)
+                 and session_rec.static_hash == parts.static_hash)
+    prompt = (req.prompt_prefix or "") + parts.continuation if continued else full_prompt
+
     log(
         f"TURN calling claude: agent={req.agent_id} key={req.conversation_key} "
         f"effort={agent_effort} timeout={agent_timeout}s "
         f"session={session_id[:8]}... "
-        f"({'stateless' if req.stateless else 'new' if is_new_session else 'resumed'})"
+        f"({'stateless' if req.stateless else 'new' if is_new_session else 'resumed'}"
+        f"{', continuation prompt' if continued else ''}, {len(prompt):,} chars)"
     )
 
     ok, stdout, err = await call_claude(
@@ -175,10 +217,12 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         effort=agent_effort,
         agent_id=req.agent_id,
         mcp_config=mcp_config,
+        **TURN_LIMITS,
         **model_kwargs,
     )
 
-    # Claude 5 answers only through the model gateway. If this agent's Claude 5
+    # On the proxy route Claude 5 answers only through the model gateway (on
+    # the API route proxy_supports() is always true). If this agent's Claude 5
     # turn fails for any reason but a timeout, run it once more on the fleet
     # default: on the same session when there is one (a session resumes across
     # models, verified 2026-09-30), otherwise on a fresh id, since the failed
@@ -201,18 +245,25 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             effort=agent_effort,
             agent_id=req.agent_id,
             mcp_config=mcp_config,
+            **TURN_LIMITS,
             **model_kwargs,
         )
 
-    # A failure under --resume usually means Claude Code pruned the session
-    # file. Retry ONCE with a fresh id; a second failure is a real problem the
-    # user should hear about rather than something to keep retrying.
+    # Retry ONCE with a fresh id, and only when the session itself is the
+    # problem: Claude Code pruned its file, or it outgrew the context window
+    # (claude_env.session_unusable). Until 2026-10-20 any failure retried
+    # fresh, a 10-minute timeout included: that re-ran the whole tool loop at
+    # full price and threw the session away. A second failure is a real
+    # problem the user should hear about rather than something to keep
+    # retrying.
     retried = False
-    if not ok and not is_new_session:
+    if not ok and not is_new_session and claude_env.session_unusable(err):
         log(f"TURN resume failed, retrying fresh: err={err[:80]}")
         retried = True
         session_rec = SESSION_STORE.reset(req.conversation_key, req.agent_id)
         session_id = session_rec.session_id
+        # A new session holds nothing yet: it needs the full prompt.
+        prompt, continued = full_prompt, False
         ok, stdout, err = await call_claude(
             prompt,
             timeout=agent_timeout,
@@ -223,6 +274,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
             effort=agent_effort,
             agent_id=req.agent_id,
             mcp_config=mcp_config,
+            **TURN_LIMITS,
             **model_kwargs,
         )
 
@@ -231,10 +283,15 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         return TurnResult(ok=False, raw_stdout=stdout or "", error_reason=err,
                           session_id=session_id,
                           is_new_session=is_new_session, resume_retried=retried,
-                          prompt_chars=len(prompt), model_fallback=fell_back)
+                          prompt_chars=len(prompt), model_fallback=fell_back, continued=continued)
 
+    # Record the fixed context the session now holds and its size, for the
+    # next turn's prompt choice and rotation check.
+    context = None
     if not req.stateless:
-        SESSION_STORE.touch(req.conversation_key, req.agent_id)
+        context = claude_usage.context_tokens(session_id)
+        SESSION_STORE.touch(req.conversation_key, req.agent_id,
+                            static_hash=parts.static_hash, context_tokens=context)
     cap = req.max_response_chars or max_response_chars_for(req.agent_id)
     return TurnResult(
         ok=True,
@@ -245,4 +302,7 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         resume_retried=retried,
         prompt_chars=len(prompt),
         model_fallback=fell_back,
+        continued=continued,
+        context_tokens=context,
+        rotated_from=rotated_from,
     )

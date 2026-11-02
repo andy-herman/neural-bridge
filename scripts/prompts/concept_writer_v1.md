@@ -2,7 +2,7 @@
 
 Used by `scripts/compile.py` Phase B after the filing gate has issued a PROMOTE verdict. Writes a real concept article body — not a stub — for the wiki.
 
-Variables `{slug}`, `{summary}`, `{agent}`, `{session_excerpt}` are substituted before the prompt is sent to `claude -p`.
+Variables `slug`, `summary`, `agent`, `session_excerpt` (in braces where they appear below) are substituted before the prompt is sent to `claude -p`.
 
 The body produced here lands in `knowledge/concepts/<slug>.md` underneath the provenance frontmatter (sources, compiled_at, compiler_version) that `compile.py` adds.
 

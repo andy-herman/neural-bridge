@@ -24,6 +24,7 @@ from scripts.memory_canary import (  # noqa: E402
     HEALTHY,
     IDLE,
     SILENT,
+    agent_turns,
     degraded,
     evaluate,
     format_report,
@@ -307,6 +308,58 @@ class TestReviewQueueCheck(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestReaderGating(unittest.TestCase):
+    """A store read by a few agents is judged on their turns, not the fleet's."""
+
+    def _sub(self, *stores):
+        from scripts.memory_canary import WATCHED
+        return {k: WATCHED[k] for k in stores}
+
+    def test_luna_stores_are_idle_when_only_other_agents_ran(self):
+        # 2026-10-08: one Loid turn plus Luna's Telegram check-ins made the
+        # fleet look busy, and Luna's untouched stores were alerted as SILENT.
+        watched = self._sub("luna_notes", "luna_live_state", "echo_voice")
+        res = evaluate({}, had_traffic=True, turns={"loid": 1, "security-reviewer": 1}, watched=watched)
+        self.assertEqual({r["status"] for r in res.values()}, {IDLE})
+        self.assertIn("luna", res["luna_notes"]["reason"])
+        self.assertEqual(degraded(res), [])
+
+    def test_silence_after_a_reader_turn_is_still_caught(self):
+        watched = self._sub("luna_notes", "echo_voice")
+        res = evaluate({}, had_traffic=True, turns={"luna": 2}, watched=watched)
+        self.assertEqual(res["luna_notes"]["status"], SILENT)
+        self.assertEqual(res["echo_voice"]["status"], SILENT)
+        res = evaluate({}, had_traffic=True, turns={"content": 1}, watched=watched)
+        self.assertEqual(res["luna_notes"]["status"], IDLE)
+        self.assertEqual(res["echo_voice"]["status"], SILENT)
+
+    def test_without_turns_the_fleet_wide_rule_applies(self):
+        watched = self._sub("luna_notes")
+        self.assertEqual(evaluate({}, had_traffic=True, watched=watched)["luna_notes"]["status"], SILENT)
+        self.assertEqual(evaluate({}, had_traffic=False, watched=watched)["luna_notes"]["status"], IDLE)
+
+    def test_stores_without_readers_keep_the_fleet_wide_rule(self):
+        watched = self._sub("honcho_capture", "wiki_recall")
+        res = evaluate({}, had_traffic=True, turns={}, watched=watched)
+        self.assertEqual({r["status"] for r in res.values()}, {SILENT})
+
+    def test_agent_turns_skips_claude_code_sessions(self):
+        events = [
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "luna", "detail": ""},
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "luna", "detail": "missing"},
+            {"stage": mem.RETRIEVE, "store": "progress_log", "agent_id": "research",
+             "detail": "session_start: injected"},
+            {"stage": mem.RETRIEVE, "store": "luna_briefing", "agent_id": "luna"},
+            {"stage": mem.WRITE, "store": "progress_log", "agent_id": "loid"},
+        ]
+        self.assertEqual(agent_turns(events), {"luna": 2})
+
+    def test_echo_readers_match_the_injection(self):
+        from scripts.discord_bot import mention
+        from scripts.memory_canary import WATCHED
+        self.assertEqual(set(WATCHED["echo_voice"]["readers"]), set(mention.ECHO_VOICE_AGENTS))
 
 
 class TestLayerFourStores(unittest.TestCase):

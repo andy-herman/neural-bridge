@@ -49,6 +49,7 @@ from scripts.discord_bot.claude_invoke import (  # noqa: E402
 )
 from scripts.discord_bot.keychain import get_token  # noqa: E402
 from scripts.luna import tasks  # noqa: E402
+from scripts.telegram_bot import checkin_log  # noqa: E402
 from scripts.discord_bot.mention import (  # noqa: E402
     LUNA_NOTES_MAX_CHARS,
     LUNA_NOTES_PATH,
@@ -211,6 +212,26 @@ def is_pass(response: str) -> bool:
         or stripped.upper() == PASS_TOKEN.upper()
 
 
+def queue_line(store=None, now: int | None = None) -> str:
+    """One line on what waits in the review queue, or "" when nothing does.
+    Appended only to a message Luna is sending anyway: a quiet day stays quiet,
+    and each waiting item already arrived as its own card."""
+    import time
+
+    try:
+        from scripts.review_queue import store as queue_store
+        store = store or queue_store.Store()
+        waiting = store.items(states=queue_store.WAITING)
+    except Exception:
+        return ""
+    if not waiting:
+        return ""
+    now = now if now is not None else int(time.time())
+    days = (now - min(i.created_at for i in waiting)) / 86400
+    oldest = f"{days:.0f} day{'s' if round(days) != 1 else ''}" if days >= 1 else "under a day"
+    return f"Review queue: {len(waiting)} waiting, oldest {oldest}. /queue lists them."
+
+
 def clean_for_telegram(response: str) -> str:
     text = (response or "").strip()
     if len(text) > MAX_TELEGRAM_CHARS:
@@ -243,7 +264,8 @@ def generate(prompt: str) -> tuple[bool, str, str]:
     """Run the check-in on Luna's model, falling back once to the fleet
     default when a Claude 5 call fails (claude_invoke.call_claude_sync_with_fallback)."""
     ok, stdout, err, _model = call_claude_sync_with_fallback(
-        prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT)
+        prompt, model_for(AGENT_ID) or DEFAULT_MODEL, timeout=CHECKIN_TIMEOUT, effort=CHECKIN_EFFORT,
+        flush=False, no_tools=True, job="luna_checkin")
     return ok, stdout, err
 
 
@@ -292,6 +314,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     message = clean_for_telegram(stdout)
+    if args.kind == "morning":
+        line = queue_line()
+        if line:
+            message = f"{message}\n\n{line}"
     if args.dry_run:
         print(f"--- [{args.kind}] would send ({len(message)} chars) ---\n{message}")
         return 0
@@ -305,7 +331,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no Telegram token in keychain ({KEYCHAIN_SERVICE})", file=sys.stderr)
         return 2
 
-    sent = sum(1 for cid in chat_ids if send_telegram(cid, message, token))
+    sent = 0
+    for cid in chat_ids:
+        if send_telegram(cid, message, token):
+            sent += 1
+            # So her chat knows what this asked when Andy answers it.
+            checkin_log.record(cid, args.kind, message)
     mem.record(mem.WRITE, "luna_checkin", agent_id=AGENT_ID, ok=sent > 0,
                chars=len(message),
                detail=f"{args.kind}: sent to {sent}/{len(chat_ids)}")

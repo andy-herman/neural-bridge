@@ -176,3 +176,108 @@ class TestFormatting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CLOSE_BOARD = """---
+kanban-plugin: board
+---
+
+## Inbox
+
+- [ ] Send the venue form part 3 (seating) by 2026-09-07 [[Venue Playbook]] @{2026-07-13}
+- [ ] Send the venue form part 30 draft @{2026-07-13}
+
+## Now
+
+- [ ] Escalated: send the venue form part 1 (contacts) [[Venue call]] @{2026-07-27}
+- [ ] Escalated: send the venue form part 2 (catering) [[Venue Playbook]] @{2026-07-27}
+- [ ] Plain card with no link or date
+
+## Done
+
+**Complete**
+- [x] Older closed card @{2026-07-01}
+
+%% kanban:settings
+```
+{"kanban-plugin":"board"}
+```
+%%
+"""
+
+DONE_ON = date(2026, 10, 13)
+
+
+class TestCloseCard(unittest.TestCase):
+    """Andy says it is done; the board has to say so too, because every reader
+    that raises open work reads the board and not Luna's chat."""
+
+    def test_moves_card_to_top_of_done_with_dated_note(self):
+        new, card, lane = T.close_card(CLOSE_BOARD, "form part 1", DONE_ON)
+        self.assertEqual(lane, "Now")
+        self.assertIn("part 1", card)
+        done = new[new.index("## Done"):]
+        first = done.splitlines()[3]
+        self.assertEqual(first, "- [x] Escalated: send the venue form part 1 (contacts) "
+                                "Done 2026-10-13 (Andy confirmed to Luna). [[Venue call]] @{2026-07-27}")
+        self.assertNotIn("- [ ] Escalated: send the venue form part 1", new)
+
+    def test_closed_card_leaves_the_readers(self):
+        new, _, _ = T.close_card(CLOSE_BOARD, "form part 2", DONE_ON)
+        open_texts = [t.text for t in T.open_tasks(T.parse_board(new, today=DONE_ON))]
+        self.assertFalse(any("part 2" in t for t in open_texts))
+        self.assertEqual(len(open_texts), 4)
+
+    def test_words_not_substrings(self):
+        # "part 3" must not also match "part 30".
+        new, card, _ = T.close_card(CLOSE_BOARD, "form part 3", DONE_ON)
+        self.assertIn("part 3 (seating)", card)
+        self.assertIn("- [ ] Send the venue form part 30 draft", new)
+
+    def test_ambiguous_query_refuses_and_lists(self):
+        with self.assertRaises(T.CloseError) as ctx:
+            T.close_card(CLOSE_BOARD, "venue form part", DONE_ON)
+        self.assertIn("4 open cards match", str(ctx.exception))
+        self.assertIn("part 2", str(ctx.exception))
+
+    def test_no_match_and_empty_query_refuse(self):
+        for query in ("dentist", "", "  ...  "):
+            with self.assertRaises(T.CloseError):
+                T.close_card(CLOSE_BOARD, query, DONE_ON)
+
+    def test_done_cards_are_never_matched(self):
+        with self.assertRaises(T.CloseError):
+            T.close_card(CLOSE_BOARD, "older closed card", DONE_ON)
+
+    def test_note_and_card_without_links(self):
+        new, _, _ = T.close_card(CLOSE_BOARD, "plain card", DONE_ON, note="sent by email.")
+        self.assertIn("- [x] Plain card with no link or date Done 2026-10-13 "
+                      "(Andy confirmed to Luna: sent by email).", new)
+
+    def test_settings_block_and_other_lines_untouched(self):
+        new, _, _ = T.close_card(CLOSE_BOARD, "form part 1", DONE_ON)
+        self.assertTrue(new.endswith('```\n%%\n'))
+        self.assertEqual(len(new.splitlines()), len(CLOSE_BOARD.splitlines()))
+
+    def test_no_done_lane_refuses(self):
+        with self.assertRaises(T.CloseError):
+            T.close_card(CLOSE_BOARD.replace("## Done", "## Archive"), "plain card", DONE_ON)
+
+    def test_close_on_board_backs_up_and_writes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            board = Path(tmp) / "Herman Tasks.md"
+            board.write_text(CLOSE_BOARD, encoding="utf-8")
+            old_backup = T.BACKUP_DIR
+            T.BACKUP_DIR = Path(tmp) / "backups"
+            try:
+                said = T.close_on_board("form part 2", DONE_ON, path=board)
+            finally:
+                T.BACKUP_DIR = old_backup
+            self.assertEqual(said, "Closed: Escalated: send the venue form part 2 "
+                                   "(catering) (moved from Now to Done).")
+            self.assertIn("- [x] Escalated: send the venue form part 2", board.read_text())
+            backups = list((Path(tmp) / "backups").glob("Herman Tasks.*.md"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(), CLOSE_BOARD)
+            self.assertFalse((Path(tmp) / ".Herman Tasks.md.tmp").exists())

@@ -1,11 +1,12 @@
 """SQLite store for the review queue.
 
 Local only, by design: the database holds titles and pointers, and it never
-leaves the Mac. Four tables:
+leaves the Mac. Five tables:
 
     items    current state of each item
     events   append-only: every create, decision, apply and failure
     renders  which Telegram messages show which item, so they can be edited
+    prompts  "reply to answer" messages, so a reply finds its question
     meta     small key/values, e.g. the pusher's heartbeat
 
 Producers call raise_item/clear/sync. They are idempotent, so a producer that
@@ -22,7 +23,7 @@ State machine:
     open ──decide──▶ decided ──claim──▶ applying ──▶ applied | apply_failed
      │ ▲                                                  │
      │ └──wake── snoozed                    retry ◀───────┘
-     └──clear──▶ superseded
+     └──clear / expire──▶ superseded
 
 Every transition is a conditional UPDATE, so two processes (the bridge and the
 CLI) can never both decide or both apply the same item.
@@ -49,8 +50,9 @@ from typing import Iterator
 DB_ENV = "NB_REVIEW_QUEUE_DB"
 DEFAULT_DB = Path.home() / "Library" / "Application Support" / "neural-bridge" / "review-queue.db"
 
-# Kinds in the Phase 1 scope. Slice A produces capture and alert; probe is the
-# health check's own item and is hidden from lists and stats.
+# Kinds in the Phase 1 scope. Slice A produces capture and alert, slice B
+# question and action; probe is the health check's own item and is hidden from
+# lists and stats.
 CAPTURE, ALERT, QUESTION, ACTION, PR_REVIEW, PUBLISH, PROBE = (
     "capture", "alert", "question", "action", "pr_review", "publish", "probe")
 KINDS = frozenset({CAPTURE, ALERT, QUESTION, ACTION, PR_REVIEW, PUBLISH, PROBE})
@@ -62,8 +64,8 @@ WAITING = (OPEN, SNOOZED, APPLY_FAILED)
 # Nothing further will happen to these.
 FINAL = (APPLIED, SUPERSEDED)
 
-APPROVE, REJECT, ACKNOWLEDGE = "approve", "reject", "acknowledge"
-VERBS = frozenset({APPROVE, REJECT, ACKNOWLEDGE, "edit", "answer", "rewind"})
+APPROVE, REJECT, ACKNOWLEDGE, ANSWER = "approve", "reject", "acknowledge", "answer"
+VERBS = frozenset({APPROVE, REJECT, ACKNOWLEDGE, ANSWER, "edit", "rewind"})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -105,6 +107,13 @@ CREATE TABLE IF NOT EXISTS renders (
     shown_rev  INTEGER NOT NULL DEFAULT 0,
     closed_at  INTEGER,
     PRIMARY KEY (item_id, chat_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS prompts (
+    chat_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    item_id    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
 );
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -237,7 +246,11 @@ class Store:
 
         A repeat raise of a live incident refreshes its detail (an alert's
         "overdue for 9 days" becomes "10 days") without logging an event: a
-        producer that re-reports hourly must not flood the log.
+        producer that re-reports hourly must not flood the log. While the item
+        still waits on Andy, its payload is refreshed too, and a payload change
+        bumps rev so its card is redrawn (a PR whose checks just went green
+        gains its Merge button). A decided item's payload is left alone: it is
+        what Andy decided on.
         """
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind!r}")
@@ -258,7 +271,12 @@ class Store:
                                        or row["ref"] != ref):
                         conn.execute("UPDATE items SET title = ?, detail = ?, ref = ? WHERE id = ?",
                                      (title, detail, ref, row["id"]))
-                        row = conn.execute("SELECT * FROM items WHERE id = ?", (row["id"],)).fetchone()
+                    new_payload = json.dumps(payload or {}, sort_keys=True)
+                    if (not unique and row["state"] in (OPEN, SNOOZED)
+                            and (row["payload"] or "{}") != new_payload):
+                        conn.execute("UPDATE items SET payload = ?, updated_at = ?, rev = rev + 1 "
+                                     "WHERE id = ?", (new_payload, now, row["id"]))
+                    row = conn.execute("SELECT * FROM items WHERE id = ?", (row["id"],)).fetchone()
                     conn.execute("COMMIT")
                     return Item.from_row(row), False
                 item_id = self._new_id(conn)
@@ -333,9 +351,13 @@ class Store:
     # ---------- decisions ----------
 
     def decide(self, item_id: str, verb: str, *, actor: str, note: str = "",
-               now: int | None = None) -> bool:
+               data: dict | None = None, now: int | None = None) -> bool:
         """Record Andy's decision. False if the item is not waiting on one
-        (already decided elsewhere, superseded, or unknown)."""
+        (already decided elsewhere, superseded, or unknown).
+
+        `data` is merged into the payload in the same transaction, for what the
+        applier needs from the decision itself (the text of an answer).
+        """
         if verb not in VERBS:
             raise ValueError(f"unknown verb {verb!r}")
         now = now if now is not None else _now()
@@ -348,13 +370,38 @@ class Store:
             if cur.rowcount != 1:
                 conn.execute("COMMIT")
                 return False
+            if data:
+                row = conn.execute("SELECT payload FROM items WHERE id = ?", (item_id,)).fetchone()
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                payload.update(data)
+                conn.execute("UPDATE items SET payload = ? WHERE id = ?",
+                             (json.dumps(payload, sort_keys=True), item_id))
             self._event(conn, item_id, actor, "decided", f"{verb}: {note}" if note else verb, at=now)
             conn.execute("COMMIT")
             return True
 
+    def expire(self, item_id: str, *, actor: str, reason: str = "",
+               now: int | None = None) -> bool:
+        """An undecided item that has gone stale (a PR proposal written
+        against yesterday's main) is superseded, with the reason logged."""
+        now = now if now is not None else _now()
+        return self._transition(item_id, (OPEN, SNOOZED), SUPERSEDED, actor=actor,
+                                event="expired", detail=reason or "expired", now=now,
+                                extra={"resolved_at": now, "snooze_until": None})
+
     def snooze(self, item_id: str, until: int, *, actor: str, now: int | None = None) -> bool:
         now = now if now is not None else _now()
         return self._transition(item_id, (OPEN,), SNOOZED, actor=actor, event="snoozed",
+                                detail=str(until), now=now, extra={"snooze_until": until})
+
+    def hold(self, item_id: str, until: int, *, actor: str, now: int | None = None) -> bool:
+        """A producer keeps a new item back until `until` (a question asked in
+        a live conversation). Same mechanics as a snooze; logged as "held"."""
+        now = now if now is not None else _now()
+        return self._transition(item_id, (OPEN,), SNOOZED, actor=actor, event="held",
                                 detail=str(until), now=now, extra={"snooze_until": until})
 
     def wake_due(self, now: int | None = None) -> list[str]:
@@ -489,6 +536,30 @@ class Store:
                 "WHERE item_id = ? AND chat_id = ? AND message_id = ?",
                 (now, rev, now if close else None, render.item_id, render.chat_id,
                  render.message_id))
+
+    def rendered_item(self, chat_id: int, message_id: int) -> str | None:
+        """The item a Telegram message shows, or None."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT item_id FROM renders WHERE chat_id = ? AND message_id = ?",
+                               (chat_id, message_id)).fetchone()
+        return row["item_id"] if row else None
+
+    # ---------- "reply to answer" prompts ----------
+
+    def add_prompt(self, item_id: str, chat_id: int, message_id: int,
+                   now: int | None = None) -> None:
+        now = now if now is not None else _now()
+        with self._conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO prompts (chat_id, message_id, item_id, created_at) "
+                         "VALUES (?, ?, ?, ?)", (chat_id, message_id, item_id, now))
+
+    def prompt_item(self, chat_id: int, message_id: int) -> str | None:
+        """The item a reply to this message answers: an answer prompt, or the
+        item's own card."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT item_id FROM prompts WHERE chat_id = ? AND message_id = ?",
+                               (chat_id, message_id)).fetchone()
+        return row["item_id"] if row else self.rendered_item(chat_id, message_id)
 
     def needing_render(self, kinds: tuple[str, ...]) -> list[Item]:
         """Open items of pushable kinds that no live message shows."""

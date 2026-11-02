@@ -2,7 +2,7 @@
 
 Used by `/squad-discuss` to have senior-pm draft an opening framing AND pick 1–3 specialists to weigh in.
 
-Variables `{topic}` are substituted before the prompt is sent.
+Variables `topic` (in braces where they appear below) are substituted before the prompt is sent.
 
 ---
 

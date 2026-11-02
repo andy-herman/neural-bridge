@@ -287,6 +287,17 @@ class TestCallClaude(unittest.TestCase):
             env = claude_invoke._subprocess_env()
         self.assertIn("ANTHROPIC_BASE_URL", env)
 
+    def test_subprocess_env_takes_the_api_route_when_a_key_is_configured(self):
+        # Since 2026-10-16 the fleet runs on the Anthropic API whenever a key
+        # is configured: the key is set, and no base URL survives to move it.
+        import os as _os
+        with patch.dict(_os.environ, {"NB_ANTHROPIC_API_KEY": "sk-ant-test-env",
+                                      "ANTHROPIC_BASE_URL": "http://localhost:4141"}, clear=False):
+            _os.environ.pop("NB_CLAUDE_DIRECT", None)
+            env = claude_invoke._subprocess_env()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test-env")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
     def test_subprocess_env_can_opt_out_of_proxy(self):
         # The loop engineer opts out: it uses dashed Anthropic model ids, and an
         # unattended run that opens PRs must not depend on a local proxy being

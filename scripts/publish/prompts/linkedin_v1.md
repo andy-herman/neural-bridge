@@ -2,7 +2,7 @@
 
 Used by `scripts/publish/prepare_week.py` to adapt a long-form blog post into a LinkedIn-shaped post that matches Andy's voice.
 
-Variables `{voice_corpus}`, `{title}`, `{description}`, `{blog_body}` are substituted before the prompt is sent to `claude -p`.
+Variables `voice_corpus`, `title`, `description`, `blog_body` (in braces where they appear below) are substituted before the prompt is sent to `claude -p`.
 
 ---
 

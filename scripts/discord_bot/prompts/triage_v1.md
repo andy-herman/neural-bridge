@@ -2,7 +2,7 @@
 
 Used by `scripts/discord_bot/handlers.handle_triage`. Sent to `claude -p` against a real GitHub issue. Senior-pm uses this prompt to recommend a specialist + state-machine transition + label changes.
 
-Variables `{repo}`, `{issue_number}`, `{issue_title}`, `{issue_body}`, `{current_labels}` are substituted before the prompt is sent.
+Variables `repo`, `issue_number`, `issue_title`, `issue_body`, `current_labels` (in braces where they appear below) are substituted before the prompt is sent.
 
 ---
 

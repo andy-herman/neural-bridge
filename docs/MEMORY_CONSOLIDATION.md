@@ -235,6 +235,11 @@ flush, run inside a simulated agent turn with a foreign base URL and the
 progress entry (decision, three findings, open question) from a synthetic
 research session.
 
+Since 2026-10-16 the pipeline takes the fleet route (`claude_env.fleet_env`):
+the Anthropic API on Andy's own key when `~/.config/neural-bridge/anthropic-api-key`
+exists, still off Max limits, on the same model (`claude-opus-4-8`). The proxy
+remains reachable with `NB_MODEL_ROUTE=proxy`. See docs/MODEL_GATEWAY.md.
+
 The filing gate was calibrated on `claude-sonnet-5` (#158), so the model change
 was checked with `scripts/eval_filing_gate.py` (votes=3, 15 cases) on
 `claude-opus-4.8`: 14/15 passed, `attack_admitted` 0 and `false_admit` 0, so
