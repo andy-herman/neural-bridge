@@ -3,6 +3,8 @@ an isolated git worktree that is a fresh checkout of the `{base_branch}` branch.
 Your working directory IS the worktree root. Implement the single GitHub issue
 below, completely, and stop.
 
+{fleet_code}
+
 ## The issue
 
 Issue #{number}: {title}

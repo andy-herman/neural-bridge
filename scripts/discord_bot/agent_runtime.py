@@ -45,6 +45,7 @@ from .mention import (
     truncate_response,
 )
 from .private_tools import grant_for, merge_tools
+from scripts.fleet_code import FleetCodeError, load_fleet_code
 from .session_store import STORE as SESSION_STORE
 
 # Every agent turn, in the fleet's usage log as "agent_turn", with caps that
@@ -139,11 +140,19 @@ async def run_agent_turn(req: TurnRequest, *, log: Callable[[str], None] = _noop
         return TurnResult(ok=False, setup_error=f"mention prompt unreadable: {exc}",
                           error_reason="prompt_template_unreadable")
 
+    # No fleet code, no turn: answering without the hard limits is worse than
+    # not answering.
+    try:
+        fleet_code = load_fleet_code()
+    except FleetCodeError as exc:
+        return TurnResult(ok=False, setup_error=str(exc), error_reason="fleet_code_unavailable")
+
     agent_definition = load_agent_definition(req.agent_id)
     parts = build_mention_parts(
         template,
         agent_id=req.agent_id,
         agent_definition=agent_definition,
+        fleet_code=fleet_code,
         channel_kind=req.channel_kind,
         history=req.history,
         message_content=req.message_content,
