@@ -170,7 +170,7 @@ you can untick it, and the council then falls back to public links.
 | `API 403: insufficient authentication scopes` | scopes changed since authorizing; redo step 3 |
 | `token endpoint returned 400: invalid_grant` | refresh token revoked or expired; redo step 3 |
 | `Error 403: org_internal` at consent | audience is set to Internal; switch to External on the Audience page |
-| `cannot listen on http://localhost:8765` | a previous setup run is still holding the port: `pkill -f scripts.luna.google_auth` |
+| `cannot listen on http://localhost:8766` | something holds the port: `lsof -nP -iTCP:8766`. An earlier setup run: `pkill -f scripts.luna.google_auth`; anything else: rerun with `NB_GOOGLE_REDIRECT_PORT=<free port>` |
 | Luna worked for a week then stopped | publishing status slipped back to Testing; set it to In production |
 
 ## Rotating or revoking

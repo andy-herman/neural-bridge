@@ -52,8 +52,12 @@ TOKEN_PATH = CONFIG_DIR / "google_token.json"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 # Installed-app loopback. Google deprecated the OOB flow, so setup runs a
-# one-shot local listener rather than asking Andy to paste a code.
-REDIRECT_URI = "http://localhost:8765/"
+# one-shot local listener rather than asking Andy to paste a code. A Desktop
+# OAuth client accepts any loopback port. 8765 was the first choice, but a
+# long-running local dashboard holds it, so setup failed with "address already
+# in use"; NB_GOOGLE_REDIRECT_PORT overrides the default.
+REDIRECT_PORT = int(os.environ.get("NB_GOOGLE_REDIRECT_PORT", "8766"))
+REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/"
 
 READ_SCOPES = (
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -327,11 +331,12 @@ def _run_setup(with_compose: bool, wait_seconds: int = 900, with_drive: bool = F
 
     httpd = None
     try:
-        httpd = _Server(("localhost", 8765), Handler)
+        httpd = _Server(("localhost", REDIRECT_PORT), Handler)
     except OSError as exc:
         print(f"cannot listen on {REDIRECT_URI}: {exc}")
-        print("Another setup run may still be holding the port. Try: "
-              "pkill -f scripts.luna.google_auth")
+        print(f"Something else holds the port (check with: lsof -nP -iTCP:{REDIRECT_PORT}). If it "
+              "is an earlier setup run, pkill -f scripts.luna.google_auth; otherwise pick a free "
+              "port with NB_GOOGLE_REDIRECT_PORT=<port>.")
         return 1
 
     try:
