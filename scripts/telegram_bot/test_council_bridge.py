@@ -271,6 +271,14 @@ class TestDiscussHelpers(unittest.TestCase):
 class TestInvokerDirective(unittest.IsolatedAsyncioTestCase):
     HISTORY = [{"author": "Andy", "content": "q"}, {"author": "Yor", "content": "Y" * 900}]
 
+    def setUp(self):
+        # Keep the one-shot's working folder out of the real Application Support tree.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(cb, "YOR_CWD", Path(self._tmp.name) / "council-yor")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_loid_gets_directive_and_full_room(self):
         result = SimpleNamespace(ok=True, response="fine", setup_error="", error_reason="")
         turn = AsyncMock(return_value=result)
@@ -296,7 +304,17 @@ class TestInvokerDirective(unittest.IsolatedAsyncioTestCase):
         with patch.object(cb.asyncio, "create_subprocess_exec", spawn):
             ok, resp = await cb._invoke_yor("q", self.HISTORY, directive)
         self.assertEqual((ok, resp), (True, "hello"))
+        self.last_spawn = spawn
         return spawn.call_args.args[3]
+
+    async def test_yor_runs_from_a_neutral_folder_with_her_dm_toolsets(self):
+        await self._yor_query()
+        args, kwargs = self.last_spawn.call_args.args, self.last_spawn.call_args.kwargs
+        # Not the repo: a project AGENTS.md in the cwd would join her identity prompt.
+        self.assertEqual(kwargs["cwd"], str(cb.YOR_CWD))
+        self.assertTrue(cb.YOR_CWD.is_dir())
+        self.assertNotEqual(Path(kwargs["cwd"]).resolve(), Path(cb.__file__).resolve().parents[2])
+        self.assertEqual(args[args.index("-t") + 1], "file,memory,session_search,vision,search,pocket")
 
     async def test_yor_gets_directive_instead_of_pass(self):
         query = await self._yor_query("DIRECTIVE-Y")
@@ -313,7 +331,8 @@ class TestInvokerDirective(unittest.IsolatedAsyncioTestCase):
         for directive in (None, "D"):
             with self.subTest(directive=directive):
                 query = await self._yor_query(directive)
-                self.assertIn("check the record in your own notes first", query)
+                self.assertIn("check the record first: session_search", query)
+                self.assertIn("then your own notes", query)
                 self.assertIn("injected summary can be a day old", query)
 
 
