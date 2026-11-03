@@ -132,6 +132,14 @@ LUNA_MODEL = os.environ.get("COUNCIL_LUNA_MODEL") or None
 ROUTER_MODEL = os.environ.get("COUNCIL_ROUTER_MODEL", "claude-haiku-4-5")
 ROUTER_TIMEOUT = int(os.environ.get("COUNCIL_ROUTER_TIMEOUT", "60"))
 YOR_TIMEOUT = int(os.environ.get("COUNCIL_YOR_TIMEOUT", "240"))
+# Yor's one-shot runs from an empty folder: Hermes loads project context files (AGENTS.md and the
+# like) from the working directory, and inheriting this repo's added about 22K characters of
+# unrelated schema to her identity prompt. Her SOUL and memory load from HERMES_HOME, not the cwd.
+YOR_CWD = Path(os.environ.get("COUNCIL_YOR_CWD") or
+               Path.home() / "Library" / "Application Support" / "neural-bridge" / "council-yor")
+# The same tools Yor has in her Telegram DM (config.yaml platform_toolsets.telegram). The CLI's
+# default bundle also carries terminal and code tools, and Yor never executes.
+YOR_TOOLSETS = os.environ.get("COUNCIL_YOR_TOOLSETS", "file,memory,session_search,vision,search,pocket")
 
 TELEGRAM_CHUNK_BUDGET = 3900
 HISTORY_MAX_TURNS = 20
@@ -554,8 +562,9 @@ def _yor_query(text: str, history: list[dict], directive: str | None = None) -> 
         "shared room' rules. The conversation so far is below, each line labeled by speaker; "
         "a line marked Loid or Luna is theirs, not Andy's and not yours. "
         "Before you state where a fast-moving thread stands (a hiring process, an offer, a "
-        "decision Andy is weighing), check the record in your own notes first, since your "
-        "injected summary can be a day old. "
+        "decision Andy is weighing), check the record first: session_search for today's and "
+        "yesterday's conversations (newest first), then your own notes, since your injected "
+        "summary can be a day old. "
         f"{directive or _YOR_PASS_RULE}\n\n"
         f"CONVERSATION:\n{transcript}\n\n"
         f"Andy's {'question' if directive else 'latest message'}: {text}"
@@ -568,13 +577,15 @@ async def _invoke_yor(
     """Yor via `hermes chat -q ... -Q`. Hermes loads her SOUL; we pass the
     shared transcript and her group etiquette lives in that SOUL."""
     query = _yor_query(text, history, directive)
-    args = ["hermes", "chat", "-q", query, "-Q", "--accept-hooks"]
+    args = ["hermes", "chat", "-q", query, "-Q", "--accept-hooks", "-t", YOR_TOOLSETS]
     try:
+        YOR_CWD.mkdir(parents=True, exist_ok=True, mode=0o700)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
+            cwd=str(YOR_CWD),
         )
         out, errb = await asyncio.wait_for(proc.communicate(), timeout=YOR_TIMEOUT)
     except asyncio.TimeoutError:
