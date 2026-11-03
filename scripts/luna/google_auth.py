@@ -26,6 +26,10 @@ explicit that Gmail is draft-only and she never sends, so the send capability
 is not requested by default. Adding compose is a deliberate opt-in documented
 in GOOGLE_SETUP.md, and even then no CLI here exposes a send command.
 
+`drive.readonly` is a second opt-in (`setup --with-drive`), for the council
+room: it lets the bridge open a Drive link Andy pastes even when the file is
+not shared publicly. Read-only, and only the council's file reader uses it.
+
 Never logs or prints a token. A partial access token was leaked into a session
 transcript on 2026-08-15 by a redaction filter that only matched
 token/secret/key/refresh; `redact()` below exists so that cannot recur.
@@ -57,6 +61,8 @@ READ_SCOPES = (
 )
 # Opt-in only. Grants send as well as draft; see the module docstring.
 COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+# Opt-in only, for the council's Drive links (scripts/telegram_bot/council_files.py).
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 # Refresh a little early so a long-running command cannot expire mid-flight.
 EXPIRY_SKEW_SECONDS = 120
@@ -86,6 +92,40 @@ def config_status() -> str:
         return (f"not authorized: client secret present but no token at {TOKEN_PATH}. "
                 f"Run: python -m scripts.luna.google_auth setup")
     return "configured"
+
+
+def granted_scopes() -> set[str]:
+    """The scopes recorded in the token file; empty when there is none.
+
+    Google's own `scope` field (what the consent screen actually granted, which
+    can be less than was asked for) wins over the `scopes` list setup records
+    (what was asked for). Never raises, and reads nothing but those two fields.
+    """
+    try:
+        tok = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(tok, dict):
+        return set()
+    granted = tok.get("scope")
+    if isinstance(granted, str) and granted.strip():
+        return set(granted.split())
+    requested = tok.get("scopes")
+    if isinstance(requested, list):
+        return {s for s in requested if isinstance(s, str)}
+    return set()
+
+
+def has_scope(scope: str) -> bool:
+    """True when the stored grant includes `scope`."""
+    return scope in granted_scopes()
+
+
+def setup_scopes(with_compose: bool = False, with_drive: bool = False) -> list[str]:
+    """What `setup` asks for. A re-run replaces the whole grant, so an opt-in
+    from an earlier run must be passed again to keep it."""
+    return (list(READ_SCOPES) + ([COMPOSE_SCOPE] if with_compose else [])
+            + ([DRIVE_SCOPE] if with_drive else []))
 
 
 def _load_json(path: Path) -> dict:
@@ -180,19 +220,48 @@ def api_get(url: str, params: dict | None = None, timeout: int = 30) -> dict:
         with request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
-        except Exception:
-            pass
-        raise GoogleAuthError(f"API {exc.code}: {detail or url.split('?')[0]}")
+        raise _api_error(exc, url)
     except (error.URLError, TimeoutError, OSError) as exc:
         raise GoogleAuthError(f"API unreachable: {type(exc).__name__}")
 
 
+def api_get_bytes(url: str, params: dict | None = None, *, max_bytes: int,
+                  timeout: int = 60) -> bytes:
+    """Authorized GET that returns the raw body: a Drive download or export.
+
+    `max_bytes` is required: the body is read at most one byte past it, so a
+    file larger than the caller can use is refused without being held in
+    memory first."""
+    if params:
+        url = f"{url}?{parse.urlencode(params, doseq=True)}"
+    req = request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {access_token()}")
+    try:
+        with request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(max_bytes + 1)
+    except error.HTTPError as exc:
+        raise _api_error(exc, url)
+    except (error.URLError, TimeoutError, OSError) as exc:
+        raise GoogleAuthError(f"API unreachable: {type(exc).__name__}")
+    if len(body) > max_bytes:
+        raise GoogleAuthError(f"response is larger than {max_bytes // (1024 * 1024)} MB")
+    return body
+
+
+def _api_error(exc: error.HTTPError, url: str) -> GoogleAuthError:
+    """Google's own error message, or the bare URL (never the query string,
+    and never the request headers, which carry the token)."""
+    detail = ""
+    try:
+        detail = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
+    except Exception:
+        pass
+    return GoogleAuthError(f"API {exc.code}: {detail or url.split('?')[0]}")
+
+
 # ---------- one-time interactive setup ----------
 
-def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
+def _run_setup(with_compose: bool, wait_seconds: int = 900, with_drive: bool = False) -> int:
     """Interactive OAuth. Andy runs this once; agents never do.
 
     `wait_seconds` defaults to 15 minutes rather than 5. The first version
@@ -206,7 +275,12 @@ def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
     import webbrowser
 
     cid, secret = _client_credentials()
-    scopes = list(READ_SCOPES) + ([COMPOSE_SCOPE] if with_compose else [])
+    scopes = setup_scopes(with_compose, with_drive)
+    # A re-run replaces the grant. Say so before an opt-in silently disappears.
+    for scope, flag in ((COMPOSE_SCOPE, "--with-compose"), (DRIVE_SCOPE, "--with-drive")):
+        if has_scope(scope) and scope not in scopes:
+            print(f"NOTE: the current token includes {scope.rsplit('/', 1)[-1]}, and this run "
+                  f"will drop it. Stop now (Ctrl-C) and add {flag} to keep it.\n")
     auth_url = f"{AUTH_URL}?" + parse.urlencode({
         "client_id": cid,
         "redirect_uri": REDIRECT_URI,
@@ -238,6 +312,10 @@ def _run_setup(with_compose: bool, wait_seconds: int = 900) -> int:
     if with_compose:
         print("\nNOTE: gmail.compose also grants SEND. No CLI here exposes a send\n"
               "command, but the grant permits it. Skip --with-compose to stay read-only.")
+    if with_drive:
+        print("\nNOTE: drive.readonly lets the council read files your account can open\n"
+              "in Drive. It cannot change, share or delete anything. Enable the Google\n"
+              "Drive API in the project first (GOOGLE_SETUP.md).")
     print(f"\nOpening the consent screen. If it does not open, visit:\n{auth_url}\n")
 
     # allow_reuse_address so a previous run that timed out does not leave the
@@ -303,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("setup", help="one-time interactive authorization")
     s.add_argument("--with-compose", action="store_true",
                    help="also request gmail.compose (allows drafting; also grants send)")
+    s.add_argument("--with-drive", action="store_true",
+                   help="also request drive.readonly (the council reads Drive links)")
     s.add_argument("--wait", type=int, default=900,
                    help="seconds to wait for the browser redirect (default 900)")
     sub.add_parser("status", help="print configuration status")
@@ -311,10 +391,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "status":
         print(config_status())
+        if is_configured():
+            print(f"drive.readonly: {'granted' if has_scope(DRIVE_SCOPE) else 'not granted'}")
         return 0 if is_configured() else 1
     if args.cmd == "setup":
         try:
-            return _run_setup(args.with_compose, wait_seconds=args.wait)
+            return _run_setup(args.with_compose, wait_seconds=args.wait,
+                              with_drive=args.with_drive)
         except GoogleAuthError as exc:
             print(f"setup failed: {exc}")
             return 1

@@ -11,10 +11,16 @@ Both are things a future edit could quietly regress.
 
 from __future__ import annotations
 
+import io
+import json
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -241,6 +247,136 @@ class TestSafetyPolicy(unittest.TestCase):
     def test_compose_scope_is_not_in_defaults(self):
         # gmail.compose grants send as well as draft, so it is opt-in only.
         self.assertNotIn(ga.COMPOSE_SCOPE, ga.READ_SCOPES)
+
+
+class _FakeServer:
+    """Stands in for the setup command's loopback listener: no port is opened."""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def handle_request(self):
+        pass
+
+    def server_close(self):
+        pass
+
+
+class TestDriveScope(unittest.TestCase):
+    """drive.readonly is a second opt-in, for the council room's Drive links."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        self.token = base / "google_token.json"
+        secret = base / "google_client_secret.json"
+        secret.write_text(json.dumps({"installed": {"client_id": "cid.apps.example",
+                                                    "client_secret": "not-a-real-secret"}}),
+                          encoding="utf-8")
+        for p in (patch.object(ga, "TOKEN_PATH", self.token),
+                  patch.object(ga, "CLIENT_SECRET_PATH", secret)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _setup_scopes_requested(self, argv) -> tuple[list[str], str]:
+        """Run `setup` for real, minus the browser and the port, and read the
+        scopes off the consent URL it would have opened. --wait 0 gives up at
+        once, before any token request."""
+        opened = []
+        out = io.StringIO()
+        with patch("socketserver.TCPServer", _FakeServer), \
+                patch("webbrowser.open", side_effect=opened.append), \
+                redirect_stdout(out):
+            self.assertEqual(ga.main(["setup", "--wait", "0", *argv]), 1)
+        query = parse_qs(urlparse(opened[0]).query)
+        return query["scope"][0].split(" "), out.getvalue()
+
+    def test_scope_lists(self):
+        read = list(ga.READ_SCOPES)
+        self.assertEqual(ga.setup_scopes(), read)
+        self.assertEqual(ga.setup_scopes(with_drive=True), read + [ga.DRIVE_SCOPE])
+        self.assertEqual(ga.setup_scopes(with_compose=True, with_drive=True),
+                         read + [ga.COMPOSE_SCOPE, ga.DRIVE_SCOPE])
+        self.assertTrue(ga.DRIVE_SCOPE.endswith("/drive.readonly"))
+        self.assertNotIn(ga.DRIVE_SCOPE, ga.READ_SCOPES)
+
+    def test_setup_without_drive(self):
+        scopes, out = self._setup_scopes_requested([])
+        self.assertEqual(scopes, list(ga.READ_SCOPES))
+        self.assertNotIn("drive.readonly lets", out)
+
+    def test_setup_with_drive(self):
+        scopes, out = self._setup_scopes_requested(["--with-drive"])
+        self.assertEqual(scopes, list(ga.READ_SCOPES) + [ga.DRIVE_SCOPE])
+        self.assertIn("drive.readonly lets the council read", out)
+
+    def test_setup_with_drive_and_compose_keeps_both(self):
+        scopes, _ = self._setup_scopes_requested(["--with-drive", "--with-compose"])
+        self.assertEqual(scopes, list(ga.READ_SCOPES) + [ga.COMPOSE_SCOPE, ga.DRIVE_SCOPE])
+
+    def test_rerun_warns_before_dropping_an_opt_in(self):
+        self.token.write_text(json.dumps({"scope": f"{ga.COMPOSE_SCOPE} {ga.READ_SCOPES[0]}"}),
+                              encoding="utf-8")
+        _, out = self._setup_scopes_requested(["--with-drive"])
+        self.assertIn("includes gmail.compose", out)
+        self.assertIn("add --with-compose to keep it", out)
+
+    def test_has_scope_reads_the_token_file(self):
+        self.assertFalse(ga.has_scope(ga.DRIVE_SCOPE))  # no token file yet
+        self.token.write_text("{not json", encoding="utf-8")
+        self.assertFalse(ga.has_scope(ga.DRIVE_SCOPE))
+        self.token.write_text(json.dumps({"scopes": [ga.DRIVE_SCOPE]}), encoding="utf-8")
+        self.assertTrue(ga.has_scope(ga.DRIVE_SCOPE))
+        # Google's granted list wins over what setup asked for: the consent
+        # screen lets a scope be unticked.
+        self.token.write_text(json.dumps({"scopes": [ga.DRIVE_SCOPE],
+                                          "scope": " ".join(ga.READ_SCOPES)}), encoding="utf-8")
+        self.assertFalse(ga.has_scope(ga.DRIVE_SCOPE))
+        self.assertTrue(ga.has_scope(ga.READ_SCOPES[0]))
+
+    def test_has_scope_never_prints_the_token(self):
+        self.token.write_text(json.dumps({"access_token": "ya29.SECRETACCESSVALUE",
+                                          "refresh_token": "1//SECRETREFRESHVALUE",
+                                          "scope": ga.DRIVE_SCOPE}), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err), \
+                self.assertNoLogs(level="DEBUG"):
+            self.assertTrue(ga.has_scope(ga.DRIVE_SCOPE))
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = io.BytesIO(body)
+
+    def read(self, n=-1):
+        return self._body.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class TestApiGetBytes(unittest.TestCase):
+    def test_bearer_token_and_size_cap(self):
+        seen = []
+
+        def urlopen(req, timeout):
+            seen.append(req)
+            return _FakeResponse(b"x" * 10)
+
+        with patch.object(ga, "access_token", return_value="ya29.SECRETACCESSVALUE"), \
+                patch.object(ga.request, "urlopen", urlopen):
+            self.assertEqual(ga.api_get_bytes("https://example.test/f", {"alt": "media"},
+                                              max_bytes=10), b"x" * 10)
+            self.assertEqual(seen[0].get_header("Authorization"), "Bearer ya29.SECRETACCESSVALUE")
+            self.assertEqual(seen[0].full_url, "https://example.test/f?alt=media")
+            with self.assertRaises(ga.GoogleAuthError) as ctx:
+                ga.api_get_bytes("https://example.test/f", max_bytes=9)
+        self.assertNotIn("SECRET", str(ctx.exception))
 
 
 class TestNotConfigured(unittest.TestCase):

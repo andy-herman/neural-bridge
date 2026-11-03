@@ -113,7 +113,39 @@ and watch the log route it.
 - **Meeting notes.** The room log also becomes one note per day in the vault,
   kept current as the room talks, with a short summary added at night. See
   "Meeting notes" below.
+- **Shared files.** Send a file or paste a Google Drive link and all three
+  advisors can read it for three hours. See "Shared files" below.
 - **To stop the daemon:** `launchctl unload ~/Library/LaunchAgents/com.andyherman.neural-bridge.council-telegram.plist`
+
+## Shared files
+
+Code: `scripts/telegram_bot/council_files.py`.
+
+- **Uploads.** Send a PDF, Word (`.docx`), PowerPoint (`.pptx`), `.txt`, `.md`,
+  `.csv` or `.json` file, up to 20 MB (the most a Telegram bot can download).
+  PDFs are read with poppler's `pdftotext` (`brew install poppler`); a PDF
+  with no text layer (a scan) is refused with a short reply. With a caption,
+  the caption is your message and is answered as usual. Without one, the room
+  acknowledges the file and no advisor is called.
+- **Drive links.** A message (or caption) with Google Docs, Sheets, Slides or
+  Drive file links has up to three of them read before the advisors answer,
+  with one status line per link. A Sheet is read as its first sheet only.
+  Without the Drive sign-in only "anyone with the link" files can be read; the
+  one-time step is in `scripts/luna/GOOGLE_SETUP.md`, the Drive section.
+- **What the advisors see.** For three hours after it was shared, every
+  advisor turn (normal answers, every `/discuss` turn, Yor's summary and
+  Luna's next steps) starts with the documents, newest first, framed as data:
+  at most three documents, each cut at 30,000 characters, the whole block at
+  60,000. The router, the transcript, Honcho and the room log see only your
+  message.
+- **Saved text.** Each document's full text is saved to `$COUNCIL_FILES_DIR`,
+  default `~/Library/Application Support/neural-bridge/council-files/`, as
+  `YYYY-MM-DD_HHMMSS_<name>.txt` (folder `0700`, files `0600`). The original
+  file is never kept. Nothing deletes these; clear the folder by hand when you
+  like.
+- **`/docs`** lists the documents in the room (name, age, size, saved file);
+  `/docs clear` takes them out of the room (the saved text stays). The room's
+  list lives in memory, so a restart of the bridge also empties it.
 
 ## Room log
 
@@ -133,7 +165,7 @@ One JSON object per line, one line per message actually posted in the room:
 | `ts` | Unix time (float seconds) when the line was written |
 | `chat_id` | Telegram chat id of the room (an integer; negative for a group) |
 | `speaker` | `Andy`, `Yor`, `Loid` or `Luna` |
-| `text` | The message as posted: Andy's text, the transcript of a voice note, or an advisor's whole reply (not split into Telegram parts) |
+| `text` | The message as posted: Andy's text, the transcript of a voice note, or an advisor's whole reply (not split into Telegram parts). A file Andy sends is a line such as `[shared a file: plan.pdf, 12 pages]`, with its caption on the next line when it had one; never the file's text |
 | `mode` | `message` for normal turns, `discuss` for a `/discuss` question, its turns, Yor's summary and Luna's next steps |
 | `discussion` | The `/discuss` this line belongs to: one id per discussion (its start time as a string), shared by every line of it. `null` for a normal exchange |
 | `part` | What the line was: `message` (a normal exchange), `question` (Andy's `/discuss` question), `turn` (a Yor or Loid turn in the back-and-forth), `summary` (Yor's closing summary), `next_steps` (Luna's closing post) |
@@ -145,7 +177,8 @@ them simply lack the two keys. Readers that only know the first five fields
 
 What is not logged: `[PASS]` and `[DONE]` markers (and the turns they stand
 for), error notices, the "heard:" echo of a voice note, status lines such as
-"Discussion ended", and commands like `/stop`. No tokens or credentials are
+"Discussion ended" or "Read ... from Drive", the text of shared documents, and
+commands like `/stop` and `/docs`. No tokens or credentials are
 ever written. A write that fails is noted in `council-telegram.log` and the
 turn carries on.
 

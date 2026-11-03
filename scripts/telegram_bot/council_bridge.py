@@ -34,6 +34,13 @@ whole room, including turns she did not speak in. After each exchange and each
 /discuss the bridge rebuilds that day's meeting note in the vault from the log
 (council_notes.py). Formats in COUNCIL_SETUP.md.
 
+Shared files (council_files.py): Andy can upload a PDF, Word, PowerPoint or
+text file, or paste a Google Drive link, and for three hours every advisor
+turn (normal answers and each /discuss turn) carries the document's text,
+ahead of his message and framed as data. The router, the transcript, Honcho
+and the room log see only his plain message; the room log notes that a file
+was shared, never its text. /docs lists what is in the room.
+
 Telegram fact that shapes this design: a bot never receives another bot's
 messages, so separate bots could not see each other. One orchestrator bot that
 invokes every advisor and owns the shared transcript is how they actually
@@ -102,7 +109,7 @@ from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude, wrap_u
 from scripts.discord_bot.keychain import get_token
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.env_file import load_default_env  # noqa: E402
-from scripts.telegram_bot import council_notes  # noqa: E402
+from scripts.telegram_bot import council_files, council_notes  # noqa: E402
 
 # ----------------------------------------------------------------------
 # Config
@@ -638,6 +645,14 @@ async def _invoke_yor(
 _INVOKERS = {"loid": _invoke_loid, "yor": _invoke_yor, "luna": _invoke_luna}
 
 
+def _with_docs(chat_id: int, text: str) -> str:
+    """Andy's message as an advisor receives it: the room's shared documents
+    first, when there are any. Only the invokers get this; routing, the
+    transcript, Honcho and the room log keep the plain message."""
+    block = council_files.prompt_block(chat_id)
+    return f"{block}\n\n{text}" if block else text
+
+
 @contextlib.asynccontextmanager
 async def _typing(bot, chat_id: int):
     """Show "typing..." in the chat for as long as the block runs.
@@ -788,7 +803,8 @@ async def _discussion_turn(
     label = ADVISORS[speaker]["label"]
     started = time.monotonic()
     async with _typing(bot, chat_id):
-        ok, resp = await _INVOKERS[speaker](question, _chat_history_for(chat_id), directive)
+        ok, resp = await _INVOKERS[speaker](_with_docs(chat_id, question),
+                                            _chat_history_for(chat_id), directive)
     dur = time.monotonic() - started
 
     if not ok:
@@ -906,7 +922,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"/discuss [rounds] <question>: Yor and Loid talk it through with each other "
         f"(default {DISCUSS_DEFAULT_ROUNDS} rounds, max {DISCUSS_MAX_ROUNDS}), then Yor sums up "
         "and Luna lists the next steps.\n"
-        "/stop: end a discussion after the current turn. Any new message also ends it."
+        "/stop: end a discussion after the current turn. Any new message also ends it.\n\n"
+        f"Send a file ({council_files.SUPPORTED_TYPES}, up to "
+        f"{council_files.MAX_FILE_BYTES // 1_048_576} MB) or paste a Google Drive link, and "
+        f"all three can read it for {council_files.ACTIVE_SECONDS // 3600} hours. Add a caption "
+        "to ask about it straight away.\n"
+        "/docs: the documents in the room. /docs clear takes them out."
     )
 
 
@@ -946,6 +967,25 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     disc.request_stop("stopped by Andy")
     log(f"DISCUSS stop requested chat={message.chat_id}")
     await message.reply_text("Stopping after the current turn.")
+
+
+async def cmd_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/docs` lists the room's documents; `/docs clear` takes them out."""
+    if not _is_authorized(update):
+        return
+    message = update.message
+    if message is None:
+        return
+    args = (message.text or "").split()[1:]
+    if args and args[0].lower() == "clear":
+        n = council_files.clear(message.chat_id)
+        log(f"DOCS cleared chat={message.chat_id} count={n}")
+        await message.reply_text(
+            f"Took {n} document{'' if n == 1 else 's'} out of the room. The saved text stays on "
+            "the Mac." if n else "No documents were in the room."
+        )
+        return
+    await message.reply_text(council_files.listing(message.chat_id))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -993,9 +1033,121 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _process_message(message, context, text=text, kind="voice")
 
 
+async def _download_document(bot, file_id: str) -> bytes:
+    """The file's bytes, by way of a private temp file that is always removed."""
+    tg_file = await bot.get_file(file_id)
+    fd, tmp_path = tempfile.mkstemp(prefix="council-upload-")
+    os.close(fd)
+    try:
+        await tg_file.download_to_drive(tmp_path)
+        return Path(tmp_path).read_bytes()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A file Andy sent to the room. It is read, its text saved and put in the
+    room for the advisors; the original is not kept.
+
+    With a caption, the caption is his message and is answered as usual, the
+    document already in front of the advisors. Without one, the room just
+    acknowledges the file and no advisor is called: a file alone is not a
+    question."""
+    if not _is_authorized(update):
+        return
+    message = update.message
+    if message is None or message.document is None:
+        return
+    chat_id = message.chat_id
+    doc = message.document
+    name = council_files.clean_name(doc.file_name or "") or "document"
+    size = doc.file_size or 0
+    # Logged by type and size only: a file name can say more than Andy meant
+    # to put in a log.
+    log(f"DOCS upload chat={chat_id} ext={Path(name).suffix.lower() or '-'} bytes={size}")
+    if size > council_files.MAX_FILE_BYTES:
+        limit = council_files.MAX_FILE_BYTES // 1_048_576
+        await message.reply_text(
+            f"{name} is {size / 1_048_576:.0f} MB, and a Telegram bot can only download files up to "
+            f"{limit} MB. Paste a Google Drive link to it instead, or send a smaller file."
+        )
+        return
+    if not council_files.is_supported(name):
+        await message.reply_text(f"Sorry, {council_files.unsupported_message(name)}")
+        return
+    try:
+        async with _typing(context.bot, chat_id):
+            data = await _download_document(context.bot, doc.file_id)
+            text, pages = await asyncio.to_thread(council_files.extract_text, data, name)
+    except council_files.FileReadError as exc:
+        log(f"DOCS read failed chat={chat_id}: {exc}")
+        await message.reply_text(_sentence(f"I could not read {name}: {exc}"))
+        return
+    except Exception as exc:
+        log(f"DOCS download or read failed chat={chat_id}: {exc!r}")
+        await message.reply_text(f"I could not read {name}. The details are in the bridge log.")
+        return
+
+    shared = council_files.share(chat_id, name=name, kind=council_files.kind_for(name),
+                                 source="upload", text=text, pages=pages)
+    log(f"DOCS shared chat={chat_id} source=upload kind={shared.kind} chars={shared.chars} "
+        f"pages={shared.pages} saved={shared.path is not None}")
+    line = council_files.share_line(shared)
+    caption = (message.caption or "").strip()
+    if caption:
+        await _process_message(message, context, text=caption, kind="document", shared=line)
+        return
+
+    started = time.time()
+    _push_history(chat_id, "Andy", line)
+    _log_room(chat_id, "Andy", line, "message")
+    await message.reply_text(council_files.ack(shared))
+    await _render_notes(started)
+
+
+async def _share_drive_links(message: Message, context: ContextTypes.DEFAULT_TYPE,
+                             text: str) -> None:
+    """Read each Drive link in Andy's message into the room, with one status
+    line per link, before the advisors answer. A link that cannot be read
+    costs only its status line: the message is still answered."""
+    links = council_files.drive_links(text)
+    if not links:
+        return
+    chat_id = message.chat_id
+    limit = council_files.MAX_LINKS_PER_MESSAGE
+    for link_kind, file_id, _url in links[:limit]:
+        try:
+            async with _typing(context.bot, chat_id):
+                name, doc_text, pages = await asyncio.to_thread(
+                    council_files.fetch_drive, link_kind, file_id)
+        except council_files.FileReadError as exc:
+            log(f"DOCS drive failed chat={chat_id} kind={link_kind}: {exc}")
+            await message.reply_text(_sentence(f"I could not read that Drive link: {exc}"))
+            continue
+        except Exception as exc:
+            log(f"DOCS drive failed chat={chat_id} kind={link_kind}: {exc!r}")
+            await message.reply_text("I could not read that Drive link. The details are in the "
+                                     "bridge log.")
+            continue
+        shared = council_files.share(chat_id, name=name,
+                                     kind=council_files.drive_kind(link_kind, name),
+                                     source="drive", text=doc_text, pages=pages)
+        log(f"DOCS shared chat={chat_id} source=drive kind={shared.kind} chars={shared.chars} "
+            f"pages={shared.pages} saved={shared.path is not None}")
+        note = " (first sheet only)" if link_kind == "spreadsheet" else ""
+        await message.reply_text(f"Read {name} from Drive ({shared.chars:,} chars){note}.")
+    if len(links) > limit:
+        await message.reply_text(f"I read the first {limit} Drive links; send the rest in "
+                                 "another message.")
+
+
 async def _process_message(
-    message: Message, context: ContextTypes.DEFAULT_TYPE, *, text: str, kind: str
+    message: Message, context: ContextTypes.DEFAULT_TYPE, *, text: str, kind: str,
+    shared: str | None = None,
 ) -> None:
+    """Handle one message from Andy. `shared` is the share line of a file he
+    sent with `text` as its caption; it leads his line in the room."""
     chat_id = message.chat_id
     log(f"MSG kind={kind} chat={chat_id} chars={len(text)}")
 
@@ -1012,9 +1164,11 @@ async def _process_message(
             await asyncio.wait([disc.task])
 
     started = time.time()
-    _push_history(chat_id, "Andy", text)
-    _log_room(chat_id, "Andy", text, "message")
+    room_text = f"{shared}\n{text}" if shared else text
+    _push_history(chat_id, "Andy", room_text)
+    _log_room(chat_id, "Andy", room_text, "message")
     try:
+        await _share_drive_links(message, context, text)
         await _answer_message(message, context, text)
     finally:
         # Also when no one answered, or a reply failed: Andy's line is in the
@@ -1033,13 +1187,15 @@ async def _answer_message(message: Message, context: ContextTypes.DEFAULT_TYPE, 
 
     first_response_for_honcho: tuple[str, str] | None = None
     named = set(_named_advisors(text))
+    advisor_text = _with_docs(chat_id, text)
 
     for agent_id in order:
         # History includes any advisor who already spoke THIS turn, so the next
         # one can build on it.
         history = _chat_history_for(chat_id)
         async with _typing(context.bot, chat_id):
-            ok, resp = await _INVOKERS[agent_id](text, history, addressed=agent_id in named)
+            ok, resp = await _INVOKERS[agent_id](advisor_text, history,
+                                                 addressed=agent_id in named)
         label = ADVISORS[agent_id]["label"]
         if not ok:
             log(f"INVOKE {agent_id} failed: {resp[:120]}")
@@ -1087,6 +1243,12 @@ def _strip_structured_blocks(text: str) -> str:
         r"```(?:actions|attachments|handoff_to_squad)\s*\n.*?\n```\s*", re.DOTALL
     )
     return pattern.sub("", text).strip()
+
+
+def _sentence(text: str) -> str:
+    """A status line ends with one full stop, whatever the error text ended with."""
+    text = text.strip()
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _chunk_for_telegram(text: str) -> list[str]:
@@ -1142,8 +1304,11 @@ def main() -> None:
         app.add_handler(CommandHandler(["start", "help"], cmd_start))
         app.add_handler(CommandHandler("discuss", cmd_discuss))
         app.add_handler(CommandHandler("stop", cmd_stop))
+        app.add_handler(CommandHandler("docs", cmd_docs))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
         app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        # A GIF arrives as a document too; it is a reaction, not something to read.
+        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.ANIMATION, handle_document))
         app.run_polling(drop_pending_updates=True)
 
 
