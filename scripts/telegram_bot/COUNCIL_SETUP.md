@@ -71,7 +71,12 @@ and watch the log route it.
 - "Help me think through the opening of a LinkedIn piece." Yor should answer; Loid should stay quiet.
 - "I have a promo conversation with my manager next week." Loid should answer.
 - "I want to write about what my last interview taught me." Both may answer, Loid on the career angle, Yor on the writing, each building on the other.
-- `@loid what do you think?` forces Loid; `@yor` forces Yor.
+- `@loid what do you think?` forces Loid; `@yor` forces Yor. Telegram's @-tag of
+  an advisor bot's username (e.g. `@Yor_agent_bot`) works the same way.
+- `/discuss 4 <question>` has Yor and Loid answer each other for up to 4 rounds
+  (default 3, max 6) without you prompting each turn; Yor closes with three
+  bullets and a status line says why it ended. `/stop`, or any new message,
+  ends it after the turn in flight; a new message is then answered as usual.
 
 ## Notes and current limits (v1)
 
