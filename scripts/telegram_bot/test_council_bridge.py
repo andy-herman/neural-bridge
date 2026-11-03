@@ -1,11 +1,12 @@
-"""Tests for the council bridge: who gets addressed, /discuss, Luna's lane, and
-the room log.
+"""Tests for the council bridge: who gets addressed, /discuss, Luna's lane, the
+room log and shared files.
 
 No network and no model calls: the advisor invokers, the Telegram message and
 bot, Honcho, and the router's claude call are all fakes. As a backstop, the
-module swaps the bridge's run_agent_turn for one that fails the test, and
-points the room log and the meeting notes at temporary paths, so a test that
-forgets a fake can neither reach a model nor write the real log or vault.
+module swaps the bridge's run_agent_turn and Drive fetch for ones that fail
+the test, and points the room log, the meeting notes and the saved document
+text at temporary paths, so a test that forgets a fake can neither reach a
+model or Google nor write the real log, vault or files folder.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.telegram_bot import council_bridge as cb  # noqa: E402
+from scripts.telegram_bot import council_files  # noqa: E402
 from scripts.telegram_bot import council_notes  # noqa: E402
 
 ANDY = 1001
@@ -40,9 +42,12 @@ def setUpModule():
     _module_tmp = tempfile.TemporaryDirectory()
     _module_patches.extend([
         patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(Path(_module_tmp.name) / "room.jsonl"),
-                                council_notes.NOTES_DIR_ENV: str(Path(_module_tmp.name) / "notes")}),
+                                council_notes.NOTES_DIR_ENV: str(Path(_module_tmp.name) / "notes"),
+                                council_files.FILES_DIR_ENV: str(Path(_module_tmp.name) / "files")}),
         patch.object(cb, "run_agent_turn",
                      AsyncMock(side_effect=AssertionError("real agent turn in a test"))),
+        patch.object(council_files, "fetch_drive",
+                     MagicMock(side_effect=AssertionError("real Drive fetch in a test"))),
     ])
     for p in _module_patches:
         p.start()
@@ -75,9 +80,34 @@ class FakeMessage:
 class FakeBot:
     def __init__(self):
         self.actions: list[tuple[int, str]] = []
+        self.files: dict[str, bytes] = {}
+        self.downloaded: list[str] = []
 
     async def send_chat_action(self, chat_id: int, action) -> None:
         self.actions.append((chat_id, action))
+
+    async def get_file(self, file_id: str):
+        return FakeTgFile(self.files[file_id], self.downloaded)
+
+
+class FakeTgFile:
+    def __init__(self, data: bytes, downloaded: list[str]):
+        self.data = data
+        self.downloaded = downloaded
+
+    async def download_to_drive(self, path) -> None:
+        Path(path).write_bytes(self.data)
+        self.downloaded.append(str(path))
+
+
+class FakeDocMessage(FakeMessage):
+    """A file sent to the room, with or without a caption."""
+
+    def __init__(self, sent: list[str], *, name: str, size: int, caption: str | None = None,
+                 chat_id: int = CHAT):
+        super().__init__(None, sent, chat_id)
+        self.caption = caption
+        self.document = SimpleNamespace(file_id="FILE-1", file_name=name, file_size=size)
 
 
 class Script:
@@ -509,6 +539,7 @@ class DiscussBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         cb._chat_history.clear()
         cb._discussions.clear()
+        council_files._rooms.clear()
         self.sent: list[str] = []
         self.calls: list[dict] = []
         self.bot = FakeBot()
@@ -523,8 +554,10 @@ class DiscussBase(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.room_log = Path(self._tmp.name) / "room.jsonl"
         self.notes_dir = Path(self._tmp.name) / "notes"
+        self.files_dir = Path(self._tmp.name) / "council-files"
         self.room_env = patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(self.room_log),
-                                                council_notes.NOTES_DIR_ENV: str(self.notes_dir)})
+                                                council_notes.NOTES_DIR_ENV: str(self.notes_dir),
+                                                council_files.FILES_DIR_ENV: str(self.files_dir)})
         self.room_env.start()
 
     async def asyncTearDown(self):
@@ -533,6 +566,7 @@ class DiscussBase(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
         cb._chat_history.clear()
         cb._discussions.clear()
+        council_files._rooms.clear()
 
     def script(self, yor=(), loid=(), luna=(), yor_gates=None, loid_delay=0.0):
         """Luna passes unless told otherwise, so a test about Yor and Loid
@@ -1005,6 +1039,244 @@ class TestTyping(DiscussBase):
         settled = len(self.bot.actions)
         await asyncio.sleep(0.05)
         self.assertEqual(len(self.bot.actions), settled)
+
+
+# ---------------------------------------------------------------- shared files
+
+DOC_LINK = "https://docs.google.com/document/d/1DocAAAAAAAAAAAA/edit?usp=sharing"
+
+
+class SharedFilesBase(DiscussBase):
+    def upload(self, name: str, data: bytes, caption: str | None = None, size: int | None = None):
+        self.bot.files["FILE-1"] = data
+        message = FakeDocMessage(self.sent, name=name, caption=caption,
+                                 size=len(data) if size is None else size)
+        return cb.handle_document(_update(message), self.ctx)
+
+    def share(self, name="memo.md", text="MEMO BODY", kind="Markdown"):
+        return council_files.share(CHAT, name=name, kind=kind, source="upload", text=text)
+
+    def assert_has_block(self, text: str, body: str, message: str):
+        self.assertTrue(text.startswith("[SHARED DOCUMENTS]"), text[:80])
+        self.assertIn(f"<shared-document>\n{body}\n</shared-document>", text)
+        self.assertTrue(text.endswith(f"Andy's message follows.\n\n{message}"), text[-120:])
+
+
+class TestDocumentUpload(SharedFilesBase):
+    async def test_a_captioned_file_reaches_the_advisors(self):
+        self.script(loid=[(True, "Ship it in Q3, as it says.")])
+        caption = "What do you make of section 3?"
+        route = AsyncMock(return_value=["loid"])
+        with patch.object(cb, "_route", route):
+            await self.upload("plan.txt", b"Section 3: ship in Q3.", caption=caption)
+
+        # The advisor gets the document, then Andy's caption.
+        self.assertEqual(self.agents(), ["loid"])
+        self.assert_has_block(self.calls[0]["text"], "Section 3: ship in Q3.", caption)
+        # The router, the transcript, Honcho and the room log get the plain caption.
+        self.assertEqual(route.call_args.args[0], caption)
+        share = "[shared a file: plan.txt, 22 chars]"
+        self.assertEqual(cb._chat_history[CHAT][0], {"author": "Andy", "content": f"{share}\n{caption}"})
+        self.assertFalse(any("<shared-document>" in h["content"] for h in cb._chat_history[CHAT]))
+        self.assertEqual(self.honcho_mock.call_args.kwargs["user_message"], caption)
+        rows = self.room()
+        self.assertEqual([(r["speaker"], r["text"]) for r in rows],
+                         [("Andy", f"{share}\n{caption}"), ("Loid", "Ship it in Q3, as it says.")])
+        self.assertFalse(any("ship in Q3." in r["text"] for r in rows if r["speaker"] == "Andy"))
+        self.assertEqual(self.sent, [f"{cb.ADVISORS['loid']['prefix']}\n\nShip it in Q3, as it says."])
+        # The text is saved, the download is gone, the original is not kept.
+        (saved,) = self.files_dir.iterdir()
+        self.assertEqual(saved.read_text(encoding="utf-8"), "Section 3: ship in Q3.\n")
+        self.assertFalse(Path(self.bot.downloaded[0]).exists())
+        # And the day's meeting note has the share line, not the text.
+        note = (self.notes_dir / f"{council_notes.local_date(datetime.now().timestamp())}.md")
+        self.assertIn("[shared a file: plan.txt, 22 chars]", note.read_text(encoding="utf-8"))
+
+    async def test_a_file_without_a_caption_is_acknowledged_without_an_advisor(self):
+        self.script()
+        with patch.object(cb, "_route", AsyncMock(side_effect=AssertionError("routed"))):
+            await self.upload("notes.md", b"# Notes\nsome notes")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.sent), 1)
+        for part in ("notes.md", "18 chars", "3 hours", "@loid"):
+            self.assertIn(part, self.sent[0])
+        self.assertNotIn("\u2014", self.sent[0])
+        self.assertEqual([(r["speaker"], r["text"]) for r in self.room()],
+                         [("Andy", "[shared a file: notes.md, 18 chars]")])
+        self.assertEqual([d.name for d in council_files.active(CHAT)], ["notes.md"])
+        self.honcho_mock.assert_not_called()
+        self.assertTrue(any(self.notes_dir.iterdir()))
+
+    async def test_the_next_message_sees_the_file(self):
+        self.script(yor=[(True, "Y1")])
+        await self.upload("notes.md", b"the notes")
+        with patch.object(cb, "_route", AsyncMock(return_value=["yor"])):
+            await cb.handle_text(_update(FakeMessage("thoughts?", self.sent)), self.ctx)
+        self.assert_has_block(self.calls[0]["text"], "the notes", "thoughts?")
+
+    async def test_too_large_is_refused_politely(self):
+        self.script()
+        await self.upload("huge.pdf", b"%PDF", size=25 * 1024 * 1024)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("20 MB", self.sent[0])
+        self.assertIn("Drive link", self.sent[0])
+        self.assertEqual((self.bot.downloaded, self.calls, self.room()), ([], [], []))
+
+    async def test_unsupported_type(self):
+        self.script()
+        await self.upload("photos.zip", b"PK")
+        self.assertIn("cannot read .zip files", self.sent[0])
+        self.assertEqual((self.bot.downloaded, council_files.active(CHAT)), ([], []))
+
+    async def test_a_file_that_cannot_be_read_gets_a_short_reply(self):
+        self.script()
+        with patch.object(cb, "_route", AsyncMock(side_effect=AssertionError("routed"))):
+            await self.upload("broken.docx", b"not really a docx", caption="look at this")
+        self.assertEqual(self.sent, ["I could not read broken.docx: the Word file looks damaged "
+                                     "(BadZipFile)."])
+        self.assertEqual((self.calls, self.room(), council_files.active(CHAT)), ([], [], []))
+        self.assertFalse(Path(self.bot.downloaded[0]).exists())
+
+    async def test_unauthorized_file_is_ignored(self):
+        self.script()
+        self.bot.files["FILE-1"] = b"x"
+        message = FakeDocMessage(self.sent, name="a.txt", size=1, caption="hi")
+        await cb.handle_document(_update(message, user_id=999), self.ctx)
+        self.assertEqual((self.sent, self.bot.downloaded, self.calls), ([], [], []))
+
+
+class TestDriveLinksInTheRoom(SharedFilesBase):
+    async def test_a_drive_link_is_read_and_the_advisors_get_it(self):
+        self.script(yor=[(True, "Y1")])
+        fetch = MagicMock(return_value=("Q3 plan", "Plan body text", None))
+        route = AsyncMock(return_value=["yor"])
+        text = f"Thoughts on this? {DOC_LINK}"
+        with patch.object(council_files, "fetch_drive", fetch), patch.object(cb, "_route", route):
+            await cb.handle_text(_update(FakeMessage(text, self.sent)), self.ctx)
+        fetch.assert_called_once_with("document", "1DocAAAAAAAAAAAA")
+        self.assertEqual(self.sent, ["Read Q3 plan from Drive (14 chars).",
+                                     f"{cb.ADVISORS['yor']['prefix']}\n\nY1"])
+        self.assert_has_block(self.calls[0]["text"], "Plan body text", text)
+        self.assertIn("Document 1: Q3 plan (Google Doc, 14 chars", self.calls[0]["text"])
+        self.assertEqual(route.call_args.args[0], text)
+        self.assertEqual([r["text"] for r in self.room() if r["speaker"] == "Andy"], [text])
+        doc = council_files.active(CHAT)[0]
+        self.assertEqual((doc.source, doc.kind), ("drive", "Google Doc"))
+
+    async def test_a_private_link_gets_a_status_line_and_the_message_is_answered(self):
+        self.script(yor=[(True, "Y1")])
+        fetch = MagicMock(side_effect=council_files.DriveAccessError(council_files.PRIVATE_HELP))
+        text = f"see {DOC_LINK}"
+        with patch.object(council_files, "fetch_drive", fetch), \
+                patch.object(cb, "_route", AsyncMock(return_value=["yor"])):
+            await cb.handle_text(_update(FakeMessage(text, self.sent)), self.ctx)
+        self.assertEqual(len(self.sent), 2)
+        self.assertTrue(self.sent[0].startswith("I could not read that Drive link: it is private"))
+        self.assertIn("anyone with the link", self.sent[0])
+        self.assertFalse(self.sent[0].endswith(".."))
+        self.assertEqual(self.sent[1], f"{cb.ADVISORS['yor']['prefix']}\n\nY1")
+        self.assertEqual(self.calls[0]["text"], text)  # nothing shared, so no block
+
+    async def test_at_most_three_links_a_message(self):
+        self.script(yor=[(True, "Y1")])
+        links = " ".join(f"https://drive.google.com/file/d/1File{i}AAAAAAAAAA/view" for i in range(4))
+        fetch = MagicMock(side_effect=lambda kind, fid: (f"f{fid[5]}.txt", f"body {fid[5]}", None))
+        with patch.object(council_files, "fetch_drive", fetch), \
+                patch.object(cb, "_route", AsyncMock(return_value=["yor"])):
+            await cb.handle_text(_update(FakeMessage(links, self.sent)), self.ctx)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(self.sent[3], "I read the first 3 Drive links; send the rest in another "
+                                       "message.")
+        self.assertEqual([d.name for d in council_files.active(CHAT)], ["f2.txt", "f1.txt", "f0.txt"])
+
+    async def test_a_drive_link_in_a_caption_is_read_too(self):
+        self.script(loid=[(True, "L1")])
+        fetch = MagicMock(return_value=("Budget", "a,b", None))
+        with patch.object(council_files, "fetch_drive", fetch), \
+                patch.object(cb, "_route", AsyncMock(return_value=["loid"])):
+            await self.upload("memo.txt", b"memo text", caption=f"and {DOC_LINK}")
+        self.assertIn("memo text", self.calls[0]["text"])
+        self.assertIn("a,b", self.calls[0]["text"])
+
+
+class TestAdvisorsSeeDocuments(SharedFilesBase):
+    async def test_router_and_names_get_the_plain_text(self):
+        # The document names Yor and Luna; only Andy's own words choose who speaks.
+        self.share(text="Ask Yor and Luna about this, then loid.")
+        self.script(loid=[(True, "L1")])
+        router = AsyncMock(side_effect=AssertionError("router called"))
+        with patch.object(cb, "call_claude", router):
+            await cb.handle_text(_update(FakeMessage("@loid thoughts?", self.sent)), self.ctx)
+        self.assertEqual(self.agents(), ["loid"])
+        self.assertTrue(self.calls[0]["addressed"])
+        self.assert_has_block(self.calls[0]["text"], "Ask Yor and Luna about this, then loid.",
+                              "@loid thoughts?")
+
+    async def test_the_llm_router_never_sees_the_document(self):
+        self.share(text="CONFIDENTIAL MEMO TEXT")
+        self.script(loid=[(True, "L1")])
+        router = AsyncMock(return_value=(True, '{"order": ["loid"]}', ""))
+        with patch.object(cb, "call_claude", router):
+            await cb.handle_text(_update(FakeMessage("what now?", self.sent)), self.ctx)
+        prompt = router.call_args.args[0]
+        self.assertTrue(prompt.endswith("ANDY'S LATEST MESSAGE:\nwhat now?"))
+        self.assertNotIn("CONFIDENTIAL MEMO TEXT", prompt)
+        self.assertIn("CONFIDENTIAL MEMO TEXT", self.calls[0]["text"])
+
+    async def test_every_discuss_turn_gets_the_block(self):
+        self.share()
+        steps = "Next steps\n- Andy: reply by Friday"
+        self.script(yor=[(True, "Y1"), (True, "SUM")], loid=[(True, "L1")], luna=[(True, steps)])
+        disc = await self.discuss("/discuss 1 Should I sign the memo?")
+        await disc.task
+        self.assertEqual(self.agents(), ["yor", "loid", "yor", "luna"])
+        self.assertEqual([c["directive"] for c in self.calls][2:],
+                         [cb._CLOSING_DIRECTIVE, cb._NEXT_STEPS_DIRECTIVE])
+        for call in self.calls:
+            with self.subTest(agent=call["agent"], directive=(call["directive"] or "")[:30]):
+                self.assert_has_block(call["text"], "MEMO BODY", "Should I sign the memo?")
+        # The transcript, the room log and Honcho keep the plain question.
+        self.assertEqual(cb._chat_history[CHAT][0], {"author": "Andy", "content": "Should I sign the memo?"})
+        self.assertFalse(any("MEMO BODY" in r["text"] for r in self.room()))
+        self.assertEqual(self.honcho_mock.call_args.kwargs["user_message"], "Should I sign the memo?")
+
+    async def test_no_documents_no_block(self):
+        self.script(loid=[(True, "L1")])
+        with patch.object(cb, "_route", AsyncMock(return_value=["loid"])):
+            await cb.handle_text(_update(FakeMessage("plain", self.sent)), self.ctx)
+        self.assertEqual(self.calls[0]["text"], "plain")
+
+
+class TestDocsCommand(SharedFilesBase):
+    async def test_list_and_clear(self):
+        self.script()
+        doc = self.share("plan.pdf", "x" * 1200, kind="PDF")
+        await cb.cmd_docs(_update(FakeMessage("/docs", self.sent)), self.ctx)
+        self.assertIn("1. plan.pdf: PDF, 1,200 chars, shared just now", self.sent[-1])
+        self.assertIn(str(doc.path), self.sent[-1])
+
+        await cb.cmd_docs(_update(FakeMessage("/docs clear", self.sent)), self.ctx)
+        self.assertEqual(self.sent[-1], "Took 1 document out of the room. The saved text stays on "
+                                        "the Mac.")
+        self.assertEqual(council_files.active(CHAT), [])
+        self.assertTrue(doc.path.exists())
+
+        await cb.cmd_docs(_update(FakeMessage("/docs", self.sent)), self.ctx)
+        self.assertIn("No documents in the room", self.sent[-1])
+        await cb.cmd_docs(_update(FakeMessage("/docs@council_bot clear", self.sent)), self.ctx)
+        self.assertEqual(self.sent[-1], "No documents were in the room.")
+
+    async def test_unauthorized_is_ignored(self):
+        self.share()
+        await cb.cmd_docs(_update(FakeMessage("/docs clear", self.sent), user_id=999), self.ctx)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(council_files.active(CHAT)), 1)
+
+    async def test_help_mentions_files_and_docs(self):
+        await cb.cmd_start(_update(FakeMessage("/help", self.sent)), self.ctx)
+        for part in ("/docs", "/docs clear", "Google Drive link", "PDF", "20 MB", "3 hours"):
+            self.assertIn(part, self.sent[0])
+        self.assertNotIn("\u2014", self.sent[0])
 
 
 if __name__ == "__main__":

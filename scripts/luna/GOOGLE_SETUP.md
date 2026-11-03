@@ -129,17 +129,48 @@ Verified end to end on 2026-08-15 before Google access existed: asked for the
 day's calendar, she ran the CLI, quoted `CALENDAR_UNAVAILABLE` verbatim, pointed
 at this document, and did not retry.
 
+## Drive (optional, for the council)
+
+The council room (`scripts/telegram_bot/council_files.py`) reads Google Drive
+links you paste there. Without this step it can only open files shared as
+"anyone with the link", through Google's public export links. With it, the
+council can open any file your account can open, by way of the Drive API.
+
+1. Enable the Google Drive API in the same project (`luna-assistant`):
+   <https://console.cloud.google.com/apis/library/drive.googleapis.com>
+2. Re-run setup with `--with-drive`. A re-run replaces the whole grant, so add
+   `--with-compose` too if you granted compose before (setup warns you if the
+   current token has an opt-in this run would drop):
+
+   ```bash
+   cd ~/Development/neural-bridge
+   .venv/bin/python -m scripts.luna.google_auth setup --with-drive
+   ```
+
+3. Check it took. `status` should say `drive.readonly: granted`:
+
+   ```bash
+   .venv/bin/python -m scripts.luna.google_auth status
+   ```
+
+`drive.readonly` is read-only: the council can read a file, and cannot
+change, share, move or delete anything in your Drive. Only the council's file
+reader uses it; Luna's calendar and inbox CLIs do not. On the consent screen
+you can untick it, and the council then falls back to public links.
+
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
+| Council says `your Google account could not open it (API 403: Google Drive API has not been used...)` | the Drive API is not enabled in the project; see the Drive section, step 1 |
+| Council says a Drive link `is private` though you ran `--with-drive` | the grant did not include Drive (unticked at consent); `status` shows it, re-run step 2 |
 | `not configured: no client secret` | step 2 not done |
 | `not authorized: ... no token` | step 3 not done |
 | `token file has no refresh_token` | revoke at <https://myaccount.google.com/permissions>, redo step 3 |
 | `API 403: insufficient authentication scopes` | scopes changed since authorizing; redo step 3 |
 | `token endpoint returned 400: invalid_grant` | refresh token revoked or expired; redo step 3 |
 | `Error 403: org_internal` at consent | audience is set to Internal; switch to External on the Audience page |
-| `cannot listen on http://localhost:8765` | a previous setup run is still holding the port: `pkill -f scripts.luna.google_auth` |
+| `cannot listen on http://localhost:8766` | something holds the port: `lsof -nP -iTCP:8766`. An earlier setup run: `pkill -f scripts.luna.google_auth`; anything else: rerun with `NB_GOOGLE_REDIRECT_PORT=<free port>` |
 | Luna worked for a week then stopped | publishing status slipped back to Testing; set it to In production |
 
 ## Rotating or revoking
