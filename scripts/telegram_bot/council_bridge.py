@@ -456,7 +456,7 @@ LOID_CHANNEL_KIND = (
 
 
 async def _invoke_loid(
-    text: str, history: list[dict], directive: str | None = None
+    text: str, history: list[dict], directive: str | None = None, addressed: bool = False
 ) -> tuple[bool, str]:
     """Loid via `claude -p`, his charter injected by mention. Stateless per
     turn (fresh session id); the shared transcript is his context."""
@@ -471,7 +471,8 @@ async def _invoke_loid(
             channel_kind=LOID_CHANNEL_KIND,
             history=history,
             conversation_log_path="",
-            prompt_prefix=_loid_discussion_prefix(directive, history) if directive else "",
+            prompt_prefix=(_loid_discussion_prefix(directive, history) if directive
+                           else f"[COUNCIL] {_ADDRESSED_RULE}\n\n" if addressed else ""),
             model=LOID_MODEL,
             stateless=True,
         ),
@@ -494,6 +495,12 @@ _LUNA_ROOM_FRAMING = (
     "or send mail, so never imply you did."
 )
 _LUNA_PASS_RULE = "If nothing here is yours, reply with exactly [PASS] and nothing else."
+# When Andy names an advisor, that advisor answers: a [PASS] there read as "not in the room"
+# (2026-11-02, Luna passed on a short hello and nothing was posted).
+_ADDRESSED_RULE = (
+    "Andy addressed you by name, so answer him directly and do not reply [PASS]. If he only "
+    "greeted you or checked that you are here, reply in one short line."
+)
 
 # Luna closes a /discuss. Not a debate turn: the logistics of what was decided.
 _NEXT_STEPS_DIRECTIVE = (
@@ -507,15 +514,15 @@ _NEXT_STEPS_DIRECTIVE = (
 )
 
 
-def _luna_prefix(directive: str | None, history: list[dict]) -> str:
+def _luna_prefix(directive: str | None, history: list[dict], addressed: bool = False) -> str:
     if directive:
         room = _full_room_block(history, "Yor or Loid")
         return f"{_LUNA_ROOM_FRAMING}\n\n[COUNCIL NEXT STEPS] {directive}\n\n{room}\n\n"
-    return f"{_LUNA_ROOM_FRAMING} {_LUNA_PASS_RULE}\n\n"
+    return f"{_LUNA_ROOM_FRAMING} {_ADDRESSED_RULE if addressed else _LUNA_PASS_RULE}\n\n"
 
 
 async def _invoke_luna(
-    text: str, history: list[dict], directive: str | None = None
+    text: str, history: list[dict], directive: str | None = None, addressed: bool = False
 ) -> tuple[bool, str]:
     """Luna via `claude -p`, her charter injected by mention. Stateless per
     turn, like Loid; the shared transcript is her context.
@@ -536,7 +543,7 @@ async def _invoke_luna(
             channel_kind="COUNCIL (shared Telegram room with Andy, Yor and Loid)",
             history=history,
             conversation_log_path="",
-            prompt_prefix=_luna_prefix(directive, history),
+            prompt_prefix=_luna_prefix(directive, history, addressed),
             model=LUNA_MODEL,
             stateless=True,
         ),
@@ -553,7 +560,7 @@ _YOR_PASS_RULE = (
 )
 
 
-def _yor_query(text: str, history: list[dict], directive: str | None = None) -> str:
+def _yor_query(text: str, history: list[dict], directive: str | None = None, addressed: bool = False) -> str:
     transcript = _format_transcript(history)
     return (
         "[COUNCIL MODE] You are in a shared Telegram room with Andy, Loid, his career "
@@ -565,18 +572,18 @@ def _yor_query(text: str, history: list[dict], directive: str | None = None) -> 
         "decision Andy is weighing), check the record first: session_search for today's and "
         "yesterday's conversations (newest first), then your own notes, since your injected "
         "summary can be a day old. "
-        f"{directive or _YOR_PASS_RULE}\n\n"
+        f"{directive or (_ADDRESSED_RULE if addressed else _YOR_PASS_RULE)}\n\n"
         f"CONVERSATION:\n{transcript}\n\n"
         f"Andy's {'question' if directive else 'latest message'}: {text}"
     )
 
 
 async def _invoke_yor(
-    text: str, history: list[dict], directive: str | None = None
+    text: str, history: list[dict], directive: str | None = None, addressed: bool = False
 ) -> tuple[bool, str]:
     """Yor via `hermes chat -q ... -Q`. Hermes loads her SOUL; we pass the
     shared transcript and her group etiquette lives in that SOUL."""
-    query = _yor_query(text, history, directive)
+    query = _yor_query(text, history, directive, addressed)
     args = ["hermes", "chat", "-q", query, "-Q", "--accept-hooks", "-t", YOR_TOOLSETS]
     try:
         YOR_CWD.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -970,13 +977,14 @@ async def _process_message(
         return
 
     first_response_for_honcho: tuple[str, str] | None = None
+    named = set(_named_advisors(text))
 
     for agent_id in order:
         # History includes any advisor who already spoke THIS turn, so the next
         # one can build on it.
         history = _chat_history_for(chat_id)
         async with _typing(context.bot, chat_id):
-            ok, resp = await _INVOKERS[agent_id](text, history)
+            ok, resp = await _INVOKERS[agent_id](text, history, addressed=agent_id in named)
         label = ADVISORS[agent_id]["label"]
         if not ok:
             log(f"INVOKE {agent_id} failed: {resp[:120]}")
@@ -986,6 +994,9 @@ async def _process_message(
         if _is_bare_marker(resp):
             log(f"INVOKE {agent_id} passed")
             _push_history(chat_id, label, "(passed)")
+            if agent_id in named:
+                # Andy named this advisor: never answer him with silence.
+                await message.reply_text(f"_({label} has nothing to add.)_")
             continue
 
         _push_history(chat_id, label, resp)
