@@ -4,8 +4,8 @@ the room log.
 No network and no model calls: the advisor invokers, the Telegram message and
 bot, Honcho, and the router's claude call are all fakes. As a backstop, the
 module swaps the bridge's run_agent_turn for one that fails the test, and
-points the room log at a temporary file, so a test that forgets a fake can
-neither reach a model nor write the real log.
+points the room log and the meeting notes at temporary paths, so a test that
+forgets a fake can neither reach a model nor write the real log or vault.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.telegram_bot import council_bridge as cb  # noqa: E402
+from scripts.telegram_bot import council_notes  # noqa: E402
 
 ANDY = 1001
 CHAT = 1001  # a DM: the chat id is the user id
@@ -37,7 +39,8 @@ def setUpModule():
     global _module_tmp
     _module_tmp = tempfile.TemporaryDirectory()
     _module_patches.extend([
-        patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(Path(_module_tmp.name) / "room.jsonl")}),
+        patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(Path(_module_tmp.name) / "room.jsonl"),
+                                council_notes.NOTES_DIR_ENV: str(Path(_module_tmp.name) / "notes")}),
         patch.object(cb, "run_agent_turn",
                      AsyncMock(side_effect=AssertionError("real agent turn in a test"))),
     ])
@@ -516,10 +519,12 @@ class DiscussBase(unittest.IsolatedAsyncioTestCase):
         self.env.start()
         self.typing = patch.object(cb, "TYPING_REFRESH_SECONDS", 0.01)
         self.typing.start()
-        # Each test reads back its own room log.
+        # Each test reads back its own room log and meeting notes.
         self._tmp = tempfile.TemporaryDirectory()
         self.room_log = Path(self._tmp.name) / "room.jsonl"
-        self.room_env = patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(self.room_log)})
+        self.notes_dir = Path(self._tmp.name) / "notes"
+        self.room_env = patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(self.room_log),
+                                                council_notes.NOTES_DIR_ENV: str(self.notes_dir)})
         self.room_env.start()
 
     async def asyncTearDown(self):
@@ -805,7 +810,7 @@ class TestLunaInTheRoom(DiscussBase):
 
 
 class TestRoomLog(DiscussBase):
-    KEYS = {"ts", "chat_id", "speaker", "text", "mode"}
+    KEYS = {"ts", "chat_id", "speaker", "text", "mode", "discussion", "part"}
 
     async def test_normal_message_lines(self):
         self.script(loid=[(True, "L1")], luna=[(True, "Thursday is clear.")])
@@ -819,6 +824,8 @@ class TestRoomLog(DiscussBase):
             self.assertEqual(set(r), self.KEYS)
             self.assertIsInstance(r["ts"], float)
             self.assertEqual(r["chat_id"], CHAT)
+            self.assertIsNone(r["discussion"])
+            self.assertEqual(r["part"], "message")
 
     async def test_voice_is_logged_as_its_transcript(self):
         self.script(yor=[(True, "Y1")])
@@ -848,6 +855,32 @@ class TestRoomLog(DiscussBase):
         # Status lines are not room speech.
         self.assertFalse(any("Discussion ended" in r["text"] for r in self.room()))
 
+    async def test_discussion_lines_carry_their_discussion_and_part(self):
+        self.script(yor=[(True, "Y1"), (True, "Y2"), (True, "SUM")],
+                    loid=[(True, "L1"), (True, "L2")], luna=[(True, "Next steps\n- Andy: decide")])
+        disc = await self.discuss("/discuss 2 take it?")
+        await disc.task
+        rows = self.room()
+        self.assertEqual([(r["speaker"], r["part"]) for r in rows],
+                         [("Andy", "question"), ("Yor", "turn"), ("Loid", "turn"), ("Yor", "turn"),
+                          ("Loid", "turn"), ("Yor", "summary"), ("Luna", "next_steps")])
+        # One id for the whole discussion: its start time, as a string.
+        self.assertEqual({r["discussion"] for r in rows}, {disc.id})
+        self.assertIsInstance(disc.id, str)
+        self.assertAlmostEqual(float(disc.id), disc.started, places=5)
+        self.assertLessEqual(float(disc.id), rows[0]["ts"])
+
+    async def test_a_later_message_is_outside_the_discussion(self):
+        self.script(yor=[(True, "Y1"), (True, "SUM")], loid=[(True, "L1"), (True, "L-normal")])
+        disc = await self.discuss("/discuss 1 q")
+        await disc.task
+        with patch.object(cb, "_route", AsyncMock(return_value=["loid"])):
+            await cb.handle_text(_update(FakeMessage("thanks", self.sent)), self.ctx)
+        rows = self.room()
+        self.assertEqual([(r["speaker"], r["discussion"], r["part"]) for r in rows[-2:]],
+                         [("Andy", None, "message"), ("Loid", None, "message")])
+        self.assertTrue(all(r["discussion"] == disc.id for r in rows[:-2]))
+
     async def test_file_is_private_and_parent_is_created(self):
         self.room_log = Path(self._tmp.name) / "nested" / "dir" / "room.jsonl"
         with patch.dict(os.environ, {cb.ROOM_LOG_ENV: str(self.room_log)}):
@@ -876,6 +909,81 @@ class TestRoomLog(DiscussBase):
             await cb.handle_text(_update(FakeMessage("hi", self.sent)), self.ctx)
         self.assertEqual(self.sent, [f"{cb.ADVISORS['loid']['prefix']}\n\nL1"])
         self.assertTrue(any("ROOMLOG write failed" in line for line in logs.output))
+
+
+class TestMeetingNotes(DiscussBase):
+    """The bridge rebuilds the day's note after every exchange and every
+    /discuss, and a note that cannot be written never costs Andy a reply."""
+
+    def today(self):
+        return council_notes.local_date(datetime.now().timestamp())
+
+    async def test_renders_after_a_message(self):
+        self.script(loid=[(True, "L1")])
+        render = MagicMock(return_value=None)
+        with patch.object(cb.council_notes, "render_day", render), \
+                patch.object(cb, "_route", AsyncMock(return_value=["loid"])):
+            await cb.handle_text(_update(FakeMessage("hi", self.sent)), self.ctx)
+        render.assert_called_with(self.today())
+        self.assertEqual(self.sent, [f"{cb.ADVISORS['loid']['prefix']}\n\nL1"])
+
+    async def test_renders_when_no_one_answers(self):
+        self.script()
+        render = MagicMock(return_value=None)
+        with patch.object(cb.council_notes, "render_day", render), \
+                patch.object(cb, "_route", AsyncMock(return_value=[])):
+            await cb.handle_text(_update(FakeMessage("just noting this", self.sent)), self.ctx)
+        render.assert_called_with(self.today())
+
+    async def test_renders_after_a_discussion(self):
+        self.script(yor=[(True, "Y1"), (True, "SUM")], loid=[(True, "L1")])
+        render = MagicMock(return_value=None)
+        with patch.object(cb.council_notes, "render_day", render):
+            disc = await self.discuss("/discuss 1 q")
+            await disc.task
+        render.assert_called_with(self.today())
+        self.assertEqual(self.sent[-1], "Discussion ended: round cap reached (2 turns).")
+
+    async def test_a_failed_note_write_does_not_break_a_message(self):
+        self.script(loid=[(True, "L1")])
+        with patch.object(cb.council_notes, "render_day", MagicMock(side_effect=OSError("disk full"))), \
+                patch.object(cb, "_route", AsyncMock(return_value=["loid"])), \
+                self.assertLogs("nb_telegram_council", level="INFO") as logs:
+            await cb.handle_text(_update(FakeMessage("hi", self.sent)), self.ctx)
+        self.assertEqual(self.sent, [f"{cb.ADVISORS['loid']['prefix']}\n\nL1"])
+        self.assertTrue(any("NOTES render failed" in line and "disk full" in line
+                            for line in logs.output))
+        self.assertTrue(any("MSG done" in line for line in logs.output))
+
+    async def test_a_failed_note_write_does_not_break_a_discussion(self):
+        self.script(yor=[(True, "Y1"), (True, "SUM")], loid=[(True, "L1")])
+        with patch.object(cb.council_notes, "render_day", MagicMock(side_effect=OSError("boom"))), \
+                self.assertLogs("nb_telegram_council", level="INFO") as logs:
+            disc = await self.discuss("/discuss 1 q")
+            await disc.task
+        self.assertEqual(self.sent[-1], "Discussion ended: round cap reached (2 turns).")
+        self.assertNotIn(CHAT, cb._discussions)
+        self.assertTrue(any("NOTES render failed" in line for line in logs.output))
+
+    async def test_the_note_is_written_into_the_notes_folder(self):
+        steps = "Next steps\n- Andy: decide by Friday"
+        self.script(yor=[(True, "Y1"), (True, "SUM-BULLETS")], loid=[(True, "L1"), (True, "L-normal")],
+                    luna=[(True, steps)])
+        disc = await self.discuss("/discuss 1 Should I take it?")
+        await disc.task
+        with patch.object(cb, "_route", AsyncMock(return_value=["loid"])):
+            await cb.handle_text(_update(FakeMessage("thanks both", self.sent)), self.ctx)
+
+        note = self.notes_dir / f"{self.today().isoformat()}.md"
+        text = note.read_text(encoding="utf-8")
+        self.assertEqual(stat.S_IMODE(note.stat().st_mode), 0o600)
+        self.assertIn("discussions: 1", text)
+        self.assertIn("Discussion: Should I take it?", text)
+        self.assertIn("### Where they landed\n\nSUM-BULLETS", text)
+        self.assertIn("### Next steps\n\n- Andy: decide by Friday", text)
+        self.assertIn("> **Loid** (", text)
+        self.assertIn("## Other exchanges", text)
+        self.assertIn("): thanks both", text)
 
 
 class TestTyping(DiscussBase):

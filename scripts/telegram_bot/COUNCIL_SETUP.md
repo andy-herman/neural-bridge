@@ -10,6 +10,8 @@ the group). The code is already in place:
 
 - `scripts/telegram_bot/council_bridge.py` — the orchestrator
 - `scripts/launchd/com.andyherman.neural-bridge.council-telegram.plist` — the daemon
+- `scripts/telegram_bot/council_notes.py` — the daily meeting notes and their nightly summary
+- `scripts/launchd/com.andyherman.neural-bridge.council-notes.plist` — the nightly summary job
 
 ## 1. Create the council bot
 
@@ -108,6 +110,9 @@ and watch the log route it.
 - **Room log.** Everything said in the room is appended to a local JSONL file
   so Yor's nightly memory sees the whole room, including turns she did not
   speak in. See below.
+- **Meeting notes.** The room log also becomes one note per day in the vault,
+  kept current as the room talks, with a short summary added at night. See
+  "Meeting notes" below.
 - **To stop the daemon:** `launchctl unload ~/Library/LaunchAgents/com.andyherman.neural-bridge.council-telegram.plist`
 
 ## Room log
@@ -120,7 +125,7 @@ It is append-only and local; nothing reads it back into the room.
 One JSON object per line, one line per message actually posted in the room:
 
 ```json
-{"ts": 1767312000.25, "chat_id": -1001234567890, "speaker": "Luna", "text": "Next steps\n- ...", "mode": "discuss"}
+{"ts": 1767312000.25, "chat_id": -1001234567890, "speaker": "Luna", "text": "Next steps\n- ...", "mode": "discuss", "discussion": "1767311700.125000", "part": "next_steps"}
 ```
 
 | Field | Meaning |
@@ -130,9 +135,85 @@ One JSON object per line, one line per message actually posted in the room:
 | `speaker` | `Andy`, `Yor`, `Loid` or `Luna` |
 | `text` | The message as posted: Andy's text, the transcript of a voice note, or an advisor's whole reply (not split into Telegram parts) |
 | `mode` | `message` for normal turns, `discuss` for a `/discuss` question, its turns, Yor's summary and Luna's next steps |
+| `discussion` | The `/discuss` this line belongs to: one id per discussion (its start time as a string), shared by every line of it. `null` for a normal exchange |
+| `part` | What the line was: `message` (a normal exchange), `question` (Andy's `/discuss` question), `turn` (a Yor or Loid turn in the back-and-forth), `summary` (Yor's closing summary), `next_steps` (Luna's closing post) |
+
+`discussion` and `part` were added after the log started; lines written before
+them simply lack the two keys. Readers that only know the first five fields
+(the nightly exporter on the Hermes side reads `speaker`, `ts`, `text` and
+`chat_id`) can ignore them.
 
 What is not logged: `[PASS]` and `[DONE]` markers (and the turns they stand
 for), error notices, the "heard:" echo of a voice note, status lines such as
 "Discussion ended", and commands like `/stop`. No tokens or credentials are
 ever written. A write that fails is noted in `council-telegram.log` and the
 turn carries on.
+
+## Meeting notes
+
+One Markdown note per day in the Obsidian vault, built from the room log alone.
+
+- **Folder:** `$COUNCIL_NOTES_DIR`, default `~/Documents/Luna Master/Council`
+  (created if missing). The note for a day is `YYYY-MM-DD.md`, by local date.
+  A `/discuss` that runs past midnight stays whole in the note of the day it
+  started.
+- **Live:** after every normal exchange (even one no advisor answered) and
+  after every `/discuss`, the bridge rebuilds that day's note from the log.
+  The rebuild is idempotent and writes atomically (temp file, then rename;
+  mode `0600`), and an unchanged note is not rewritten. A failed write is
+  logged as `NOTES render failed` in `council-telegram.log` and the room
+  carries on.
+- **Rebuilt, not edited:** anything edited by hand outside the summary block
+  is replaced on the next rebuild. The summary block is kept byte for byte, so
+  it can be edited.
+- **Layout:** frontmatter (`type: council`, `date`, `participants` in the order
+  Andy, Yor, Loid, Luna, `discussions` count, `tags: [council]`), then
+  `# Council, YYYY-MM-DD`, a `## Summary` block, one
+  `## HH:MM Discussion: <start of the question>` section per `/discuss` with
+  `### Where they landed` (Yor's summary), `### Next steps` (Luna's, when she
+  posted some) and the question and turns in a folded `Transcript` callout,
+  then `## Other exchanges`: normal messages in folded callouts, one per
+  conversation (a new one after three quiet hours). Lines written before the
+  `discussion` and `part` fields existed show up under Other exchanges.
+- **No em-dashes:** any in the room's text are written as a comma (or a colon
+  at the end of a line). HTML comment delimiters in room text are written as
+  entities so they cannot hide part of the note.
+- A lock file beside the room log (`council-room.jsonl.notes.lock`) keeps the
+  bridge and the nightly job from writing a note at the same time.
+
+### Nightly summary
+
+`com.andyherman.neural-bridge.council-notes` runs every day at 23:30 local:
+
+```
+.venv/bin/python -m scripts.telegram_bot.council_notes summarize
+```
+
+With no `--date` it covers yesterday (so lines after last night's run are
+caught) and, after 22:00, today. For a day with council activity whose summary
+is missing, or older than the day's last line, it asks `claude-haiku-5-5`
+(effort low, no tools, through `claude_invoke.call_claude_sync`, so on the
+fleet's Anthropic API route) for 3 to 6 bullets: decisions made, open
+questions, next steps with an owner, from the transcript only. The bullets go
+between the `<!-- council-summary:start last_ts=... -->` and
+`<!-- council-summary:end -->` markers; `last_ts` is the newest room line the
+summary covers. A day with no council lines makes no model call.
+
+`install.sh` installs the job with the others. By hand:
+
+```
+.venv/bin/python -m scripts.telegram_bot.council_notes summarize --date 2026-11-02 --dry-run
+```
+
+`--dry-run` calls the model and prints the bullets without writing anything.
+To build or rebuild a day's note from the log (for example a day from before
+the notes existed):
+
+```
+.venv/bin/python -m scripts.telegram_bot.council_notes render --date 2026-11-01
+```
+
+Logs: `~/Library/Logs/neural-bridge/council-notes.stdout.log` and
+`council-notes.stderr.log`. `COUNCIL_SUMMARY_MODEL` and
+`COUNCIL_SUMMARY_TIMEOUT` (seconds, default 180) override the model and its
+timeout; like the other settings they belong in `~/.hermes/.env`.
