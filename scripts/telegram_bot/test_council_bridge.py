@@ -95,10 +95,10 @@ class Script:
         self.default = default
         self.n = 0
 
-    async def __call__(self, text, history, directive=None):
+    async def __call__(self, text, history, directive=None, addressed=False):
         self.n += 1
         self.calls.append({"agent": self.agent, "text": text, "history": list(history),
-                           "directive": directive})
+                           "directive": directive, "addressed": addressed})
         if self.n in self.gates:
             await self.gates[self.n]()
         if self.delay:
@@ -321,6 +321,18 @@ class TestInvokerDirective(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DIRECTIVE-Y", query)
         self.assertNotIn("[PASS]", query)
         self.assertTrue(query.endswith("Andy's question: q"))
+
+    async def test_addressed_rule_replaces_pass_for_all_three(self):
+        query = cb._yor_query("hi", self.HISTORY, addressed=True)
+        self.assertIn(cb._ADDRESSED_RULE, query)
+        self.assertNotIn("reply with exactly [PASS]", query)
+        self.assertIn(cb._ADDRESSED_RULE, cb._luna_prefix(None, self.HISTORY, True))
+        self.assertNotIn(cb._LUNA_PASS_RULE, cb._luna_prefix(None, self.HISTORY, True))
+        result = SimpleNamespace(ok=True, response="fine", setup_error="", error_reason="")
+        turn = AsyncMock(return_value=result)
+        with patch.object(cb, "run_agent_turn", turn):
+            await cb._invoke_loid("hi", self.HISTORY, addressed=True)
+        self.assertIn(cb._ADDRESSED_RULE, turn.call_args.args[0].prompt_prefix)
 
     async def test_yor_normal_message_keeps_pass(self):
         query = await self._yor_query()
@@ -771,6 +783,18 @@ class TestLunaInTheRoom(DiscussBase):
         self.assertEqual(self.agents(), ["luna"])
         self.assertIsNone(self.calls[0]["directive"])
         self.assertEqual(self.sent, [f"{cb.ADVISORS['luna']['prefix']}\n\nYou are free from 2 to 4."])
+
+    async def test_a_named_advisor_is_told_to_answer(self):
+        self.script(luna=[(True, "Here.")])
+        await cb.handle_text(_update(FakeMessage("@luna hi", self.sent)), self.ctx)
+        self.assertTrue(self.calls[0]["addressed"])
+        self.assertEqual(self.sent, [f"{cb.ADVISORS['luna']['prefix']}\n\nHere."])
+
+    async def test_a_named_advisor_who_still_passes_is_not_silent(self):
+        # 2026-11-02: Luna passed on "@luna hi" and nothing was posted, so she looked absent.
+        self.script(luna=[(True, "[PASS]")])
+        await cb.handle_text(_update(FakeMessage("@luna hi", self.sent)), self.ctx)
+        self.assertEqual(self.sent, ["_(Luna has nothing to add.)_"])
 
     async def test_routed_luna_may_pass(self):
         self.script(luna=[(True, "`[PASS]`")])
