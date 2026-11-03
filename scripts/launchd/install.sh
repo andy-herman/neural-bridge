@@ -9,6 +9,7 @@
 #   - com.andyherman.neural-bridge.echo-synthesis     (Sunday 05:00: synthesize new Discord messages into Echo's structured profile files)
 #   - com.andyherman.neural-bridge.echo-transcripts   (Daily 04:30: ingest new Claude Code session transcripts into Echo's claude-transcripts.md corpus)
 #   - com.andyherman.neural-bridge.echo-mindframe     (Daily 04:45: ingest Andy-authored turns from MindFrame Discord logs into mindframe-conversations.md; no-op clean if source path missing)
+#   - com.andyherman.neural-bridge.council-notes      (Daily 23:30: end-of-day summary for the council's meeting notes; no model call on a quiet day)
 #
 # Idempotent: safe to run multiple times. Re-bootstraps any agent that's
 # already loaded.
@@ -42,6 +43,7 @@ AGENTS=(
     "com.andyherman.neural-bridge.echo-synthesis"
     "com.andyherman.neural-bridge.echo-transcripts"
     "com.andyherman.neural-bridge.echo-mindframe"
+    "com.andyherman.neural-bridge.council-notes"
 )
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

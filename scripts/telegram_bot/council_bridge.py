@@ -30,7 +30,9 @@ Two backends, because the advisors live on different runtimes:
 
 Every message posted in the room (Andy's and each advisor's) is also appended
 to a local JSONL room log (COUNCIL_ROOM_LOG), so Yor's nightly memory sees the
-whole room, including turns she did not speak in. Format in COUNCIL_SETUP.md.
+whole room, including turns she did not speak in. After each exchange and each
+/discuss the bridge rebuilds that day's meeting note in the vault from the log
+(council_notes.py). Formats in COUNCIL_SETUP.md.
 
 Telegram fact that shapes this design: a bot never receives another bot's
 messages, so separate bots could not see each other. One orchestrator bot that
@@ -77,7 +79,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -100,6 +102,7 @@ from scripts.discord_bot.claude_invoke import DEFAULT_MODEL, call_claude, wrap_u
 from scripts.discord_bot.keychain import get_token
 from scripts.discord_bot.agent_runtime import TurnRequest, run_agent_turn
 from scripts.env_file import load_default_env  # noqa: E402
+from scripts.telegram_bot import council_notes  # noqa: E402
 
 # ----------------------------------------------------------------------
 # Config
@@ -155,11 +158,10 @@ DISCUSS_MAX_ROUNDS = 6
 TYPING_REFRESH_SECONDS = 4.0
 
 # The room log: one JSON line per message posted in the room, for Yor's
-# nightly memory. Read at write time so the env var can be changed in tests.
-ROOM_LOG_ENV = "COUNCIL_ROOM_LOG"
-DEFAULT_ROOM_LOG = (
-    Path.home() / "Library" / "Application Support" / "neural-bridge" / "council-room.jsonl"
-)
+# nightly memory and the daily meeting note. Read at write time so the env var
+# can be changed in tests. Defined in council_notes, which reads it back.
+ROOM_LOG_ENV = council_notes.ROOM_LOG_ENV
+DEFAULT_ROOM_LOG = council_notes.DEFAULT_ROOM_LOG
 
 WHISPER_MODEL_NAME = os.environ.get("COUNCIL_WHISPER_MODEL", "base.en")
 WHISPER_COMPUTE_TYPE = os.environ.get("COUNCIL_WHISPER_COMPUTE", "int8")
@@ -238,13 +240,26 @@ def _format_transcript(history: list[dict]) -> str:
 # a [PASS]/[DONE] marker, an error notice or a status line.
 
 def _room_log_path() -> Path:
-    raw = os.environ.get(ROOM_LOG_ENV, "").strip()
-    return Path(raw).expanduser() if raw else DEFAULT_ROOM_LOG
+    return council_notes.room_log_path()
 
 
-def _log_room(chat_id: int, speaker: str, text: str, mode: str) -> None:
+# `part` of a room-log line: what the message was in the room.
+PART_MESSAGE = "message"        # a normal exchange, Andy's or an advisor's
+PART_QUESTION = "question"      # Andy's /discuss question
+PART_TURN = "turn"              # a Yor or Loid turn in the back-and-forth
+PART_SUMMARY = "summary"        # Yor's closing summary
+PART_NEXT_STEPS = "next_steps"  # Luna's next steps
+
+
+def _log_room(
+    chat_id: int, speaker: str, text: str, mode: str,
+    *, discussion: str | None = None, part: str = PART_MESSAGE,
+) -> None:
     """Append one posted message to the room log. Never raises: a reply that
-    was delivered must not fail because this line could not be written."""
+    was delivered must not fail because this line could not be written.
+
+    `discussion` is the /discuss it belongs to (None for a normal exchange)
+    and `part` says what it was, so a discussion can be rebuilt from the log."""
     try:
         text = (text or "").strip()
         if not text:
@@ -253,7 +268,7 @@ def _log_room(chat_id: int, speaker: str, text: str, mode: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
             {"ts": time.time(), "chat_id": int(chat_id), "speaker": speaker,
-             "text": text, "mode": mode},
+             "text": text, "mode": mode, "discussion": discussion, "part": part},
             ensure_ascii=False,
         )
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -264,6 +279,18 @@ def _log_room(chat_id: int, speaker: str, text: str, mode: str) -> None:
             os.close(fd)
     except Exception as exc:
         log(f"ROOMLOG write failed speaker={speaker} mode={mode}: {exc!r}")
+
+
+async def _render_notes(since: float) -> None:
+    """Rebuild the meeting note for each local day from `since` to now (one
+    day, or two across midnight) from the room log. Never raises: the note is
+    a view of the room, and a failed write must not break a turn."""
+    try:
+        days = sorted({council_notes.local_date(since), council_notes.local_date(time.time())})
+        for day in days:
+            await asyncio.to_thread(council_notes.render_day, day)
+    except Exception as exc:
+        log(f"NOTES render failed: {exc!r}")
 
 
 # ----------------------------------------------------------------------
@@ -639,14 +666,16 @@ async def _typing(bot, chat_id: int):
 
 
 async def _post_advisor_reply(
-    message: Message, agent_id: str, resp: str, *, mode: str = "message"
+    message: Message, agent_id: str, resp: str, *, mode: str = "message",
+    discussion: str | None = None, part: str = PART_MESSAGE,
 ) -> None:
     """Post an advisor's reply, then record it in the room log once it is out."""
     prefix = ADVISORS[agent_id]["prefix"]
     for i, chunk in enumerate(_chunk_for_telegram(resp)):
-        part = f" (part {i + 1})" if i else ""
-        await message.reply_text(f"{prefix}{part}\n\n{chunk}")
-    _log_room(message.chat_id, ADVISORS[agent_id]["label"], resp, mode)
+        n = f" (part {i + 1})" if i else ""
+        await message.reply_text(f"{prefix}{n}\n\n{chunk}")
+    _log_room(message.chat_id, ADVISORS[agent_id]["label"], resp, mode,
+              discussion=discussion, part=part)
 
 
 # ----------------------------------------------------------------------
@@ -731,6 +760,12 @@ class _Discussion:
     turns: int = 0
     stop_reason: str = ""
     task: asyncio.Task | None = None
+    started: float = field(default_factory=time.time)
+
+    @property
+    def id(self) -> str:
+        """The room log's `discussion` id: its start time, as a string."""
+        return f"{self.started:.6f}"
 
     def request_stop(self, reason: str) -> None:
         """Stop after the in-flight turn. The first reason given wins."""
@@ -743,10 +778,12 @@ _discussions: dict[int, _Discussion] = {}
 
 
 async def _discussion_turn(
-    bot, message: Message, speaker: str, question: str, directive: str, turn: str
+    bot, message: Message, speaker: str, question: str, directive: str, turn: str,
+    *, discussion: str | None = None, part: str = PART_TURN,
 ) -> tuple[str, str]:
     """One advisor turn. Returns (outcome, posted text); outcome is "reply",
-    "done" or "failed". Posts the reply and records it in the room."""
+    "done" or "failed". Posts the reply and records it in the room, as `part`
+    of `discussion`."""
     chat_id = message.chat_id
     label = ADVISORS[speaker]["label"]
     started = time.monotonic()
@@ -767,7 +804,8 @@ async def _discussion_turn(
         _push_history(chat_id, label, "(nothing new to add)")
         return outcome, ""
     _push_history(chat_id, label, text)
-    await _post_advisor_reply(message, speaker, text, mode="discuss")
+    await _post_advisor_reply(message, speaker, text, mode="discuss",
+                              discussion=discussion, part=part)
     return outcome, text
 
 
@@ -795,7 +833,8 @@ async def _discussion_rounds(
         disc.turns += 1
         directive = _discussion_directive(other, opening=disc.turns == 1)
         outcome, posted = await _discussion_turn(
-            bot, message, speaker, disc.question, directive, str(disc.turns)
+            bot, message, speaker, disc.question, directive, str(disc.turns),
+            discussion=disc.id, part=PART_TURN,
         )
         if posted and first_reply is None:
             first_reply = (speaker, posted)
@@ -811,20 +850,24 @@ async def _discussion_rounds(
 
 
 async def _run_discussion(bot, message: Message, disc: _Discussion) -> None:
-    """Back-and-forth, Yor's closing summary, one status line. Never raises."""
+    """Back-and-forth, Yor's closing summary, one status line, then the day's
+    meeting note. Never raises."""
     chat_id = message.chat_id
     try:
         reason = "error"
         try:
             _push_history(chat_id, "Andy", disc.question)
-            _log_room(chat_id, "Andy", disc.question, "discuss")
+            _log_room(chat_id, "Andy", disc.question, "discuss",
+                      discussion=disc.id, part=PART_QUESTION)
             reason, first_reply = await _discussion_rounds(bot, message, disc)
             # Nothing to sum up when no one said anything.
             if first_reply is not None:
-                await _discussion_turn(bot, message, "yor", disc.question, _CLOSING_DIRECTIVE, "close")
+                await _discussion_turn(bot, message, "yor", disc.question, _CLOSING_DIRECTIVE,
+                                       "close", discussion=disc.id, part=PART_SUMMARY)
                 # Then Luna's next steps. A [PASS] posts nothing.
                 await _discussion_turn(
-                    bot, message, "luna", disc.question, _NEXT_STEPS_DIRECTIVE, "next-steps"
+                    bot, message, "luna", disc.question, _NEXT_STEPS_DIRECTIVE, "next-steps",
+                    discussion=disc.id, part=PART_NEXT_STEPS,
                 )
                 agent_id, resp = first_reply
                 try:
@@ -844,6 +887,7 @@ async def _run_discussion(bot, message: Message, disc: _Discussion) -> None:
             await message.reply_text(f"Discussion ended: {reason} ({disc.turns} {noun}).")
         except Exception as exc:
             log(f"DISCUSS status post failed chat={chat_id}: {exc!r}")
+        await _render_notes(disc.started)
     finally:
         if _discussions.get(chat_id) is disc:
             del _discussions[chat_id]
@@ -967,9 +1011,20 @@ async def _process_message(
             # cancel the discussion with it.
             await asyncio.wait([disc.task])
 
+    started = time.time()
     _push_history(chat_id, "Andy", text)
     _log_room(chat_id, "Andy", text, "message")
+    try:
+        await _answer_message(message, context, text)
+    finally:
+        # Also when no one answered, or a reply failed: Andy's line is in the
+        # room log either way, and the note follows the log.
+        await _render_notes(started)
 
+
+async def _answer_message(message: Message, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Route Andy's message and post each chosen advisor's reply."""
+    chat_id = message.chat_id
     async with _typing(context.bot, chat_id):
         order = await _route(text, _chat_history_for(chat_id))
     if not order:

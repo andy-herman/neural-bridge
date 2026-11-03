@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andyherman.neural-bridge.council-notes</string>
+
+    <!-- Nightly summary for the council's daily meeting notes
+         (scripts/telegram_bot/council_notes.py). The bridge keeps each day's
+         note current from the room log as the room talks; this job adds the
+         short summary at the top: a few bullets from a small model, only on a
+         day with council activity and only when the summary is missing or
+         older than the day's last line. A quiet day makes no model call.
+
+         With no date given it covers yesterday and, at this hour, today. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andyherman/Development/neural-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.telegram_bot.council_notes</string>
+        <string>summarize</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andyherman/Development/neural-bridge</string>
+
+    <!-- 23:30 local time daily. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- One-shot per fire; do not keep alive between runs. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/council-notes.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andyherman/Library/Logs/neural-bridge/council-notes.stderr.log</string>
+
+    <!-- Config (COUNCIL_NOTES_DIR, COUNCIL_ROOM_LOG) belongs in ~/.hermes/.env,
+         which the job loads itself. PATH includes ~/.local/bin so `claude`
+         resolves. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER</key>
+        <string>andyherman</string>
+        <key>HOME</key>
+        <string>/Users/andyherman</string>
+        <key>PATH</key>
+        <string>/Users/andyherman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
