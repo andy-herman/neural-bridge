@@ -703,6 +703,7 @@ def build_mention_parts(
     *,
     agent_id: str,
     agent_definition: str,
+    fleet_code: str,
     channel_kind: str,
     history: list[dict],
     message_content: str,
@@ -718,8 +719,12 @@ def build_mention_parts(
     # the agent's own stores. Records one UTILIZE event per turn either way;
     # see hooks/wiki_recall.py for why an empty result is still "ok".
     wiki_block = _wiki_recall_block(agent_id, message_content)
+    # The fleet code (FLEET_CODE.md, loaded by scripts.fleet_code) is trusted
+    # and goes in unsanitized, ahead of the charter, which is sanitized above.
+    # Substituted first so nothing substituted later can inject the token.
     rendered = (
         template
+        .replace("{fleet_code}", fleet_code)
         .replace("{agent_id}", agent_id)
         .replace("{agent_definition}", sanitized_definition)
         .replace("{channel_kind}", channel_kind)
@@ -776,7 +781,7 @@ def build_mention_parts(
             + (echo_prefix or "") + (wiki_block or "") + rendered)
 
     static_hash = hashlib.sha256("\x1f".join((
-        template, sanitized_definition, agent_id, channel_kind, conversation_log_path,
+        template, fleet_code, sanitized_definition, agent_id, channel_kind, conversation_log_path,
         honcho_prefix, notes_prefix or "", echo_prefix or "",
     )).encode("utf-8")).hexdigest()[:16]
 
@@ -805,6 +810,7 @@ def build_mention_prompt(
     *,
     agent_id: str,
     agent_definition: str,
+    fleet_code: str,
     channel_kind: str,
     history: list[dict],
     message_content: str,
@@ -812,7 +818,8 @@ def build_mention_prompt(
 ) -> str:
     """The full prompt (build_mention_parts(...).full)."""
     return build_mention_parts(
-        template, agent_id=agent_id, agent_definition=agent_definition, channel_kind=channel_kind,
+        template, agent_id=agent_id, agent_definition=agent_definition, fleet_code=fleet_code,
+        channel_kind=channel_kind,
         history=history, message_content=message_content, conversation_log_path=conversation_log_path,
         continue_template="",
     ).full
