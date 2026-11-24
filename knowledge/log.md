@@ -98,3 +98,7 @@ Append-only. New entries at the bottom. Prefix each entry with `## YYYY-MM-DD`.
 - compile complete: PROMOTE=1 QUARANTINE=0 REJECT=0 errors=0 skipped=0
   - PROMOTE-rich fresh-session-stale-state-restatement -> knowledge/concepts/fresh-session-stale-state-restatement.md
   - edited before publishing (2026-10-16): personal and work specifics generalized, unverified related-concept links removed
+
+## 2026-11-24
+
+- review queue: filed `coupang-offer-comp-structure` from the nightly compile after human review (item 018e24)
