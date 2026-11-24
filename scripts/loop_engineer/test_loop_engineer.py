@@ -375,6 +375,22 @@ class TestExecutor(unittest.TestCase):
         # The injected closing tag must have been stripped from the DATA region.
         self.assertEqual(prompt.count("</github-issue>"), 1)
 
+    def test_build_prompt_carries_the_fleet_code(self):
+        from scripts.fleet_code import TITLE
+        prompt = executor.build_prompt(LoopConfig(), _issue(1, title="t", body="b"))
+        self.assertIn(TITLE, prompt)
+        self.assertLess(prompt.index(TITLE), prompt.index("## The issue"))
+
+    def test_implement_without_fleet_code_is_an_environment_failure(self):
+        from scripts.fleet_code import FleetCodeError
+        with mock.patch.object(executor, "load_fleet_code",
+                               side_effect=FleetCodeError("gone")), \
+             mock.patch.object(executor, "_invoke") as invoke:
+            result = executor.implement(LoopConfig(), None, _issue(1, title="t", body="b"))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_reason, "fleet_code_unavailable")
+        invoke.assert_not_called()
+
     def test_parse_result_json_success(self):
         raw = '{"type":"result","subtype":"success","session_id":"abc","result":"done","num_turns":4}'
         obj = executor.parse_result_json(raw)

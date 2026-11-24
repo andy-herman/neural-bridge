@@ -138,7 +138,7 @@ class TestPromptBuilding(unittest.TestCase):
     def test_real_template_has_every_placeholder(self):
         # Guards against a template edit that silently drops a substitution.
         tpl = ci.PROMPT_PATH.read_text(encoding="utf-8")
-        for token in ("{kind}", "{kind_guidance}", "{context}", "{notes}"):
+        for token in ("{fleet_code}", "{kind}", "{kind_guidance}", "{context}", "{notes}"):
             self.assertIn(token, tpl, f"template lost {token}")
 
     def test_real_template_renders_clean(self):
@@ -146,6 +146,19 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertNotIn("{kind}", out)
         self.assertNotIn("{context}", out)
         self.assertIn("[PASS]", out)  # silence instruction survives
+
+    def test_real_template_carries_the_fleet_code(self):
+        from scripts.fleet_code import TITLE
+        out = ci.build_checkin_prompt("morning", "C", "N")
+        self.assertIn(TITLE, out)
+        self.assertNotIn("{fleet_code}", out)
+
+    def test_missing_fleet_code_raises(self):
+        from unittest.mock import patch
+        from scripts.fleet_code import FleetCodeError
+        with patch.object(ci, "load_fleet_code", side_effect=FleetCodeError("gone")):
+            with self.assertRaises(FleetCodeError):
+                ci.build_checkin_prompt("morning", "C", "N")
 
 
 class TestTelegramFormatting(unittest.TestCase):
