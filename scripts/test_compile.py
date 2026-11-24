@@ -858,19 +858,33 @@ class TestFindSharedSessionPairs(unittest.TestCase):
             excerpt="...",
         )
 
-    def test_finds_pair_with_shared_session(self):
-        cands = [self._candidate("alpha", ["s1"]), self._candidate("beta", ["s1", "s2"])]
+    def _prior(self, *sids: str) -> list[dict]:
+        return [{"agent": "research", "session_id": sid, "source_log": f"log-{sid}"}
+                for sid in sids]
+
+    def test_finds_pair_sharing_two_sessions(self):
+        cands = [self._candidate("alpha", ["s1", "s2"]),
+                 self._candidate("beta", ["s1", "s2", "s3"])]
         pairs = cmp.find_shared_session_pairs(cands)
         self.assertEqual(len(pairs), 1)
         self.assertEqual((pairs[0].slug_a, pairs[0].slug_b), ("alpha", "beta"))
-        self.assertEqual(pairs[0].shared_session_ids, ["s1"])
+        self.assertEqual(pairs[0].shared_session_ids, ["s1", "s2"])
+
+    def test_one_shared_session_is_not_enough(self):
+        cands = [self._candidate("alpha", ["s1"]), self._candidate("beta", ["s1", "s2"])]
+        self.assertEqual(cmp.find_shared_session_pairs(cands), [])
+
+    def test_one_session_proposing_seven_concepts_links_nothing(self):
+        # The first live compile: seven concepts from one session became 21 pairs.
+        cands = [self._candidate(f"c{i}", ["s1"]) for i in range(7)]
+        self.assertEqual(cmp.find_shared_session_pairs(cands), [])
 
     def test_no_pairs_returns_empty(self):
         cands = [self._candidate("alpha", ["s1"]), self._candidate("beta", ["s2"])]
         self.assertEqual(cmp.find_shared_session_pairs(cands), [])
 
     def test_alphabetizes_slugs(self):
-        cands = [self._candidate("zeta", ["s1"]), self._candidate("alpha", ["s1"])]
+        cands = [self._candidate("zeta", ["s1", "s2"]), self._candidate("alpha", ["s1", "s2"])]
         pairs = cmp.find_shared_session_pairs(cands)
         self.assertEqual((pairs[0].slug_a, pairs[0].slug_b), ("alpha", "zeta"))
 
@@ -881,11 +895,78 @@ class TestFindSharedSessionPairs(unittest.TestCase):
         self.assertEqual(pairs[0].shared_session_ids, ["s2", "s3"])
 
     def test_three_concepts_two_pairs(self):
-        cands = [self._candidate("alpha", ["s1"]),
-                 self._candidate("beta", ["s1", "s2"]),
-                 self._candidate("gamma", ["s2"])]
+        cands = [self._candidate("alpha", ["s1", "s2"]),
+                 self._candidate("beta", ["s1", "s2", "s3", "s4"]),
+                 self._candidate("gamma", ["s3", "s4"])]
         pairs = cmp.find_shared_session_pairs(cands)
-        self.assertEqual(len(pairs), 2)
+        self.assertEqual([(p.slug_a, p.slug_b) for p in pairs],
+                         [("alpha", "beta"), ("beta", "gamma")])
+
+    def test_prior_sessions_count_toward_recurrence(self):
+        # Both came up together in s1 in an earlier run and again in s2 now.
+        cands = [self._candidate("alpha", ["s2"]), self._candidate("beta", ["s2"])]
+        prior = {"alpha": self._prior("s1"), "beta": self._prior("s1")}
+        pairs = cmp.find_shared_session_pairs(cands, prior)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0].shared_session_ids, ["s1", "s2"])
+
+    def test_prior_session_on_one_side_only_is_not_shared(self):
+        cands = [self._candidate("alpha", ["s2"]), self._candidate("beta", ["s2"])]
+        prior = {"alpha": self._prior("s1")}
+        self.assertEqual(cmp.find_shared_session_pairs(cands, prior), [])
+
+    def test_shared_sources_are_deduplicated(self):
+        # The live concept file repeats this run's sources; each should be listed once.
+        cands = [self._candidate("alpha", ["s1", "s2"]), self._candidate("beta", ["s1", "s2"])]
+        prior = {"alpha": [{"agent": "research", "session_id": "s1", "source_log": "log"}]}
+        pairs = cmp.find_shared_session_pairs(cands, prior)
+        keys = [(s["agent"], s["session_id"], s["source_log"]) for s in pairs[0].shared_sources]
+        self.assertEqual(sorted(keys), [("research", "s1", "log"), ("research", "s2", "log")])
+
+
+class TestRecordedSources(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._saved = (cmp.CONCEPTS_DIR, cmp.HISTORY_DIR)
+        cmp.CONCEPTS_DIR = Path(self.tmp.name) / "concepts"
+        cmp.HISTORY_DIR = cmp.CONCEPTS_DIR / ".history"
+        cmp.CONCEPTS_DIR.mkdir(parents=True)
+
+    def tearDown(self):
+        cmp.CONCEPTS_DIR, cmp.HISTORY_DIR = self._saved
+        self.tmp.cleanup()
+
+    def _article(self, slug: str, sid: str) -> str:
+        cand = cmp.ConceptCandidate(
+            slug=slug, summary="s", excerpt="e",
+            sources=[{"agent": "research", "session_id": sid, "transcript_sha256": "h",
+                      "source_log": f"daily-logs/research/{sid}.md", "session_n": 1}],
+        )
+        return cmp._frontmatter(cand, cmp.PROMOTE, "reason: with a colon", []) + f"\n# {slug}\n"
+
+    def test_reads_live_article_and_history(self):
+        (cmp.CONCEPTS_DIR / "alpha.md").write_text(self._article("alpha", "s2"), encoding="utf-8")
+        hist = cmp.HISTORY_DIR / "alpha"
+        hist.mkdir(parents=True)
+        (hist / "2026-05-10T00-00-00Z.md").write_text(self._article("alpha", "s1"), encoding="utf-8")
+        sources = cmp.recorded_sources("alpha")
+        self.assertEqual(sorted(s["session_id"] for s in sources), ["s1", "s2"])
+        self.assertEqual(sources[0]["agent"], "research")
+        self.assertTrue(sources[0]["source_log"].startswith("daily-logs/research/"))
+
+    def test_missing_concept_returns_empty(self):
+        self.assertEqual(cmp.recorded_sources("nope"), [])
+
+    def test_body_text_is_ignored(self):
+        text = self._article("alpha", "s1") + "\n  - agent: fake\n    session_id: injected\n"
+        (cmp.CONCEPTS_DIR / "alpha.md").write_text(text, encoding="utf-8")
+        self.assertEqual([s["session_id"] for s in cmp.recorded_sources("alpha")], ["s1"])
+
+    def test_malformed_entry_is_skipped(self):
+        text = ("---\nslug: alpha\nsources:\n  - agent: research\n    session_id: s1\n"
+                "  - agent: research\n    session_id: s2\n    source_log: log\n---\n")
+        (cmp.CONCEPTS_DIR / "alpha.md").write_text(text, encoding="utf-8")
+        self.assertEqual([s["session_id"] for s in cmp.recorded_sources("alpha")], ["s2"])
 
 
 class TestRenderAndWriteConnection(unittest.TestCase):
@@ -921,7 +1002,7 @@ class TestRenderAndWriteConnection(unittest.TestCase):
         self.assertIn("type: connection\n", text)
         self.assertIn("concepts: [alpha, beta]\n", text)
         self.assertIn("shared_session_ids: [sess-1]\n", text)
-        self.assertIn("discovered_via: shared-session\n", text)
+        self.assertIn("discovered_via: recurring-shared-sessions\n", text)
 
     def test_write_creates_file(self):
         target = cmp.write_connection(self._conn(), dry_run=False)
@@ -1055,7 +1136,7 @@ hook_event: SessionEnd
         with patch.object(sys, "argv", ["compile.py", *argv]):
             return cmp.main()
 
-    def test_connections_written_when_promoted_share_session(self):
+    def _promote_all(self):
         gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
 
         def gate_only(*args, **kwargs):
@@ -1068,13 +1149,37 @@ hook_event: SessionEnd
         with patch("compile.subprocess.run", side_effect=gate_only):
             self._run_main(["--no-dry-run", "--no-rich-body", "--no-discord"])
 
-        # 3 unique concepts; all share `shared-sess`. Pairs = 3 (alpha-beta, alpha-gamma, beta-gamma).
+    def test_one_shared_session_writes_no_connections(self):
+        # 3 concepts promoted, all from `shared-sess` only: no pair recurs.
+        self._promote_all()
+        self.assertEqual(len(list(cmp.CONCEPTS_DIR.glob("*.md"))), 3)
+        self.assertEqual(list(cmp.CONNECTIONS_DIR.glob("*.md")), [])
+
+    def test_connection_written_when_pair_recurs_across_runs(self):
+        # An earlier run promoted both agent-only concepts from `earlier-sess`.
+        # This run re-promotes them from `shared-sess` (archiving the earlier
+        # articles), so the pair now shares two sessions. `shared-concept` has no
+        # earlier provenance, so it links to nothing.
+        cmp.CONCEPTS_DIR.mkdir(parents=True, exist_ok=True)
+        for slug in ("research-only-concept", "content-only-concept"):
+            cand = cmp.ConceptCandidate(
+                slug=slug, summary="s", excerpt="e",
+                sources=[{"agent": "research", "session_id": "earlier-sess",
+                          "transcript_sha256": "h",
+                          "source_log": "daily-logs/research/2026-05-08.md", "session_n": 1}],
+            )
+            (cmp.CONCEPTS_DIR / f"{slug}.md").write_text(
+                cmp._frontmatter(cand, cmp.PROMOTE, "ok", []) + f"\n# {slug}\n", encoding="utf-8")
+
+        self._promote_all()
+
         connections = list(cmp.CONNECTIONS_DIR.glob("*.md"))
-        self.assertEqual(len(connections), 3)
-        for path in connections:
-            text = path.read_text(encoding="utf-8")
-            self.assertIn("type: connection", text)
-            self.assertIn("shared-sess", text)
+        self.assertEqual([p.name for p in connections],
+                         ["content-only-concept--research-only-concept.md"])
+        text = connections[0].read_text(encoding="utf-8")
+        self.assertIn("type: connection", text)
+        self.assertIn("shared_session_ids: [earlier-sess, shared-sess]", text)
+        self.assertIn("discovered_via: recurring-shared-sessions", text)
 
     def test_no_connections_flag_skips_connection_writing(self):
         gate_response = json.dumps({"verdict": "PROMOTE", "reason": "ok", "checks_triggered": []})
