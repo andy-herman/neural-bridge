@@ -49,7 +49,7 @@ class TestTemplates(unittest.TestCase):
             "scripts/discord_bot/prompts/mention_v1.md": ["{agent_definition}", "{discord_history}", "{message}"],
             "scripts/publish/prompts/linkedin_v1.md": ["{voice_corpus}", "{blog_body}"],
             "scripts/prompts/filing_gate_v1.md": ["{session_excerpt}"],
-            "scripts/prompts/concept_writer_v1.md": ["{session_excerpt}"],
+            "scripts/prompts/concept_writer_v2.md": ["{session_excerpt}"],
         }
         for rel, slots in once.items():
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
